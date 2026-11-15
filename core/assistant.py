@@ -17,6 +17,9 @@ from PIL import Image
 
 from config import (
     GEMINI_API_KEY,
+    GOOGLE_GENAI_USE_VERTEXAI,
+    GOOGLE_CLOUD_PROJECT,
+    GOOGLE_CLOUD_LOCATION,
     GEMINI_MODEL,
     SCREEN_CAPTURE_INTERVAL,
     ENABLE_CAMERA,
@@ -42,7 +45,20 @@ from core.profile import get_profile_summary
 
 class Assistant:
     def __init__(self):
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        if GOOGLE_GENAI_USE_VERTEXAI:
+            if GOOGLE_CLOUD_PROJECT or not GEMINI_API_KEY:
+                self.client = genai.Client(
+                    vertexai=True,
+                    project=GOOGLE_CLOUD_PROJECT or None,
+                    location=GOOGLE_CLOUD_LOCATION or None,
+                )
+            else:
+                self.client = genai.Client(
+                    vertexai=True,
+                    api_key=GEMINI_API_KEY,
+                )
+        else:
+            self.client = genai.Client(api_key=GEMINI_API_KEY, http_options={'api_version': 'v1beta'})
         
         # Détection de la caméra
         self._camera = None
@@ -524,13 +540,22 @@ Ce profil survit aux redémarrages — c'est ta mémoire long terme.
             print(f"[Vision] Mode : {mode} | Réponse : {suggestion[:60]}...")
 
             # Filtrage de la verbosité (seuil de confiance minimum)
-            clean_sugg = suggestion.strip().rstrip('.')
-            if clean_sugg.lower() in ["rien", "rien de particulier"] or len(clean_sugg) < 5:
+            clean_sugg = suggestion.strip().rstrip('.!').strip().lower()
+            ignored_phrases = {
+                "rien",
+                "rien de particulier",
+                "rien à signaler",
+                "rien a signaler",
+                "tout va bien",
+                "ras",
+                "aucune suggestion",
+            }
+            if clean_sugg in ignored_phrases or len(clean_sugg) < 5:
                 return
 
         except Exception as e:
-            suggestion = f"Erreur API : {e}"
             print(f"[Gemini Vision] Erreur : {e}")
+            return
 
         self._add_to_memory("vision", suggestion)
         self._update_suggestion(suggestion)
@@ -678,11 +703,11 @@ Ce profil survit aux redémarrages — c'est ta mémoire long terme.
                             if self.on_transcript_callback:
                                 self.on_transcript_callback(text)
                             
-                            # Détection du Wake Word vocal "omi"
-                            if "omi" in text.lower():
-                                lower_text = text.lower()
-                                idx = lower_text.find("omi")
-                                query = text[idx + 3:].strip().lstrip(",").strip()
+                            # Détection du Wake Word vocal ("jarvis" ou "omi") par mot entier
+                            import re
+                            m = re.search(r"\b(?:jarvis|omi)\b[,:\s]*(.*)", text, flags=re.IGNORECASE)
+                            if m:
+                                query = m.group(1).strip()
                                 if query and self.on_vocal_query_callback:
                                     self.on_vocal_query_callback(query)
                 except Exception as e:
@@ -800,7 +825,7 @@ Ce profil survit aux redémarrages — c'est ta mémoire long terme.
     # Chat interactif (depuis le popup)
     # ─────────────────────────────────────────────
 
-    def chat(self, user_message: str, is_system: bool = False, status_callback=None) -> str:
+    def chat(self, user_message: str, is_system: bool = False, status_callback=None, _depth: int = 0) -> str:
         try:
             self._trim_session_if_needed(session_type="chat")
             
@@ -853,10 +878,17 @@ Ce profil survit aux redémarrages — c'est ta mémoire long terme.
 
             if "[UPDATE_SCREEN]" in text_response:
                 clean_text = text_response.replace("[UPDATE_SCREEN]", "").strip()
+                if _depth >= 3:
+                    return clean_text or "Limite de rafraîchissement d'écran atteinte."
                 if clean_text and self.on_suggestion_callback:
                     self._update_suggestion(f"⚙️ {clean_text}")
                 if status_callback: status_callback(f"Action : {clean_text}...")
-                next_step = self.chat("Voici l'écran mis à jour. Continue ton action.", is_system=True, status_callback=status_callback)
+                next_step = self.chat(
+                    "Voici l'écran mis à jour. Continue ton action.",
+                    is_system=True,
+                    status_callback=status_callback,
+                    _depth=_depth + 1,
+                )
                 return f"{clean_text}\n{next_step}".strip()
 
             return text_response

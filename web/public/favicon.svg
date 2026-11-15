@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Logo OMI">
+  <defs>
+    <linearGradient id="jarvis-bg" x1="4" y1="4" x2="60" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="55%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#1D4ED8" />
+    </linearGradient>
+    <linearGradient id="jarvis-accent" x1="12" y1="12" x2="52" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#BAE6FD" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="13" fill="url(#jarvis-bg)" />
+  <rect x="4.75" y="4.75" width="54.5" height="54.5" rx="12.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.5" />
+  <g transform="translate(4 4) scale(0.875)">
+    <path
+      d="M 46.8 20.4 A 19 19 0 1 0 50.6 35.8"
+      fill="none"
+      stroke="url(#jarvis-accent)"
+      stroke-width="3.5"
+      stroke-linecap="round"
+    />
+    <path
+      d="M 22.5 22.5 A 13.5 13.5 0 0 1 41.5 41.5"
+      fill="none"
+      stroke="#E0F2FE"
+      stroke-opacity="0.7"
+      stroke-width="2"
+      stroke-linecap="round"
+    />
+    <circle cx="32" cy="32" r="5.5" fill="#FFFFFF" />
+  </g>
+</svg>

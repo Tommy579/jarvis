@@ -1,0 +1,25 @@
+servers:
+  notion:
+    enabled: false
+    transport: stdio
+    command: "npx"
+    args: ["-y", "@notionhq/notion-mcp-server"]
+    default_risk: 2
+  github:
+    enabled: false
+    transport: stdio
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    default_risk: 2
+  home_assistant:
+    enabled: false
+    transport: sse
+    url: "http://homeassistant.local:8123/mcp_server/sse"
+    default_risk: 2
+
+outbound_server:
+  enabled: true
+  expose_tools:
+    - memory_search
+    - wiki_read
+    - context_summary

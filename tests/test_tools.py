@@ -1,20 +1,16 @@
 import os
-import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
-from pathlib import Path
-import tempfile
-
-# S'assurer que le dossier racine est dans le path
-sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
 from core.tools import (
+    get_active_app_name,
     list_directory,
     read_file,
+    send_message_with_retry,
     write_file,
-    get_active_app_name,
-    send_message_with_retry
 )
+
 
 class TestTools(unittest.TestCase):
     def test_list_directory_valid(self):
@@ -35,7 +31,7 @@ class TestTools(unittest.TestCase):
             with patch.dict(os.environ, {"USERPROFILE": tmpdir}):
                 write_res = write_file(test_file, "hello world")
                 self.assertIn("status", write_res)
-                
+
                 read_res = read_file(test_file)
                 self.assertEqual(read_res.get("content"), "hello world")
 
@@ -56,15 +52,15 @@ class TestTools(unittest.TestCase):
                 read_res = read_file(test_file)
                 self.assertEqual(read_res.get("content"), "hello")
 
-    @patch('psutil.Process')
+    @patch("psutil.Process")
     def test_get_active_app_name_linux(self, mock_process):
-        with patch('os.name', 'posix'):
-            with patch('subprocess.check_output') as mock_check_output:
+        with patch("os.name", "posix"):
+            with patch("subprocess.check_output") as mock_check_output:
                 mock_check_output.return_value = b" 12345 \n"
                 mock_proc_instance = MagicMock()
                 mock_proc_instance.name.return_value = "my_test_app"
                 mock_process.return_value = mock_proc_instance
-                
+
                 app_name = get_active_app_name()
                 self.assertEqual(app_name, "my_test_app")
                 mock_check_output.assert_called()
@@ -74,30 +70,49 @@ class TestTools(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = "Hello back"
         mock_session.send_message.return_value = mock_response
-        
+
         res = send_message_with_retry(mock_session, "Hi")
         self.assertEqual(res, mock_response)
         mock_session.send_message.assert_called_once_with("Hi")
 
-    @patch('time.sleep')
+    @patch("time.sleep")
     def test_send_message_with_retry_quota_error(self, mock_sleep):
         mock_session = MagicMock()
         mock_response = MagicMock()
         mock_response.text = "Success after retry"
-        mock_session.send_message.side_effect = [Exception("Resource exhausted (429)"), mock_response]
-        
+        mock_session.send_message.side_effect = [
+            Exception("Resource exhausted (429)"),
+            mock_response,
+        ]
+
         res = send_message_with_retry(mock_session, "Hi", max_retries=3)
         self.assertEqual(res, mock_response)
         self.assertEqual(mock_session.send_message.call_count, 2)
         mock_sleep.assert_called_once_with(1.0)
 
-    @patch('time.sleep')
+    @patch("time.sleep")
     def test_send_message_with_retry_max_retries_reached(self, mock_sleep):
         mock_session = MagicMock()
         mock_session.send_message.side_effect = Exception("Resource exhausted (429)")
-        
+
         with self.assertRaises(Exception) as context:
             send_message_with_retry(mock_session, "Hi", max_retries=3)
-            
+
         self.assertIn("429", str(context.exception))
         self.assertEqual(mock_session.send_message.call_count, 3)
+
+
+def test_execute_command_requires_confirmation(monkeypatch):
+    import core.tools as tools
+
+    called = {"n": 0}
+
+    def fake_run(*a, **k):
+        called["n"] += 1
+        raise AssertionError("subprocess.run ne doit pas etre appele sans confirmation")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(tools, "confirm_action", lambda *a, **k: False, raising=False)
+    out = tools.execute_command("rm -rf /tmp/inexistant")
+    assert called["n"] == 0
+    assert "refus" in str(out).lower() or "confirm" in str(out).lower()

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="fr" data-theme="jarvis-blue">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Applique la preference d'apparence avant le premier rendu (evite le flash).
+      try {
+        var s = localStorage.getItem("omi_color_scheme");
+        if (s === "light" || s === "dark") {
+          document.querySelector('meta[name="color-scheme"]').content = s;
+        }
+        if (localStorage.getItem("omi_accent") === "amber") {
+          document.documentElement.setAttribute("data-theme", "amber");
+        }
+      } catch (e) {}
+    </script>
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f7fa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111418" />
+    <title>OMI 2.0 | Assistant personnel</title>
+    <meta
+      name="description"
+      content="Interface web temps réel d'OMI 2.0 : sphère vocale, conversation, approbations, mémoire et réglages des modèles."
+    />
+    <meta property="og:title" content="OMI 2.0 | Assistant personnel" />
+    <meta
+      property="og:description"
+      content="Assistant personnel local multi-modèles avec sphère vocale et contrôle local des données."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/favicon.svg" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="OMI 2.0 | Assistant personnel" />
+    <meta
+      name="twitter:description"
+      content="Interface temps réel, mémoire éditable et supervision des outils."
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

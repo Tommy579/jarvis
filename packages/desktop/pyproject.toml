@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omi-desktop"
+version = "2.0.0"
+description = "Agent de bureau OMI 2.0 (plateformes Linux/Windows, icone KDE StatusNotifierItem)"
+requires-python = ">=3.12"
+dependencies = [
+    "omi-shared",
+    "psutil>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["omi_desktop*"]

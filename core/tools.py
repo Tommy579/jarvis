@@ -33,9 +33,16 @@ try:
 except ImportError:
     comtypes = None
 
-from config import SCREEN_CAPTURE_SIZE, ALLOW_AUTONOMOUS_UI_INTERACTION
+from config import SCREEN_CAPTURE_SIZE, ALLOW_AUTONOMOUS_UI_INTERACTION, ALLOW_DANGEROUS_TOOLS
 from core.database import DB_PATH, query_transcripts, search_transcripts
 from core.profile import load_profile, save_profile
+import re
+import shutil
+
+
+def _allow_unsafe_legacy_tools() -> bool:
+    """Indique si les outils legacy dangereux sont explicitement autorises."""
+    return os.environ.get("OMI_ALLOW_UNSAFE_LEGACY_TOOLS") == "1"
 
 def get_user_profile() -> dict:
     """Lit le profil complet de l'utilisateur — tout ce qu'OMI a appris sur lui jusqu'ici.
@@ -174,17 +181,30 @@ def read_file(file_path: str):
     except Exception as e:
         return {"error": str(e)}
 
+_FORBIDDEN_WRITE_PREFIXES = ("/etc", "/usr", "/bin", "/sbin", "/boot", "/root", "/proc", "/sys", "C:\\Windows")
+_FORBIDDEN_WRITE_PARTS = {".ssh", ".gnupg", ".env"}
+
 def write_file(file_path: str, content: str, force: bool = False):
     """Écrit ou modifie un fichier texte.
     
-    Par défaut, restreint l'écriture au dossier utilisateur (USERPROFILE).
-    Passe force=True pour écrire ailleurs (chemins système, etc.) — à utiliser avec précaution.
+    Par défaut, restreint l'écriture au dossier utilisateur.
     """
     try:
         path = Path(file_path).expanduser().resolve()
-        user_root = Path(os.environ.get("USERPROFILE", os.path.expanduser("~"))).resolve()
-        
-        if not force and not str(path).startswith(str(user_root)):
+        user_root = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~")).resolve()
+        path_str = str(path)
+
+        if any(path_str.startswith(prefix) for prefix in _FORBIDDEN_WRITE_PREFIXES) or (
+            set(path.parts) & _FORBIDDEN_WRITE_PARTS
+        ):
+            return {"error": f"Écriture refusée dans le chemin système ou sensible '{path}'."}
+
+        if force and os.environ.get("OMI_BLOCK_FORCE_WRITE") == "1" and not _allow_unsafe_legacy_tools():
+            return {
+                "error": "Écriture hors dossier utilisateur (force=True) désactivée par sécurité dans le code legacy."
+            }
+
+        if not force and not path_str.startswith(str(user_root)):
             return {
                 "error": f"Écriture refusée hors du dossier utilisateur ({user_root}). "
                          f"Utilise force=True si tu es certain de vouloir écrire dans '{path}'."
@@ -205,8 +225,8 @@ def search_files(query: str, root_dir: str = None):
             conn_str = "Driver={Search.CollatorDSO};Extended Properties='Application=Windows';"
             with pyodbc.connect(conn_str, autocommit=True) as conn:
                 with conn.cursor() as cursor:
-                    sql = f"SELECT TOP 50 System.ItemPathDisplay FROM SystemIndex WHERE System.FileName LIKE '%{query}%'"
-                    cursor.execute(sql)
+                    sql = "SELECT TOP 50 System.ItemPathDisplay FROM SystemIndex WHERE System.FileName LIKE ?"
+                    cursor.execute(sql, (f"%{query}%",))
                     for row in cursor.fetchall():
                         matches.append(row[0])
             if matches:
@@ -216,7 +236,8 @@ def search_files(query: str, root_dir: str = None):
 
     try:
         if not root_dir:
-            user_dirs = [os.path.join(os.environ['USERPROFILE'], d) for d in ['Documents', 'Desktop', 'Downloads']]
+            home_dir = os.environ.get('USERPROFILE') or os.path.expanduser('~')
+            user_dirs = [os.path.join(home_dir, d) for d in ['Documents', 'Desktop', 'Downloads']]
             user_dirs.append(os.getcwd())
         else:
             user_dirs = [root_dir]
@@ -290,8 +311,21 @@ def inspect_image(file_path: str):
     except Exception as e:
         return {"error": str(e)}
 
+def confirm_action(description: str) -> bool:
+    """Confirmation explicite obligatoire avant toute action destructive."""
+    try:
+        answer = input(f"[OMI] Confirmer : {description} ? [o/N] ")
+    except (EOFError, OSError):
+        return False
+    return answer.strip().lower() in ("o", "oui", "y", "yes")
+
+
 def execute_command(command: str):
-    """Exécute une commande système (Prudence !)."""
+    """Exécute une commande système (confirmation explicite requise)."""
+    if not confirm_action(f"executer la commande shell : {command}"):
+        return {"ok": False, "error": "Execution refusee : confirmation absente."}
+    if not _allow_unsafe_legacy_tools():
+        return {"ok": False, "error": "execute_command désactivé par sécurité dans le code legacy (confirmation requise)."}
     try:
         creation_flags = 0
         if platform.system() == "Windows":
@@ -462,7 +496,9 @@ def list_processes(limit: int = 20, sort_by: str = 'cpu_percent'):
         return {"error": str(e)}
 
 def kill_process(pid: int):
-    """Termine un processus par son PID."""
+    """Termine un processus par son PID (désactivé par défaut par sécurité)."""
+    if not _allow_unsafe_legacy_tools():
+        return {"error": "kill_process désactivé par sécurité dans le code legacy."}
     try:
         p = psutil.Process(pid)
         name = p.name()
@@ -560,43 +596,43 @@ def get_windows_event_logs(log_type: str = "System", count: int = 10):
     except Exception as e:
         return {"error": str(e)}
 
-TOOLS_LIST = [
-    list_directory, 
-    read_file, 
-    write_file,
-    search_files, 
-    inspect_image, 
-    execute_command, 
-    get_active_window_info,
-    mouse_click,
-    type_text,
-    press_key,
-    query_transcript_history,
-    open_url,
-    search_web,
-    wait_for_ui,
-    get_ui_tree,
-    background_interact,
-    control_itunes,
-    get_system_stats,
-    list_processes,
-    get_process_details,
-    kill_process,
-    get_clipboard,
-    set_clipboard,
-    get_network_connections,
-    get_machine_info,
-    get_windows_event_logs,
-    send_notification,
-    get_user_profile,
-    update_user_profile
-]
+def _build_tools_list() -> list:
+    tools = [
+        list_directory,
+        read_file,
+        write_file,
+        search_files,
+        inspect_image,
+        get_active_window_info,
+        query_transcript_history,
+        open_url,
+        search_web,
+        wait_for_ui,
+        get_system_stats,
+        list_processes,
+        get_process_details,
+        get_clipboard,
+        get_network_connections,
+        get_machine_info,
+        send_notification,
+        get_user_profile,
+        update_user_profile,
+    ]
+    if os.name == "nt":
+        tools.extend([get_ui_tree, background_interact, control_itunes, get_windows_event_logs])
+    if ALLOW_AUTONOMOUS_UI_INTERACTION:
+        tools.extend([mouse_click, type_text, press_key])
+    if ALLOW_DANGEROUS_TOOLS:
+        tools.extend([execute_command, kill_process, set_clipboard])
+    return tools
+
+
+TOOLS_LIST = _build_tools_list()
 
 
 def get_active_app_name() -> str:
-    """Récupère de façon cross-platform le nom exact de l'exécutable actif."""
+    """Récupère de façon cross-platform (Windows, X11, KDE Wayland) le nom de l'exécutable actif."""
     try:
-        import psutil
         if os.name == 'nt':
             try:
                 import win32gui
@@ -609,14 +645,17 @@ def get_active_app_name() -> str:
             except Exception:
                 pass
         else:
-            try:
-                import subprocess
-                pid_out = subprocess.check_output(["xdotool", "getactivewindow", "getwindowpid"], stderr=subprocess.DEVNULL)
-                pid = int(pid_out.strip())
-                if pid:
-                    return psutil.Process(pid).name()
-            except Exception:
-                pass
+            for cmd in (
+                ["xdotool", "getactivewindow", "getwindowpid"],
+                ["kdotool", "getactivewindow", "getwindowpid"],
+            ):
+                try:
+                    pid_out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=1)
+                    pid = int(pid_out.strip())
+                    if pid:
+                        return psutil.Process(pid).name()
+                except Exception:
+                    continue
     except Exception:
         pass
     return "Unknown"

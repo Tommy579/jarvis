@@ -1,0 +1,17 @@
+{
+  "name": "OMI 2.0",
+  "short_name": "OMI",
+  "description": "Assistant personnel permanent avec sphere vocale 3D et memoire editable.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111316",
+  "theme_color": "#111316",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

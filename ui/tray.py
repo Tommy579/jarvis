@@ -105,12 +105,20 @@ def rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
     return canvas.create_polygon(pts, smooth=True, **kwargs)
 
 
-def draw_omi_logo(canvas, cx, cy, size=10, color="#FFFFFF"):
-    """Dessine le logo OMI (3 cercles concentriques) centré en (cx, cy)."""
-    r1, r2, r3 = size, size * 0.55, size * 0.25
-    canvas.create_oval(cx-r1, cy-r1, cx+r1, cy+r1, fill=color, outline="")
-    canvas.create_oval(cx-r2, cy-r2, cx+r2, cy+r2, fill=canvas["bg"], outline="")
-    canvas.create_oval(cx-r3, cy-r3, cx+r3, cy+r3, fill=color, outline="")
+def draw_omi_logo(canvas, cx, cy, size=10, color="#38BDF8"):
+    """Dessine le logo Jarvis (anneau orbital + noyau central) centré en (cx, cy)."""
+    r1, r2, r3 = size, size * 0.68, size * 0.28
+    w1 = max(2, int(round(size * 0.2)))
+    w2 = max(1, int(round(size * 0.12)))
+    canvas.create_arc(
+        cx - r1, cy - r1, cx + r1, cy + r1,
+        start=45, extent=285, style="arc", outline=color, width=w1,
+    )
+    canvas.create_arc(
+        cx - r2, cy - r2, cx + r2, cy + r2,
+        start=225, extent=165, style="arc", outline="#67E8F9", width=w2,
+    )
+    canvas.create_oval(cx - r3, cy - r3, cx + r3, cy + r3, fill=color, outline="")
 
 
 class HoverButton(tk.Label):
@@ -306,14 +314,18 @@ class PopupWindow:
         win.resizable(False, False)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        win.configure(bg=CHROMA)
-        win.attributes("-transparentcolor", CHROMA)
+        if winreg is not None:
+            win.configure(bg=CHROMA)
+            win.attributes("-transparentcolor", CHROMA)
+        else:
+            win.configure(bg=t["bg"])
 
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"{W}x{H}+{sw - W - 16}+{sh - H - 52}")
 
         # Canvas principal
-        root_canvas = tk.Canvas(win, width=W, height=H, bg=CHROMA,
+        canvas_bg = CHROMA if winreg is not None else t["bg"]
+        root_canvas = tk.Canvas(win, width=W, height=H, bg=canvas_bg,
                                 highlightthickness=0, bd=0)
         root_canvas.place(x=0, y=0)
         rounded_rect(root_canvas, 0, 0, W, H, R,
@@ -378,6 +390,7 @@ class PopupWindow:
             self._header_btns.append(btn)
 
         self.pause_label = self._header_btns[2]  # référence pour toggle_pause
+        self.trans_btn = self._header_btns[3]    # référence pour toggle_transcripts
 
         # Mode badge (en bas à droite de la titlebar)
         self._mode_canvas = tk.Canvas(root_canvas, width=60, height=14,
@@ -784,12 +797,16 @@ class PopupWindow:
 # ─────────────────────────────────────────────────────────
 
 def create_icon_image():
+    icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "omi_icon.png")
+    if os.path.isfile(icon_path):
+        return Image.open(icon_path).convert("RGBA").resize((64, 64), Image.LANCZOS)
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse([4, 4, 60, 60], fill="#111111")
-    draw.ellipse([20, 20, 44, 44], fill="#FFFFFF")
-    draw.ellipse([28, 28, 36, 36], fill="#111111")
+    draw.rounded_rectangle([2, 2, 61, 61], radius=15, fill="#0F141B")
+    draw.arc([10, 10, 54, 54], start=25, end=315, fill="#38BDF8", width=4)
+    draw.arc([18, 18, 46, 46], start=210, end=45, fill="#67E8F9", width=2)
+    draw.ellipse([26, 26, 38, 38], fill="#38BDF8")
     return img
 
 

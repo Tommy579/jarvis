@@ -4,15 +4,35 @@ Modifie ce fichier pour personnaliser le comportement
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Charger les variables d'environnement depuis le fichier .env
+BASE_DIR = Path(__file__).resolve().parent
+# Charger les variables d'environnement depuis le fichier .env du projet
+load_dotenv(BASE_DIR / ".env")
 load_dotenv()
 
-# === CLÉS API ===
+# === CLÉS API & FOURNISSEURS ===
 # Clé Gemini GRATUITE sur : https://aistudio.google.com/apikey
-# La clé est lue depuis le fichier .env (non partagé sur Git) ou une variable d'environnement
+# Clé OpenRouter sur : https://openrouter.ai/keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GOOGLE_GENAI_USE_VERTEXAI = (
+    os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() in ("true", "1", "yes")
+    or GEMINI_API_KEY.startswith("AQ.")
+)
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter" if OPENROUTER_API_KEY else "gemini")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash-1017")
+OPENROUTER_FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "OPENROUTER_FALLBACK_MODELS",
+        "z-ai/glm-5.3,minimax/minimax-m3,google/gemini-3.5-flash-lite",
+    ).split(",")
+    if m.strip()
+]
 
 # === CAPTURE CAMÉRA ===
 # Active/désactive l'accès à la caméra
@@ -28,10 +48,13 @@ AUDIO_SEGMENT_DURATION = 10
 ENABLE_MICROPHONE = True
 
 # === COMPORTEMENT IA ===
-# Modèle Gemini à utiliser
-# On utilise le 3.1 Lite Preview qui a souvent des quotas plus larges
-# que les versions stables 2.x saturées.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "models/gemini-3.1-flash-lite")
+# Modèle Gemini à utiliser (3.5 Flash-Lite ou 4 Hydrogen)
+_raw_gemini_model = os.getenv("GEMINI_MODEL", "models/gemini-3.5-flash-lite")
+GEMINI_MODEL = (
+    _raw_gemini_model.removeprefix("models/")
+    if GOOGLE_GENAI_USE_VERTEXAI
+    else _raw_gemini_model
+)
 
 # Persona et objectif choisis lors de l'installation
 # Modifiable directement dans .env pour changer le comportement d'OMI sans réinstaller
@@ -40,6 +63,15 @@ OMI_OBJECTIVE = os.getenv("OMI_OBJECTIVE", "")
 
 # Autoriser l'assistant à utiliser le clavier/souris sans demande explicite
 ALLOW_AUTONOMOUS_UI_INTERACTION = False
+
+# Autoriser les outils système dangereux (execute_command, kill_process) sans validation
+ALLOW_DANGEROUS_TOOLS = os.getenv("ALLOW_DANGEROUS_TOOLS", "false").lower() == "true"
+
+# Profondeur maximale de récursion pour [UPDATE_SCREEN]
+MAX_UPDATE_SCREEN_DEPTH = 3
+
+# Mots d'activation vocale (détection par mot entier)
+WAKE_WORDS = ("jarvis", "omi")
 
 # Bloc d'objectif personnalisé (défini lors de l'installation ou dans .env)
 _OBJECTIVE_BLOCK = ""

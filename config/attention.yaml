@@ -1,0 +1,34 @@
+quiet_hours:
+  start: "23:00"
+  end: "08:00"
+  timezone: "Europe/Paris"
+
+limits:
+  max_calls_per_day: 3
+  triage_batch_interval_seconds: 300
+  heartbeat_interval_seconds: 1800
+  level3_ack_timeout_seconds: 600
+  level3_quiet_ack_timeout_seconds: 1200
+  level4_retry_interval_seconds: 300
+
+vip_contacts:
+  - name: "Maman"
+    identifiers: ["maman", "mere"]
+    default_urgency: 2
+    urgent_keywords: ["urgent", "rappelle", "probleme", "secours", "hopital"]
+
+deterministic_rules:
+  - id: "server_down"
+    event_type: "probe.failed"
+    min_consecutive_failures: 3
+    urgency: 3
+    reason: "Sonde serveur en echec"
+  - id: "smoke_or_intrusion"
+    event_type: "home.alarm"
+    urgency: 4
+    reason: "Alarme critique domicile"
+  - id: "meeting_soon"
+    event_type: "calendar.upcoming"
+    minutes_before: 15
+    urgency: 2
+    reason: "Reunion imminente"

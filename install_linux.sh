@@ -53,27 +53,31 @@ step "🔧 Checking system dependencies"
 
 MISSING_PKGS=()
 
-command -v python3 &>/dev/null || MISSING_PKGS+=("python3")
-command -v pip3   &>/dev/null || MISSING_PKGS+=("python3-pip")
-python3 -c "import venv" 2>/dev/null || MISSING_PKGS+=("python3-venv")
-command -v git    &>/dev/null || MISSING_PKGS+=("git")
+if command -v apt-get &>/dev/null; then
+    command -v python3 &>/dev/null || MISSING_PKGS+=("python3")
+    command -v pip3   &>/dev/null || MISSING_PKGS+=("python3-pip")
+    python3 -c "import venv" 2>/dev/null || MISSING_PKGS+=("python3-venv")
+    command -v git    &>/dev/null || MISSING_PKGS+=("git")
 
-# Required for audio capture (sounddevice / PortAudio)
-if ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
-    MISSING_PKGS+=("libportaudio2")
-fi
+    # Required for audio capture (sounddevice / PortAudio)
+    if ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+        MISSING_PKGS+=("libportaudio2")
+    fi
 
-# Required for screen capture (mss / X11) and OpenCV
-for lib in libx11-dev libxrandr-dev libgl1; do
-    dpkg -s "$lib" &>/dev/null 2>&1 || MISSING_PKGS+=("$lib")
-done
+    # Required for screen capture (mss / X11) and OpenCV
+    for lib in libx11-dev libxrandr-dev libgl1; do
+        dpkg -s "$lib" &>/dev/null 2>&1 || MISSING_PKGS+=("$lib")
+    done
 
-if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-    warn "Missing system packages: ${MISSING_PKGS[*]}"
-    echo -e "  Installing via apt...\n"
-    sudo apt-get update -qq
-    sudo apt-get install -y "${MISSING_PKGS[@]}"
-    ok "System packages installed"
+    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+        warn "Missing system packages: ${MISSING_PKGS[*]}"
+        echo -e "  Installing via apt...\n"
+        sudo apt-get update -qq
+        sudo apt-get install -y "${MISSING_PKGS[@]}"
+        ok "System packages installed"
+    else
+        ok "All system dependencies present"
+    fi
 else
     ok "All system dependencies present"
 fi
@@ -82,7 +86,7 @@ fi
 step "🐍 Creating Python virtual environment"
 
 if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+    python3 -m venv --system-site-packages "$VENV_DIR"
     ok "Virtual environment created at .venv"
 else
     ok "Virtual environment already exists — skipping"

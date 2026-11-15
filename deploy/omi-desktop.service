@@ -1,0 +1,16 @@
+[Unit]
+Description=OMI 2.0 Desktop Agent (Capteurs KDE Wayland, Voix, Icone StatusNotifierItem)
+After=graphical-session.target plasma-kwin_wayland.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/omi
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=%h/Documents/omi/packages/shared:%h/Documents/omi/packages/core:%h/Documents/omi/packages/desktop
+ExecStart=%h/Documents/omi/.venv/bin/python -m omi_desktop.tray_sni
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

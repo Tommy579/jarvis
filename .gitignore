@@ -23,6 +23,7 @@ wheels/
 
 # Virtual Environment
 venv/
+.venv/
 ENV/
 
 # IDEs
@@ -36,5 +37,25 @@ ENV/
 package-lock.json
 !install.py
 
-# API Keys
+# API Keys & Personal Data
 .env
+*.db
+*.sqlite
+*.sqlite3
+omi_profile.json
+omi-windows/omi_profile.json
+omi-windows/*.db
+omi-data/
+
+# Local artifacts
+node_modules/
+.hermes/
+web/test-results/
+web/playwright-report/
+web/tsconfig.tsbuildinfo
+web/dist/
+*.log
+omi-data/backups/
+**/omi_profile.json
+evals/latest.json
+

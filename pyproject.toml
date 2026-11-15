@@ -1,0 +1,37 @@
+[project]
+name = "omi-workspace"
+version = "2.0.0"
+description = "OMI 2.0 : assistant personnel permanent, multi-fournisseurs et interface web 3D"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "omi-shared",
+    "omi-core",
+    "omi-desktop",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/shared",
+    "packages/core",
+    "packages/desktop",
+]
+
+[tool.uv.sources]
+omi-shared = { workspace = true }
+omi-core = { workspace = true }
+omi-desktop = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["legacy", "web/node_modules", "web/dist", ".venv", "omi-windows"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["packages/shared", "packages/core", "packages/desktop", "."]
+testpaths = ["tests"]

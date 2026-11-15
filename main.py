@@ -28,9 +28,9 @@ from ui.tray import TrayApp
 def main():
     hide_console()
 
-    # Vérification de la clé API avant tout
-    from config import GEMINI_API_KEY
-    if not GEMINI_API_KEY or not GEMINI_API_KEY.startswith("AIza"):
+    # Vérification de la clé API ou de la configuration Vertex AI avant tout
+    from config import GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI
+    if not GOOGLE_GENAI_USE_VERTEXAI and (not GEMINI_API_KEY or GEMINI_API_KEY.strip() in ("", "votre_cle_ici")):
         import tkinter as tk
         from tkinter import messagebox
         root = tk.Tk()
@@ -42,6 +42,9 @@ def main():
             "2. Génère une clé gratuite\n"
             "3. Crée un fichier .env à côté de main.py avec :\n"
             "   GEMINI_API_KEY=ta_clé\n\n"
+            "Ou active Vertex AI via OAuth dans .env :\n"
+            "   GOOGLE_GENAI_USE_VERTEXAI=true\n"
+            "   GOOGLE_CLOUD_PROJECT=ton_projet_gcp\n\n"
             "Puis relance OMI."
         )
         root.destroy()

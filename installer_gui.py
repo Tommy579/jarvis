@@ -18,14 +18,20 @@ ACCENT = "#FFFFFF"
 FG_SEC = "#888888"
 BORDER = "#222222"
 
-def draw_omi_logo_canvas(canvas, cx, cy, size=28, color="#FFFFFF"):
-    """Dessine le logo OMI (cercles concentriques) centré en (cx, cy)."""
-    r1 = size
-    r2 = size * 0.55
-    r3 = size * 0.25
-    canvas.create_oval(cx-r1, cy-r1, cx+r1, cy+r1, fill=color, outline="")
-    canvas.create_oval(cx-r2, cy-r2, cx+r2, cy+r2, fill=BG, outline="")
-    canvas.create_oval(cx-r3, cy-r3, cx+r3, cy+r3, fill=color, outline="")
+def draw_omi_logo_canvas(canvas, cx, cy, size=28, color="#38BDF8"):
+    """Dessine le logo Jarvis (anneau orbital + noyau central) centré en (cx, cy)."""
+    r1, r2, r3 = size, size * 0.68, size * 0.28
+    w1 = max(2, int(round(size * 0.16)))
+    w2 = max(1, int(round(size * 0.10)))
+    canvas.create_arc(
+        cx - r1, cy - r1, cx + r1, cy + r1,
+        start=45, extent=285, style="arc", outline=color, width=w1,
+    )
+    canvas.create_arc(
+        cx - r2, cy - r2, cx + r2, cy + r2,
+        start=225, extent=165, style="arc", outline="#67E8F9", width=w2,
+    )
+    canvas.create_oval(cx - r3, cy - r3, cx + r3, cy + r3, fill=color, outline="")
 
 
 def draw_step_indicator(parent, current_step: int, total_steps: int, bg: str) -> tk.Canvas:
