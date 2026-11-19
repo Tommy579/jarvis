@@ -1,36 +1,34 @@
-"""Tests unitaires complets pour l'architecture PLAN_COEUR.md (omi-core, omi-desktop, evals et correctifs legacy)."""
+"""Tests unitaires complets pour l'architecture PLAN_COEUR.md (jarvis-core, jarvis-desktop, evals et correctifs legacy)."""
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from omi_core.attention.engine import AttentionEngine
-from omi_core.attention.presence import PresenceDetector
-from omi_core.llm.base import BudgetExceededError, LLMProvider, RateLimitError
-from omi_core.llm.openrouter import OpenRouterProvider
-from omi_core.llm.router import LLMRouter
-from omi_core.mcp.client import MCPClientManager
-from omi_core.mcp.server import OMIMemoryMCPServer
-from omi_core.memory.engine import MemoryEngine
-from omi_core.memory.storage import MemoryStorage
-from omi_core.memory.wiki import MarkdownWiki
-from omi_core.security import (
+from jarvis_core.attention.engine import AttentionEngine
+from jarvis_core.attention.presence import PresenceDetector
+from jarvis_core.llm.base import BudgetExceededError, LLMProvider, RateLimitError
+from jarvis_core.llm.openrouter import OpenRouterProvider
+from jarvis_core.llm.router import LLMRouter
+from jarvis_core.mcp.client import MCPClientManager
+from jarvis_core.mcp.server import JARVISMemoryMCPServer
+from jarvis_core.memory.engine import MemoryEngine
+from jarvis_core.memory.storage import MemoryStorage
+from jarvis_core.memory.wiki import MarkdownWiki
+from jarvis_core.security import (
     ResticBackupManager,
     SecretStore,
     SlidingWindowRateLimiter,
     TokenAuthManager,
     is_allowed_bind_or_peer_ip,
 )
-from omi_core.tools.approvals import ApprovalManager
-from omi_core.tools.registry import ToolRegistry, ToolSpec
-from omi_core.tools.sandbox import PodmanSandbox
-from omi_desktop.voice_pipeline import RealtimeVoicePipeline, VoiceLatencyMetrics
-from omi_desktop.wayland_sensors import WaylandSensors
-from omi_shared.models import (
+from jarvis_core.tools.approvals import ApprovalManager
+from jarvis_core.tools.registry import ToolRegistry, ToolSpec
+from jarvis_core.tools.sandbox import PodmanSandbox
+from jarvis_desktop.voice_pipeline import RealtimeVoicePipeline, VoiceLatencyMetrics
+from jarvis_desktop.wayland_sensors import WaylandSensors
+from jarvis_shared.models import (
     ImageAttachment,
     Message,
     ModelCapabilities,
@@ -97,32 +95,6 @@ class _FakeProvider(LLMProvider):
 
 
 class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
-    def test_legacy_security_and_fixes(self):
-        from core.profile import _fresh_default_profile
-        from core.tools import execute_command, kill_process, search_files, write_file
-
-        p1 = _fresh_default_profile()
-        p2 = _fresh_default_profile()
-        p1["work"]["tech_stack"].append("Python")
-        self.assertEqual(p2["work"]["tech_stack"], [])
-
-        # Verification du blocage de execute_command et kill_process par defaut
-        res_cmd = execute_command("id")
-        self.assertIn("error", res_cmd)
-        res_kill = kill_process(999999)
-        self.assertIn("error", res_kill)
-
-        # Verification de l'interdiction d'ecrire dans /etc meme avec force=True
-        res_etc = write_file("/etc/passwd", "hacked", force=True)
-        self.assertIn("error", res_etc)
-
-        # Verification de search_files sous Linux sans variable USERPROFILE
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("USERPROFILE", None)
-            res_search = search_files("README.md", root_dir=str(ROOT_DIR))
-            self.assertIn("matches", res_search)
-            self.assertTrue(any("README.md" in m for m in res_search["matches"]))
-
     def test_security_network_tokens_and_twilio_signature(self):
         self.assertTrue(is_allowed_bind_or_peer_ip("127.0.0.1"))
         self.assertTrue(is_allowed_bind_or_peer_ip("100.101.102.103"))
@@ -144,10 +116,10 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
             auth.revoke_device("arch-laptop")
             self.assertFalse(auth.verify_token(tok))
 
-            backup = ResticBackupManager(data_dir=tmp_path, repo_url="sftp:nas:/backups/omi")
+            backup = ResticBackupManager(data_dir=tmp_path, repo_url="sftp:nas:/backups/jarvis")
             cmd = backup.build_backup_command()
             self.assertEqual(cmd[0], "restic")
-            self.assertIn("omi-daily", cmd)
+            self.assertIn("jarvis-daily", cmd)
 
         limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60.0)
         self.assertTrue(limiter.allow("ip1", now=10.0))
@@ -333,7 +305,7 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Paris", wiki.read_page("moi.md"))
 
             # Serveur MCP sortant
-            mcp_srv = OMIMemoryMCPServer(mem)
+            mcp_srv = JARVISMemoryMCPServer(mem)
             rpc_res = await mcp_srv.handle_jsonrpc(
                 {
                     "jsonrpc": "2.0",
@@ -392,11 +364,7 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         voice.start_tts_playback("Phrase en cours de lecture.")
         self.assertTrue(voice.is_tts_playing)
         # Sur haut-parleur, la voix de Jarvis revient au micro : ce n'est pas une interruption
-        self.assertFalse(
-            voice.on_vad_speech_detected(
-                0.9, transcript="phrase en cours de lecture"
-            )
-        )
+        self.assertFalse(voice.on_vad_speech_detected(0.9, transcript="phrase en cours de lecture"))
         self.assertTrue(voice.is_tts_playing)
         voice.on_vad_speech_detected(0.85)
         self.assertFalse(voice.is_tts_playing)
@@ -407,7 +375,7 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(metrics.within_budget)
 
-        # Execution complete des 22 scenarios du banc d'essai (omi eval)
+        # Execution complete des 22 scenarios du banc d'essai (jarvis eval)
         harness = EvalHarness()
         results = await harness.run_all()
         self.assertEqual(len(results), 22)

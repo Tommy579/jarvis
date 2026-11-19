@@ -5,15 +5,15 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import pytest
 
-from omi_core.attention.engine import AttentionEngine
-from omi_core.attention.presence import PresenceDetector
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.notifications.orders import match_orders, record_order_fired
-from omi_core.notifications.parsing import parse_notification_intent
-from omi_core.notifications.policy import PolicyStore
-from omi_core.tools.notifications import (
+import pytest
+from jarvis_core.attention.engine import AttentionEngine
+from jarvis_core.attention.presence import PresenceDetector
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.notifications.orders import match_orders
+from jarvis_core.notifications.parsing import parse_notification_intent
+from jarvis_core.notifications.policy import PolicyStore
+from jarvis_core.tools.notifications import (
     ListMyOrdersArgs,
     NotificationToolkit,
     NotifyMeArgs,
@@ -21,8 +21,8 @@ from omi_core.tools.notifications import (
     SetNotificationPolicyArgs,
     ShowNotificationPolicyArgs,
 )
-from omi_shared.models import SystemEvent, UrgencyLevel
-from omi_shared.notifications import NotificationOrder, NotificationPolicy
+from jarvis_shared.models import SystemEvent, UrgencyLevel
+from jarvis_shared.notifications import NotificationOrder
 
 
 @pytest.mark.asyncio

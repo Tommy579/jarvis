@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-import pytest
 
-from omi_core.attention.engine import AttentionEngine
-from omi_core.attention.presence import PresenceDetector
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.notifications.policy import PolicyStore
-from omi_shared.models import SystemEvent, UrgencyLevel
-from omi_shared.notifications import NotificationPolicy
+import pytest
+from jarvis_core.attention.engine import AttentionEngine
+from jarvis_core.attention.presence import PresenceDetector
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.notifications.policy import PolicyStore
+from jarvis_shared.models import SystemEvent, UrgencyLevel
+from jarvis_shared.notifications import NotificationPolicy
 
 
 @pytest.mark.asyncio

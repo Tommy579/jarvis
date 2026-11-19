@@ -1,6 +1,6 @@
 import type { ClientWsEvent, ServerWsEvent } from "../types/generated";
 
-export interface OmiWsClientOptions {
+export interface JarvisWsClientOptions {
   url: string;
   token?: string;
   baseDelayMs?: number;
@@ -11,7 +11,7 @@ export interface OmiWsClientOptions {
   WebSocketImpl?: typeof WebSocket;
 }
 
-export class OmiWsClient {
+export class JarvisWsClient {
   private url: string;
   private token?: string;
   private baseDelayMs: number;
@@ -27,7 +27,7 @@ export class OmiWsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedManually = false;
 
-  constructor(options: OmiWsClientOptions) {
+  constructor(options: JarvisWsClientOptions) {
     this.url = options.url;
     this.token = options.token;
     this.baseDelayMs = options.baseDelayMs ?? 400;

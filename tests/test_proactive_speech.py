@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from omi_core.api.server import OmiCoreState, create_app
-from omi_core.attention.engine import AttentionDecision
-from omi_shared.models import NotificationRecord, UrgencyLevel
+from jarvis_core.api.server import JarvisCoreState, create_app
+from jarvis_core.attention.engine import AttentionDecision
+from jarvis_shared.models import NotificationRecord, UrgencyLevel
 
 
 def test_proactive_alert_delivered_over_ws(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    state = OmiCoreState(data_dir=tmp_path)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    state = JarvisCoreState(data_dir=tmp_path)
     runtime = state.ensure_runtime()
     app = create_app(state)
 
@@ -47,8 +47,8 @@ def test_proactive_alert_delivered_over_ws(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_proactive_alert_respects_quiet_hours_for_non_critical(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    state = OmiCoreState(data_dir=tmp_path)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    state = JarvisCoreState(data_dir=tmp_path)
     runtime = state.ensure_runtime()
     app = create_app(state)
 

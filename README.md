@@ -1,54 +1,78 @@
-# OMI 2.0 (Open Mind Interface)
+# JARVIS 2.0 (Open Mind Interface)
 
-Assistant personnel local compose d'un service central Python (`omi-core`), d'une interface web React/TypeScript (`web/`) et d'une couche bureautique (`omi-desktop`).
+Assistant personnel local compose d'un service central Python (`jarvis-core`), d'une interface web React/TypeScript (`web/`) et d'une couche bureautique (`jarvis-desktop`).
+
+**Installation guidee (Linux, Windows, executable) : [INSTALL.md](INSTALL.md)**
 
 ## Architecture
 
-- `packages/shared/` : modeles Pydantic v2, protocole WebSocket (`omi_shared.ws_protocol`) et generateur de types TypeScript.
-- `packages/core/` : API FastAPI + WebSocket, runtime d'execution (`omi_core.runtime`), memoire SQLite unifiee (`omi.db` + FTS5) + wiki Markdown, boucle agent en streaming, approbations de risque et routeur multi-modeles (OpenRouter, Gemini).
+- `packages/shared/` : modeles Pydantic v2, protocole WebSocket (`jarvis_shared.ws_protocol`) et generateur de types TypeScript.
+- `packages/core/` : API FastAPI + WebSocket, runtime d'execution (`jarvis_core.runtime`), memoire SQLite unifiee (`jarvis.db` + FTS5) + wiki Markdown, boucle agent en streaming, approbations de risque, routeur multi-modeles (OpenRouter, Gemini, Ollama), objectifs supervises et routines planifiees (`jarvis_core.scheduler`).
 - `packages/desktop/` : integration bureau Linux/Windows, capture camera/ecran et pipeline vocal.
 - `web/` : application React/Vite avec sphere vocale 3D (`VoiceSphere` en chargement differe) et repli Canvas 2D.
 - `evals/` : banc d'essai reproductible (`EvalHarness`).
 - `legacy/` : reference historique conservee hors du flux principal.
 
-## Configuration
-
-Creez un fichier `.env` a la racine avec un jeton d'acces pour l'API et au moins une cle LLM :
+## Installation
 
 ```bash
-OMI_API_TOKEN=change-me-local-token
+make install        # uv sync (Python 3.12) + npm install
+make install-full   # ajoute les extras voice (faster-whisper, onnxruntime) et memory (fastembed)
+```
+
+Les dependances sont declarees dans les trois `pyproject.toml` du workspace : une installation
+neuve n'a besoin d'aucun autre fichier de dependances.
+
+## Configuration
+
+Creez un fichier `.env` a la racine (ou copiez `.env.example`) et renseignez au moins une cle LLM :
+
+```bash
 OPENROUTER_API_KEY=...
 # ou GEMINI_API_KEY=...
 ```
 
-Sans `OMI_API_TOKEN`, le serveur refuse de demarrer sauf si `OMI_ALLOW_INSECURE=1` est defini explicitement pour un usage local sur loopback.
+Le service exige un jeton d'acces (`JARVIS_API_TOKEN`) : sans lui il refuse de demarrer, sauf si
+`JARVIS_ALLOW_INSECURE=1` est defini explicitement pour un usage local sur loopback.
+`scripts/launch_jarvis_v2.sh` genere automatiquement le jeton, l'ecrit dans `.env` et l'injecte
+dans l'interface, qui le memorise ensuite pour la session du navigateur. Pour un lancement manuel
+sans ce script, l'interface affiche un ecran de saisie du jeton au premier appel refuse (401).
 
 ## Demarrage local
 
-Backend (`omi-core`) :
+Tout-en-un (service + fenetre Chromium) :
 
 ```bash
-PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m uvicorn omi_core.api.server:app --host 127.0.0.1 --port 8765
+make run
 ```
 
-Interface web :
+Backend seul (`jarvis-core`) :
 
 ```bash
-cd web && npm install && npm run dev
+PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765
+```
+
+Interface web en developpement :
+
+```bash
+cd web && npm run dev
 ```
 
 Interface en ligne de commande :
 
 ```bash
-omi eval --save
-omi chat --model deepseek/deepseek-v4.1-flash-1017
+jarvis eval --save
+jarvis chat --model deepseek/deepseek-v4.1-flash-1017
 ```
 
 ## Tests et qualite
 
 ```bash
 PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m pytest tests -q
-env -u PYTHONPATH .venv/bin/python -m ruff check packages tests
-env -u PYTHONPATH .venv/bin/python -m ruff format --check packages tests
+env -u PYTHONPATH .venv/bin/python -m ruff check packages tests evals
+env -u PYTHONPATH .venv/bin/python -m ruff format --check packages tests evals
 cd web && npm run build && npx vitest run && npx playwright test
 ```
+
+La CI ajoute un job d'installation propre : les paquets sont installes dans un venv vierge avec
+leurs seules dependances declarees, puis `jarvis_core.api.server` doit s'importer.

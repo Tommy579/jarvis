@@ -8,6 +8,16 @@ import type { SensitivityLevel } from "../types/generated";
 
 type TabId = "facts" | "wiki" | "people" | "review" | "onboarding";
 
+const CATEGORY_LABELS: Record<string, string> = {
+  general: "Général",
+  identite: "Identité",
+  travail: "Travail",
+  rythme: "Rythme",
+  gouts: "Goûts",
+  sante: "Santé",
+  finances: "Finances",
+};
+
 export function MemoryOnboardingPage() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<TabId>("facts");
@@ -98,7 +108,7 @@ export function MemoryOnboardingPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `omi-memory.${format}`;
+      a.download = `jarvis-memory.${format}`;
       a.click();
       URL.revokeObjectURL(url);
       toast.ok(`Export ${format.toUpperCase()} téléchargé.`);
@@ -112,9 +122,9 @@ export function MemoryOnboardingPage() {
   const effectiveWikiText = wikiDraft ?? activeWikiPage?.content ?? "";
 
   return (
-    <section className="page" aria-label="Memoire et Onboarding">
+    <section className="page" aria-label="Mémoire et Onboarding">
       <PageHeader
-        title="Memoire et Onboarding"
+        title="Mémoire et Onboarding"
         description="Faits retenus par Jarvis, wiki personnel en Markdown, proches et questionnaire de profil."
         actions={
           <>
@@ -152,11 +162,12 @@ export function MemoryOnboardingPage() {
       {tab === "facts" && (
         <div className="stack">
           <div className="card stack">
+            <div className="card__subhead">Ajouter un fait</div>
             <form className="add-fact" onSubmit={handleAddFact}>
               <input
                 type="text"
                 className="input"
-                placeholder="Ex : Prefere les reponses concises le matin"
+                placeholder="Ex : Préfère les réponses concises le matin"
                 aria-label="Nouveau fait"
                 value={newFactText}
                 onChange={(e) => setNewFactText(e.target.value)}
@@ -167,12 +178,12 @@ export function MemoryOnboardingPage() {
                 value={newFactCat}
                 onChange={(e) => setNewFactCat(e.target.value)}
               >
-                <option value="general">général</option>
-                <option value="identite">identité</option>
-                <option value="travail">travail</option>
-                <option value="gouts">goûts</option>
-                <option value="sante">santé</option>
-                <option value="finances">finances</option>
+                <option value="general">Général</option>
+                <option value="identite">Identité</option>
+                <option value="travail">Travail</option>
+                <option value="gouts">Goûts</option>
+                <option value="sante">Santé</option>
+                <option value="finances">Finances</option>
               </select>
               <select
                 className="select"
@@ -180,55 +191,56 @@ export function MemoryOnboardingPage() {
                 value={newFactSens}
                 onChange={(e) => setNewFactSens(e.target.value as SensitivityLevel)}
               >
-                <option value="normal">normal</option>
-                <option value="privé">privé</option>
-                <option value="très privé">très privé</option>
+                <option value="normal">Normal</option>
+                <option value="privé">Privé</option>
+                <option value="très privé">Très privé</option>
               </select>
-              <button type="submit" className="btn btn--primary">
+              <button type="submit" className="btn btn--primary" disabled={!newFactText.trim()}>
                 <Icon name="plus" size={16} />
                 Ajouter
               </button>
             </form>
-
-            <div className="filters">
-              <input
-                type="search"
-                className="input input--sm"
-                placeholder="Rechercher un fait…"
-                aria-label="Rechercher un fait"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <select
-                className="select select--sm"
-                aria-label="Filtrer par categorie"
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-              >
-                <option value="">Toutes catégories</option>
-                <option value="identite">Identité</option>
-                <option value="travail">Travail</option>
-                <option value="rythme">Rythme</option>
-                <option value="gouts">Goûts</option>
-                <option value="sante">Santé</option>
-                <option value="finances">Finances</option>
-                <option value="general">Général</option>
-              </select>
-              <select
-                className="select select--sm"
-                aria-label="Filtrer par sensibilite"
-                value={sensitivityFilter}
-                onChange={(e) => setSensitivityFilter(e.target.value)}
-              >
-                <option value="">Toute sensibilité</option>
-                <option value="normal">normal</option>
-                <option value="privé">privé</option>
-                <option value="très privé">très privé</option>
-              </select>
-            </div>
           </div>
 
           <div className="card card--flush">
+            <div className="card__toolbar">
+              <div className="filters">
+                <input
+                  type="search"
+                  className="input input--sm"
+                  placeholder="Rechercher un fait…"
+                  aria-label="Rechercher un fait"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                <select
+                  className="select select--sm"
+                  aria-label="Filtrer par catégorie"
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                >
+                  <option value="">Toutes catégories</option>
+                  <option value="identite">Identité</option>
+                  <option value="travail">Travail</option>
+                  <option value="rythme">Rythme</option>
+                  <option value="gouts">Goûts</option>
+                  <option value="sante">Santé</option>
+                  <option value="finances">Finances</option>
+                  <option value="general">Général</option>
+                </select>
+                <select
+                  className="select select--sm"
+                  aria-label="Filtrer par sensibilité"
+                  value={sensitivityFilter}
+                  onChange={(e) => setSensitivityFilter(e.target.value)}
+                >
+                  <option value="">Toute sensibilité</option>
+                  <option value="normal">Normal</option>
+                  <option value="privé">Privé</option>
+                  <option value="très privé">Très privé</option>
+                </select>
+              </div>
+            </div>
             {factsQuery.isLoading && <Skeleton lines={4} />}
             {!factsQuery.isLoading && (factsQuery.data ?? []).length === 0 && (
               <EmptyState title="Aucun fait enregistré pour ces critères.">
@@ -248,12 +260,17 @@ export function MemoryOnboardingPage() {
                             onSubmit={async (e) => {
                               e.preventDefault();
                               if (editingFactText.trim()) {
-                                await apiClient.updateFact(fact.id, {
-                                  text: editingFactText.trim(),
-                                });
-                                setEditingFactId(null);
-                                toast.ok("Fait modifié.");
-                                qc.invalidateQueries({ queryKey: ["facts"] });
+                                try {
+                                  await apiClient.updateFact(fact.id, {
+                                    text: editingFactText.trim(),
+                                  });
+                                  setEditingFactId(null);
+                                  toast.ok("Fait modifié.");
+                                  qc.invalidateQueries({ queryKey: ["facts"] });
+                                  qc.invalidateQueries({ queryKey: ["facts-review"] });
+                                } catch (err) {
+                                  toast.error(errorMessage(err));
+                                }
                               }
                             }}
                           >
@@ -280,7 +297,9 @@ export function MemoryOnboardingPage() {
                           <div>{fact.text}</div>
                         )}
                         <div className="row__meta">
-                          <span className="badge">{fact.category}</span>
+                          <span className="badge">
+                            {CATEGORY_LABELS[fact.category] ?? fact.category}
+                          </span>
                           <span className="badge">{fact.sensitivity}</span>
                           <span className="mono">confiance {Math.round(fact.confidence * 100)}%</span>
                         </div>
@@ -299,9 +318,14 @@ export function MemoryOnboardingPage() {
                           </button>
                           <ConfirmButton
                             onConfirm={async () => {
-                              await apiClient.deleteFact(fact.id);
-                              toast.ok("Fait supprimé.");
-                              qc.invalidateQueries({ queryKey: ["facts"] });
+                              try {
+                                await apiClient.deleteFact(fact.id);
+                                toast.ok("Fait supprimé.");
+                                qc.invalidateQueries({ queryKey: ["facts"] });
+                                qc.invalidateQueries({ queryKey: ["facts-review"] });
+                              } catch (err) {
+                                toast.error(errorMessage(err));
+                              }
                             }}
                           />
                         </div>
@@ -318,6 +342,10 @@ export function MemoryOnboardingPage() {
       {tab === "wiki" && (
         <div className="wiki">
           <div className="wiki__pages" role="tablist" aria-label="Pages du wiki">
+            {wikiQuery.isLoading && <Skeleton lines={3} />}
+            {wikiQuery.isError && (
+              <EmptyState title="Impossible de charger le wiki." />
+            )}
             {(wikiQuery.data ?? []).map((p) => {
               const current = (activeWikiPage?.slug ?? selectedSlug) === p.slug;
               return (
@@ -355,9 +383,14 @@ export function MemoryOnboardingPage() {
                   className="btn btn--primary btn--sm"
                   onClick={async () => {
                     const slug = activeWikiPage?.slug ?? selectedSlug;
-                    await apiClient.putWiki(slug, effectiveWikiText);
-                    toast.ok(`Page ${slug}.md enregistrée.`);
-                    qc.invalidateQueries({ queryKey: ["wiki-list"] });
+                    try {
+                      await apiClient.putWiki(slug, effectiveWikiText);
+                      setWikiDraft(null);
+                      toast.ok(`Page ${slug}.md enregistrée.`);
+                      qc.invalidateQueries({ queryKey: ["wiki-list"] });
+                    } catch (err) {
+                      toast.error(errorMessage(err));
+                    }
                   }}
                 >
                   Enregistrer la page
@@ -474,6 +507,10 @@ export function MemoryOnboardingPage() {
             </div>
           </form>
 
+          {peopleQuery.isLoading && <Skeleton lines={3} />}
+          {peopleQuery.isError && (
+            <EmptyState title="Impossible de charger les personnes." />
+          )}
           <div className="grid-2">
             {(peopleQuery.data ?? []).map((person) => (
               <div key={person.id} className="card stack">
@@ -549,9 +586,14 @@ export function MemoryOnboardingPage() {
                     </button>
                     <ConfirmButton
                       onConfirm={async () => {
-                        await apiClient.deleteFact(fact.id);
-                        toast.ok("Fait supprimé.");
-                        qc.invalidateQueries({ queryKey: ["facts-review"] });
+                        try {
+                          await apiClient.deleteFact(fact.id);
+                          toast.ok("Fait supprimé.");
+                          qc.invalidateQueries({ queryKey: ["facts-review"] });
+                          qc.invalidateQueries({ queryKey: ["facts"] });
+                        } catch (err) {
+                          toast.error(errorMessage(err));
+                        }
                       }}
                     />
                   </div>
@@ -562,6 +604,10 @@ export function MemoryOnboardingPage() {
         </div>
       )}
 
+      {tab === "onboarding" && onboardingQuery.isLoading && <Skeleton lines={4} />}
+      {tab === "onboarding" && onboardingQuery.isError && (
+        <EmptyState title="Impossible de charger le questionnaire." />
+      )}
       {tab === "onboarding" && onboardingQuery.data && (
         <div className="stack">
           <div className="card stack">
@@ -634,9 +680,13 @@ export function MemoryOnboardingPage() {
                       const val = onboardingDrafts[q.field_key];
                       if (val && val.trim()) answers[q.field_key] = val.trim();
                     }
-                    await apiClient.answerOnboarding(mod.id, answers);
-                    toast.ok(`Module ${mod.title} enregistré.`);
-                    qc.invalidateQueries({ queryKey: ["onboarding"] });
+                    try {
+                      await apiClient.answerOnboarding(mod.id, answers);
+                      toast.ok(`Module ${mod.title} enregistré.`);
+                      qc.invalidateQueries({ queryKey: ["onboarding"] });
+                    } catch (err) {
+                      toast.error(errorMessage(err));
+                    }
                   }}
                 >
                   Enregistrer ce module

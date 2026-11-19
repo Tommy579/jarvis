@@ -1,5 +1,5 @@
 /* eslint-disable */
-// Fichier genere automatiquement depuis packages/shared/omi_shared/. Ne pas modifier a la main.
+// Fichier genere automatiquement depuis packages/shared/jarvis_shared/. Ne pas modifier a la main.
 
 export type SphereState = "idle" | "listening" | "thinking" | "speaking" | "alert" | "offline";
 export type SensorName = "screen" | "mic" | "camera";
@@ -190,6 +190,58 @@ export interface AlertPayload {
 export interface AlertEvent {
   type: "alert";
   payload: AlertPayload;
+}
+
+export interface GoalUpdatedPayload {
+  goal_id: string;
+  title: string;
+  status: string;
+  progress_pct: number;
+  current_phase: string;
+  cost_usd: number;
+  max_cost_usd: number;
+  orchestrator_model: string;
+  pause_reason: string | null;
+  final_summary: string;
+}
+
+export interface GoalUpdatedEvent {
+  type: "goal.updated";
+  payload: GoalUpdatedPayload;
+}
+
+export interface SubagentStatusPayload {
+  goal_id: string;
+  subtask_id: string;
+  run_id: string;
+  title: string;
+  model: string;
+  role_profile: string;
+  status: string;
+  iterations: number;
+  max_iterations: number;
+  cost_usd: number;
+  last_tool: string;
+  error: string | null;
+}
+
+export interface SubagentStatusEvent {
+  type: "goal.subagent";
+  payload: SubagentStatusPayload;
+}
+
+export interface SupervisorInterventionPayload {
+  goal_id: string;
+  subtask_id: string | null;
+  run_id: string | null;
+  kind: string;
+  message: string;
+  ts: string;
+}
+
+export interface SupervisorInterventionEvent {
+  type: "goal.intervention";
+  payload: SupervisorInterventionPayload;
 }
 
 export interface ToolCallRecord {
@@ -431,5 +483,190 @@ export interface SystemAutostartUpdate {
   enabled: boolean;
 }
 
+export interface AutonomyPolicyConfig {
+  mode: "supervised" | "autonomous";
+  max_auto_risk: 0 | 1 | 2 | 3;
+  allowed_domains: string[];
+  blocked_domains: string[];
+  allow_browser_in_untrusted: boolean;
+  block_shell_in_untrusted: boolean;
+  max_steps: number;
+  max_cost_usd: number;
+  emergency_stop: boolean;
+}
+
+export interface AutonomyPolicyUpdate {
+  mode: "supervised" | "autonomous" | null;
+  max_auto_risk: 0 | 1 | 2 | 3 | null;
+  allowed_domains: string[] | null;
+  blocked_domains: string[] | null;
+  allow_browser_in_untrusted: boolean | null;
+  block_shell_in_untrusted: boolean | null;
+  max_steps: number | null;
+  max_cost_usd: number | null;
+  emergency_stop: boolean | null;
+}
+
+export interface AutonomousTaskCreate {
+  goal: string;
+  max_steps: number | null;
+  max_cost_usd: number | null;
+  notify_on_finish: boolean;
+  role: string;
+}
+
+export interface AutonomousTaskRecord {
+  id: string;
+  goal: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  iterations: number;
+  max_iterations: number;
+  tokens_used: number;
+  cost_usd: number;
+  current_step: string;
+  result_summary: string;
+  error: string | null;
+  notify_on_finish: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AutonomyAuditEntry {
+  id: string;
+  ts: string;
+  task_id: string | null;
+  tool_name: string;
+  risk: 0 | 1 | 2 | 3;
+  status: string;
+  target: string;
+  summary: string;
+  error: string | null;
+}
+
+export interface MCPServerStatus {
+  name: string;
+  enabled: boolean;
+  transport: string;
+  connected: boolean;
+  tools_count: number;
+  tools: string[];
+  error: string | null;
+}
+
+export interface GoalCreate {
+  goal: string;
+  max_cost_usd: number;
+  orchestrator_model: string | null;
+  allowed_models: string[] | null;
+  notify_on_finish: boolean;
+}
+
+export interface GoalSteerRequest {
+  message: string;
+  resume: boolean;
+  extra_budget_usd: number | null;
+}
+
+export interface SubagentRunRecord {
+  id: string;
+  goal_id: string;
+  subtask_id: string;
+  model: string;
+  provider: string;
+  role_profile: string;
+  status: "pending" | "running" | "stalled" | "retrying" | "completed" | "failed" | "skipped";
+  iterations: number;
+  max_iterations: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  last_tool: string;
+  last_heartbeat_at: string;
+  error: string | null;
+  result_summary: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface SubtaskRecord {
+  id: string;
+  goal_id: string;
+  title: string;
+  description: string;
+  instructions: string;
+  role_profile: string;
+  assigned_model: string;
+  depends_on: string[];
+  status: "pending" | "running" | "stalled" | "retrying" | "completed" | "failed" | "skipped";
+  attempt: number;
+  max_attempts: number;
+  result: string;
+  error: string | null;
+  runs: SubagentRunRecord[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GoalEventRecord {
+  id: string;
+  goal_id: string;
+  ts: string;
+  kind: "plan" | "spawn" | "watchdog" | "steer" | "switch_model" | "split" | "verify" | "pause" | "resume" | "complete" | "error";
+  subtask_id: string | null;
+  run_id: string | null;
+  message: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface GoalRecord {
+  id: string;
+  title: string;
+  goal: string;
+  status: "planning" | "running" | "verifying" | "waiting_user" | "waiting_approval" | "paused" | "paused_budget" | "completed" | "failed" | "cancelled";
+  success_criteria: string[];
+  verified_criteria: string[];
+  orchestrator_model: string;
+  allowed_models: string[];
+  tokens_used: number;
+  cost_usd: number;
+  max_cost_usd: number;
+  progress_pct: number;
+  current_phase: string;
+  final_summary: string;
+  pause_reason: string | null;
+  notify_on_finish: boolean;
+  subtasks: SubtaskRecord[];
+  events: GoalEventRecord[];
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface VoiceProfileRecord {
+  id: string;
+  name: string;
+  role: string;
+  sample_count: number;
+  duration_sec: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VoiceProfilesConfig {
+  enabled: boolean;
+  threshold: number;
+  profiles: VoiceProfileRecord[];
+}
+
+export interface VoiceVerifyResult {
+  accepted: boolean;
+  matched_name: string | null;
+  matched_id: string | null;
+  score: number;
+  threshold: number;
+  reason: string;
+}
+
 export type ClientWsEvent = UserTextEvent | UserAudioEvent | ActionApproveEvent | AlertAckEvent | SettingsModelEvent | SensorsToggleEvent | UserInterruptEvent;
-export type ServerWsEvent = StateEvent | TranscriptPartialEvent | TranscriptFinalEvent | AssistantDeltaEvent | AssistantDoneEvent | ToolCallEvent | ToolResultEvent | TtsChunkEvent | MicLevelEvent | ApprovalRequestEvent | AlertEvent;
+export type ServerWsEvent = StateEvent | TranscriptPartialEvent | TranscriptFinalEvent | AssistantDeltaEvent | AssistantDoneEvent | ToolCallEvent | ToolResultEvent | TtsChunkEvent | MicLevelEvent | ApprovalRequestEvent | AlertEvent | GoalUpdatedEvent | SubagentStatusEvent | SupervisorInterventionEvent;

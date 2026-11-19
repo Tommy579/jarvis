@@ -1,4 +1,4 @@
-import type { OmiTheme } from "../store/useOmiStore";
+import type { JarvisTheme } from "../store/useJarvisStore";
 import type { SphereState } from "../types/generated";
 
 export interface StateVisualConfig {
@@ -13,7 +13,7 @@ export interface StateVisualConfig {
   label: string;
 }
 
-export function getStateVisualConfig(state: SphereState, theme: OmiTheme): StateVisualConfig {
+export function getStateVisualConfig(state: SphereState, theme: JarvisTheme): StateVisualConfig {
   const isBlue = theme === "jarvis-blue";
   const quietCore = isBlue ? "#0c2233" : "#2e1a05";
   const accentSoft = isBlue ? "#38bdf8" : "#d97706";

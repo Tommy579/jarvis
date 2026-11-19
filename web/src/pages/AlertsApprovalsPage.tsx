@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { Icon } from "../components/Icon";
-import { EmptyState, PageHeader, Skeleton } from "../components/ui";
-import { useOmiStore } from "../store/useOmiStore";
+import { EmptyState, PageHeader, Segmented, Skeleton } from "../components/ui";
+import { useJarvisStore } from "../store/useJarvisStore";
 import { toast } from "../store/useToastStore";
 
 interface AlertsApprovalsPageProps {
@@ -11,42 +11,69 @@ interface AlertsApprovalsPageProps {
   onAckAlert: (id: string, tooNoisy?: boolean) => Promise<void>;
 }
 
-function formatRemaining(expiresAt: string, nowMs: number): string {
+const URGENCY_LABELS: Record<number, string> = {
+  0: "Info",
+  1: "Normal",
+  2: "Important",
+  3: "Urgent",
+  4: "Critique",
+};
+
+const ALERT_STATUS_LABELS: Record<string, string> = {
+  sent: "Envoyée",
+  acked: "Acquittée",
+  noisy: "Masquée",
+  deferred: "Différée",
+};
+
+type AlertFilter = "all" | "urgent" | "unacked";
+
+function formatRemaining(expiresAt: string, nowMs: number): { label: string; pct: number } {
   const diff = Math.max(0, Math.floor((new Date(expiresAt).getTime() - nowMs) / 1000));
   const min = Math.floor(diff / 60);
   const sec = diff % 60;
-  return `${min}m ${String(sec).padStart(2, "0")}s`;
+  const pct = Math.min(100, Math.max(0, (diff / 120) * 100));
+  return { label: `${min}m ${String(sec).padStart(2, "0")}s`, pct };
 }
 
 export function AlertsApprovalsPage({
   onApproveAction,
   onAckAlert,
 }: AlertsApprovalsPageProps) {
-  const approvals = useOmiStore((s) => s.approvals);
-  const setApprovals = useOmiStore((s) => s.setApprovals);
-  const alerts = useOmiStore((s) => s.alerts);
-  const setAlerts = useOmiStore((s) => s.setAlerts);
+  const approvals = useJarvisStore((s) => s.approvals);
+  const mergeApprovals = useJarvisStore((s) => s.mergeApprovals);
+  const alerts = useJarvisStore((s) => s.alerts);
+  const mergeAlerts = useJarvisStore((s) => s.mergeAlerts);
 
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [alertFilter, setAlertFilter] = useState<AlertFilter>("all");
+
+  const filteredAlerts = alerts.filter((a) => {
+    if (alertFilter === "urgent") return a.urgency >= 3;
+    if (alertFilter === "unacked") return a.status === "sent";
+    return true;
+  });
 
   const approvalsQuery = useQuery({
     queryKey: ["approvals"],
     queryFn: apiClient.getApprovals,
+    refetchInterval: 5000,
   });
 
   const alertsQuery = useQuery({
     queryKey: ["alerts"],
     queryFn: apiClient.getAlerts,
+    refetchInterval: 5000,
   });
 
   useEffect(() => {
-    if (approvalsQuery.data && approvals.length === 0) setApprovals(approvalsQuery.data);
-  }, [approvalsQuery.data, approvals.length, setApprovals]);
+    if (approvalsQuery.data) mergeApprovals(approvalsQuery.data);
+  }, [approvalsQuery.data, mergeApprovals]);
 
   useEffect(() => {
-    if (alertsQuery.data && alerts.length === 0) setAlerts(alertsQuery.data);
-  }, [alertsQuery.data, alerts.length, setAlerts]);
+    if (alertsQuery.data) mergeAlerts(alertsQuery.data);
+  }, [alertsQuery.data, mergeAlerts]);
 
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000);
@@ -55,7 +82,7 @@ export function AlertsApprovalsPage({
 
   const handleDecision = async (id: string, approved: boolean) => {
     await onApproveAction(id, approved);
-    const msg = `Action ${id} ${approved ? "approuvee" : "refusee"}.`;
+    const msg = `Action ${id} ${approved ? "approuvée" : "refusée"}.`;
     setFeedback(msg);
     toast.ok(msg);
   };
@@ -63,8 +90,8 @@ export function AlertsApprovalsPage({
   const handleAck = async (id: string, tooNoisy = false) => {
     await onAckAlert(id, tooNoisy);
     const msg = tooNoisy
-      ? `Regle ajustee : alerte ${id} marquee trop derangeante.`
-      : `Alerte ${id} acquittee.`;
+      ? `Règle ajustée : alerte ${id} marquée trop dérangeante.`
+      : `Alerte ${id} acquittée.`;
     setFeedback(msg);
     toast.ok(msg);
   };
@@ -115,6 +142,20 @@ export function AlertsApprovalsPage({
             <ul className="list">
               {approvals.map((item) => {
                 const pending = item.status === "pending";
+                const statusLabel =
+                  item.status === "pending"
+                    ? "En attente"
+                    : item.status === "approved"
+                      ? "Approuvée"
+                      : item.status === "denied"
+                        ? "Refusée"
+                        : "Expirée";
+                const args = item.args as Record<string, unknown> | undefined;
+                const displayDesc =
+                  item.tool_name === "mail_send" && args && (args.to || args.subject || args.body)
+                    ? `Envoi d'un mail\nÀ : ${String(args.to ?? "")}\nObjet : ${String(args.subject ?? "")}\nMessage : ${String(args.body ?? "")}`
+                    : item.description;
+                const remaining = pending ? formatRemaining(item.expires_at, nowMs) : null;
                 return (
                   <li
                     key={item.id}
@@ -133,15 +174,23 @@ export function AlertsApprovalsPage({
                               : "badge--accent"
                         }`}
                       >
-                        Risque {item.risk} | {item.status}
+                        {statusLabel}
                       </span>
-                      {pending && (
-                        <span className="countdown">
-                          Expire dans {formatRemaining(item.expires_at, nowMs)}
-                        </span>
+                      {remaining && (
+                        <span className="countdown">Expire dans {remaining.label}</span>
                       )}
                     </div>
-                    <div className="approval__desc">{item.description}</div>
+                    {remaining && (
+                      <div className="approval__timer" aria-hidden="true">
+                        <div
+                          className="approval__timer-fill"
+                          style={{ width: `${remaining.pct}%` }}
+                        />
+                      </div>
+                    )}
+                    <div className="approval__desc" style={{ whiteSpace: "pre-line" }}>
+                      {displayDesc}
+                    </div>
                     {pending && (
                       <div className="cluster">
                         <button
@@ -171,24 +220,40 @@ export function AlertsApprovalsPage({
         <div className="card card--flush">
           <div className="card__head">
             <h2 className="card__title">Journal des alertes</h2>
-            <span className="badge mono">{alerts.length}</span>
+            <span className="badge mono">{filteredAlerts.length}</span>
           </div>
 
+          {alerts.length > 0 && (
+            <div className="card__toolbar">
+              <Segmented<AlertFilter>
+                label="Filtrer les alertes"
+                value={alertFilter}
+                onChange={setAlertFilter}
+                options={[
+                  { value: "all", label: `Toutes (${alerts.length})` },
+                  { value: "urgent", label: "Urgentes" },
+                  { value: "unacked", label: "Non acquittées" },
+                ]}
+              />
+            </div>
+          )}
+
           {alertsQuery.isLoading && alerts.length === 0 && <Skeleton lines={3} />}
-          {alerts.length === 0 && !alertsQuery.isLoading && (
+          {filteredAlerts.length === 0 && !alertsQuery.isLoading && (
             <EmptyState title="Aucune alerte envoyée.">
               Les notifications urgentes filtrées par les règles d'attention apparaissent ici.
             </EmptyState>
           )}
 
-          {alerts.length > 0 && (
+          {filteredAlerts.length > 0 && (
             <ul className="list">
-              {alerts.map((alert) => (
+              {filteredAlerts.map((alert) => (
                 <li key={alert.id} data-testid={`alert-${alert.id}`} className="row">
                   <div className="row__body">
                     <div className="cluster" style={{ justifyContent: "space-between" }}>
                       <span className={`badge ${alert.urgency >= 3 ? "badge--danger" : ""}`}>
-                        Urgence {alert.urgency} | {alert.status}
+                        {URGENCY_LABELS[alert.urgency] ?? `Urgence ${alert.urgency}`} ·{" "}
+                        {ALERT_STATUS_LABELS[alert.status] ?? alert.status}
                       </span>
                       <span className="mono muted" style={{ fontSize: "0.75rem" }}>
                         {alert.channel}
@@ -210,7 +275,7 @@ export function AlertsApprovalsPage({
                           className="btn btn--ghost btn--sm"
                           onClick={() => handleAck(alert.id, true)}
                         >
-                          Trop derangeant
+                          Trop dérangeant
                         </button>
                       </div>
                     )}

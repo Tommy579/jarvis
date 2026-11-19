@@ -1,18 +1,18 @@
-# OMI 2.0 — Plan de consolidation du cœur (implémentation)
+# JARVIS 2.0 — Plan de consolidation du cœur (implémentation)
 
 > **Pour Hermes :** utiliser la skill `subagent-driven-development` pour exécuter ce plan tâche par tâche
 > (un sous-agent par tâche, revue de conformité au spec puis revue de qualité avant de passer à la suivante).
 
-**Objectif :** rendre le service `omi-core` réellement fonctionnel de bout en bout — un message envoyé
+**Objectif :** rendre le service `jarvis-core` réellement fonctionnel de bout en bout — un message envoyé
 depuis l'interface web doit traverser le routeur multi-modèles, la boucle agent, les outils avec
 approbation, la mémoire persistante, et revenir en streaming — puis assainir le dépôt (données
 personnelles, lint, doublons, CI).
 
-**Architecture cible :** `packages/core/omi_core/api/server.py` reste le seul point d'entrée HTTP/WS ;
-il instancie un objet `OmiRuntime` (nouveau) qui possède les providers LLM, le `LLMRouter`, le
+**Architecture cible :** `packages/core/jarvis_core/api/server.py` reste le seul point d'entrée HTTP/WS ;
+il instancie un objet `JarvisRuntime` (nouveau) qui possède les providers LLM, le `LLMRouter`, le
 `ToolRegistry`, le `MemoryEngine`, l'`AttentionEngine` et les canaux de notification. Le WebSocket
-devient un adaptateur mince entre le protocole `omi_shared.ws_protocol` et `AgentLoop.run_turn()`.
-Une seule couche SQLite (`MemoryDatabase`, migrations versionnées) écrit dans `omi.db`.
+devient un adaptateur mince entre le protocole `jarvis_shared.ws_protocol` et `AgentLoop.run_turn()`.
+Une seule couche SQLite (`MemoryDatabase`, migrations versionnées) écrit dans `jarvis.db`.
 
 **Stack :** Python 3.12 (workspace `uv`), FastAPI + uvicorn, Pydantic v2, SQLite/SQLCipher, APScheduler,
 React 19 + Vite 6 + Zustand + react-three-fiber, Vitest + Playwright.
@@ -34,7 +34,7 @@ Sondes exécutées (script jetable, venv du projet) :
 /api/evals/latest sans evals/latest.json  -> HTTP 200, total=2, passed=2, latences 420/510 ms  (données fabriquées)
 WS user.text "Quel temps fait-il a Nice ?" -> assistant.delta "Bien recu : Quel temps fait-il a Nice ?."  (echo, aucun LLM)
 PUT /api/models/role glm-5.3 puis redemarrage -> deepseek/deepseek-v4.1-flash-1017  (non persiste)
-GET /api/messages sans OMI_API_TOKEN      -> 200  (auth ouverte)
+GET /api/messages sans JARVIS_API_TOKEN      -> 200  (auth ouverte)
 ToolRegistry.execute(write_file, risk=2)  -> "Approbation requise (statut : expired)" en 51 ms
 ```
 
@@ -44,15 +44,15 @@ ToolRegistry.execute(write_file, risk=2)  -> "Approbation requise (statut : expi
 
 Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
 
-1. **Wayland n'est pas à écrire.** `packages/desktop/omi_desktop/wayland_sensors.py` gère déjà
+1. **Wayland n'est pas à écrire.** `packages/desktop/jarvis_desktop/wayland_sensors.py` gère déjà
    `spectacle -b -n -o`, le repli `grim`, le `restore_token` du portail ScreenCast, l'OCR local et la
    liste noire de fenêtres. Il n'est simplement **jamais instancié** par un service en production.
-2. **Les unités systemd existent déjà** : `deploy/omi-core.service`, `deploy/omi-desktop.service`,
+2. **Les unités systemd existent déjà** : `deploy/jarvis-core.service`, `deploy/jarvis-desktop.service`,
    `deploy/install_arch.sh` (pacman + uv + build web + `systemctl --user enable`). Ce qui manque n'est
-   pas le fichier, c'est le contenu qu'il lance (aujourd'hui `omi_core.api.server:app` sans runtime).
-3. **Les bases `.db` ne sont plus suivies par git dans HEAD** (staging `D omi_history.db`,
-   `D omi-windows/omi_history.db`), mais elles restent **7 commits + 2 commits** dans l'historique du
-   remote public `github.com/Tommy579/omi`. La purge n'a donc pas été exécutée.
+   pas le fichier, c'est le contenu qu'il lance (aujourd'hui `jarvis_core.api.server:app` sans runtime).
+3. **Les bases `.db` ne sont plus suivies par git dans HEAD** (staging `D jarvis_history.db`,
+   `D jarvis-windows/jarvis_history.db`), mais elles restent **7 commits + 2 commits** dans l'historique du
+   remote public `github.com/Tommy579/jarvis`. La purge n'a donc pas été exécutée.
 
 ---
 
@@ -60,12 +60,12 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
 
 | Décision | Choix proposé | Pourquoi |
 |---|---|---|
-| Où vit le câblage runtime | Nouveau module `packages/core/omi_core/runtime.py` (`OmiRuntime`) | `server.py` fait déjà 534 lignes de routes ; y ajouter la construction des providers le rendrait intestable |
-| Couche mémoire | `MemoryDatabase` (schema.py) unique propriétaire de `omi.db` ; `MemoryStorage` devient un adaptateur | Les deux classes créent les mêmes tables `facts`/`episodes`/`people`/`events`/`notifications`/`llm_calls` avec des **colonnes différentes** ; pointer les deux sur `omi.db` casse la seconde (`CREATE TABLE IF NOT EXISTS` garde le premier schéma) |
-| Persistance des réglages | Table `settings(key TEXT PRIMARY KEY, value_json TEXT)` dans `omi.db` + réécriture de `config/models.yaml` pour les rôles | Un `PUT /api/models/role` doit survivre au redémarrage sans dépendre d'un fichier édité à la main |
-| Approbations | `ApprovalManager` unique porté par `OmiRuntime`, `on_approval_requested` pousse un événement dans une `asyncio.Queue` consommée par le WS | Le callback est synchrone et appelé depuis la boucle agent ; il faut un pont vers l'async sans bloquer |
-| Auth | Refus de démarrer sans `OMI_API_TOKEN` sauf `OMI_ALLOW_INSECURE=1` + bind loopback | Le mode ouvert actuel est silencieux : une variable oubliée expose tout le service |
-| Évals | `omi eval --save` écrit `evals/latest.json` ; l'API renvoie 404 « jamais exécuté » si absent | Ne jamais servir de résultats inventés à l'UI |
+| Où vit le câblage runtime | Nouveau module `packages/core/jarvis_core/runtime.py` (`JarvisRuntime`) | `server.py` fait déjà 534 lignes de routes ; y ajouter la construction des providers le rendrait intestable |
+| Couche mémoire | `MemoryDatabase` (schema.py) unique propriétaire de `jarvis.db` ; `MemoryStorage` devient un adaptateur | Les deux classes créent les mêmes tables `facts`/`episodes`/`people`/`events`/`notifications`/`llm_calls` avec des **colonnes différentes** ; pointer les deux sur `jarvis.db` casse la seconde (`CREATE TABLE IF NOT EXISTS` garde le premier schéma) |
+| Persistance des réglages | Table `settings(key TEXT PRIMARY KEY, value_json TEXT)` dans `jarvis.db` + réécriture de `config/models.yaml` pour les rôles | Un `PUT /api/models/role` doit survivre au redémarrage sans dépendre d'un fichier édité à la main |
+| Approbations | `ApprovalManager` unique porté par `JarvisRuntime`, `on_approval_requested` pousse un événement dans une `asyncio.Queue` consommée par le WS | Le callback est synchrone et appelé depuis la boucle agent ; il faut un pont vers l'async sans bloquer |
+| Auth | Refus de démarrer sans `JARVIS_API_TOKEN` sauf `JARVIS_ALLOW_INSECURE=1` + bind loopback | Le mode ouvert actuel est silencieux : une variable oubliée expose tout le service |
+| Évals | `jarvis eval --save` écrit `evals/latest.json` ; l'API renvoie 404 « jamais exécuté » si absent | Ne jamais servir de résultats inventés à l'UI |
 
 ---
 
@@ -73,7 +73,7 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
 
 ### Tâche 0.1 — Purger les données personnelles de l'historique Git
 
-**Objectif :** aucun blob `omi_history.db` / `omi_profile.json` ne doit rester accessible sur le remote public.
+**Objectif :** aucun blob `jarvis_history.db` / `jarvis_profile.json` ne doit rester accessible sur le remote public.
 
 **Fichiers :** `scripts/purge_git_history.sh` (existant, à relire avant exécution), `.gitignore`
 
@@ -81,13 +81,13 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
 
 1. Sauvegarder les bases locales hors du dépôt :
    ```bash
-   mkdir -p ~/omi-data/backups
-   cp -f omi_history.db omi_profile.json ~/omi-data/backups/ 2>/dev/null || true
-   cp -f omi-windows/omi_history.db omi-windows/omi_profile.json ~/omi-data/backups/ 2>/dev/null || true
+   mkdir -p ~/jarvis-data/backups
+   cp -f jarvis_history.db jarvis_profile.json ~/jarvis-data/backups/ 2>/dev/null || true
+   cp -f jarvis-windows/jarvis_history.db jarvis-windows/jarvis_profile.json ~/jarvis-data/backups/ 2>/dev/null || true
    ```
 2. Vérifier l'état avant purge :
    ```bash
-   git log --all --oneline -- omi_history.db omi-windows/omi_history.db omi_profile.json | wc -l
+   git log --all --oneline -- jarvis_history.db jarvis-windows/jarvis_history.db jarvis_profile.json | wc -l
    ```
    Attendu : `9` (7 + 2 commits constatés).
 3. Installer l'outil si absent : `sudo pacman -S --needed git-filter-repo` (ou `pipx install git-filter-repo`).
@@ -97,7 +97,7 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
    ```
 5. Vérifier après purge :
    ```bash
-   git log --all --oneline -- omi_history.db omi-windows/omi_history.db omi_profile.json | wc -l   # attendu : 0
+   git log --all --oneline -- jarvis_history.db jarvis-windows/jarvis_history.db jarvis_profile.json | wc -l   # attendu : 0
    git count-objects -vH
    ```
 6. Forcer la réécriture du remote **après** avoir prévenu tout autre clone :
@@ -107,8 +107,8 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
    ```
 7. Re-cloner dans un dossier temporaire et confirmer :
    ```bash
-   git clone https://github.com/Tommy579/omi /tmp/omi-verify
-   cd /tmp/omi-verify && git log --all --oneline -- omi_history.db | wc -l   # attendu : 0
+   git clone https://github.com/Tommy579/jarvis /tmp/jarvis-verify
+   cd /tmp/jarvis-verify && git log --all --oneline -- jarvis_history.db | wc -l   # attendu : 0
    ```
 
 **Validation :** la commande de l'étape 7 renvoie `0` sur un clone neuf.
@@ -128,7 +128,7 @@ Trois points annoncés oralement sont faux ou inexacts ; le plan corrige :
    ```
 2. Révoquer et régénérer la clé Gemini sur `aistudio.google.com/apikey`.
 3. Révoquer et régénérer la clé OpenRouter sur `openrouter.ai/keys`.
-4. Mettre à jour `.env` (jamais commité) et le trousseau : `keyring set omi-core GEMINI_API_KEY`.
+4. Mettre à jour `.env` (jamais commité) et le trousseau : `keyring set jarvis-core GEMINI_API_KEY`.
 
 **Validation :** `grep -rn "AIza" . --include=*.py --include=*.md --include=*.sh` ne renvoie rien hors `.env`.
 
@@ -175,7 +175,7 @@ Dans `core/tools.py`, au-dessus de `execute_command` :
 def confirm_action(description: str) -> bool:
     """Confirmation explicite obligatoire avant toute action destructive."""
     try:
-        answer = input(f"[OMI] Confirmer : {description} ? [o/N] ")
+        answer = input(f"[JARVIS] Confirmer : {description} ? [o/N] ")
     except EOFError:
         return False
     return answer.strip().lower() in ("o", "oui", "y", "yes")
@@ -209,21 +209,21 @@ git commit -m "fix(legacy): exiger une confirmation avant execute_command"
 **Étapes :**
 
 1. Ajouter au `.gitignore` : `.hermes/`, `web/test-results/`, `web/tsconfig.tsbuildinfo`, `web/dist/`,
-   `*.log`, `omi-data/backups/`.
+   `*.log`, `jarvis-data/backups/`.
 2. Déplacer les trois copies du legacy vers une seule référence :
    ```bash
-   git rm -r --cached omi-windows 2>/dev/null || true
-   mv omi-windows legacy/omi_windows_ref   # omi-windows/ n'est plus qu'une archive
+   git rm -r --cached jarvis-windows 2>/dev/null || true
+   mv jarvis-windows legacy/jarvis_windows_ref   # jarvis-windows/ n'est plus qu'une archive
    ```
 3. Vérifier : `git status --porcelain | grep -v '^??' | wc -l` doit tomber à 0 hors modifications voulues.
 
-**Validation :** `git status` ne montre plus `omi-windows/` ni `web/dist/`.
+**Validation :** `git status` ne montre plus `jarvis-windows/` ni `web/dist/`.
 
 ---
 
 ## Phase 1 — Unifier la couche mémoire (prérequis du câblage agent)
 
-> Sans cette phase, brancher `MemoryEngine` sur `omi.db` casse l'API : `MemoryStorage` insère
+> Sans cette phase, brancher `MemoryEngine` sur `jarvis.db` casse l'API : `MemoryStorage` insère
 > `embedding_json` et `use_count`, colonnes absentes du schéma de `MemoryDatabase`.
 
 ### Tâche 1.1 — Test de collision de schéma (preuve du problème)
@@ -233,12 +233,12 @@ git commit -m "fix(legacy): exiger une confirmation avant execute_command"
 ```python
 from pathlib import Path
 
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.memory.storage import MemoryStorage
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.memory.storage import MemoryStorage
 
 
 def test_single_writer_on_same_file(tmp_path: Path) -> None:
-    db_path = tmp_path / "omi.db"
+    db_path = tmp_path / "jarvis.db"
     db = MemoryDatabase(db_path)
     storage = MemoryStorage(db_path, database=db)  # API cible
     assert storage.get_today_spend_usd() == 0.0
@@ -250,7 +250,7 @@ Attendu : FAIL — `TypeError: __init__() got an unexpected keyword argument 'da
 
 ### Tâche 1.2 — Migration 2 : colonnes manquantes + table `settings`
 
-**Fichier :** `packages/core/omi_core/memory/schema.py` (ajouter à `MIGRATIONS`)
+**Fichier :** `packages/core/jarvis_core/memory/schema.py` (ajouter à `MIGRATIONS`)
 
 ```python
     (
@@ -293,7 +293,7 @@ Ajouter dans `MemoryDatabase` :
 
 ### Tâche 1.3 — `MemoryStorage` devient un adaptateur
 
-**Fichier :** `packages/core/omi_core/memory/storage.py`
+**Fichier :** `packages/core/jarvis_core/memory/storage.py`
 
 Remplacer `__init__`, `_connect`, `_init_schema` et les 14 méthodes par une délégation :
 
@@ -333,7 +333,7 @@ Attendu : 29 passed (28 + le nouveau test 1.1).
 **Objectif :** prouver que la fusion a bien eu lieu.
 
 ```bash
-wc -l packages/core/omi_core/memory/storage.py packages/core/omi_core/memory/schema.py
+wc -l packages/core/jarvis_core/memory/storage.py packages/core/jarvis_core/memory/schema.py
 ```
 Attendu : `storage.py` passe de 369 lignes à moins de 200 ; à noter dans le message de commit.
 
@@ -343,10 +343,10 @@ Attendu : `storage.py` passe de 369 lignes à moins de 200 ; à noter dans le me
 
 ## Phase 2 — Câbler le runtime réel (le cœur du travail)
 
-### Tâche 2.1 — `OmiRuntime` : construction des providers depuis la config
+### Tâche 2.1 — `JarvisRuntime` : construction des providers depuis la config
 
 **Fichiers :**
-- Créer : `packages/core/omi_core/runtime.py`
+- Créer : `packages/core/jarvis_core/runtime.py`
 - Test : `tests/test_runtime.py`
 
 **Étape 1 — test qui échoue**
@@ -354,7 +354,7 @@ Attendu : `storage.py` passe de 369 lignes à moins de 200 ; à noter dans le me
 ```python
 from pathlib import Path
 
-from omi_core.runtime import build_runtime
+from jarvis_core.runtime import build_runtime
 
 
 def test_runtime_builds_router_and_tools(tmp_path: Path, monkeypatch) -> None:
@@ -367,12 +367,12 @@ def test_runtime_builds_router_and_tools(tmp_path: Path, monkeypatch) -> None:
     assert rt.agent.max_iterations == 8
 ```
 
-**Étape 2 — échec attendu :** `ModuleNotFoundError: omi_core.runtime`
+**Étape 2 — échec attendu :** `ModuleNotFoundError: jarvis_core.runtime`
 
 **Étape 3 — implémentation**
 
 ```python
-"""Construction du runtime OMI 2.0 : providers, routeur, outils, memoire, agent."""
+"""Construction du runtime JARVIS 2.0 : providers, routeur, outils, memoire, agent."""
 
 from __future__ import annotations
 
@@ -381,23 +381,23 @@ from pathlib import Path
 
 import yaml
 
-from omi_core.agent.loop import AgentLoop
-from omi_core.llm.base import LLMProvider
-from omi_core.llm.gemini import GeminiProvider
-from omi_core.llm.openrouter import OpenRouterProvider
-from omi_core.llm.router import DEFAULT_ROLE_ROUTES, LLMRouter, RoleRoute
-from omi_core.memory.engine import MemoryEngine
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.memory.storage import MemoryStorage
-from omi_core.memory.wiki import MarkdownWiki
-from omi_core.security import SecretStore
-from omi_core.tools.approvals import ApprovalManager
-from omi_core.tools.registry import ToolRegistry, detect_platform
-from omi_core.tools.standard import StandardToolkit
+from jarvis_core.agent.loop import AgentLoop
+from jarvis_core.llm.base import LLMProvider
+from jarvis_core.llm.gemini import GeminiProvider
+from jarvis_core.llm.openrouter import OpenRouterProvider
+from jarvis_core.llm.router import DEFAULT_ROLE_ROUTES, LLMRouter, RoleRoute
+from jarvis_core.memory.engine import MemoryEngine
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.memory.storage import MemoryStorage
+from jarvis_core.memory.wiki import MarkdownWiki
+from jarvis_core.security import SecretStore
+from jarvis_core.tools.approvals import ApprovalManager
+from jarvis_core.tools.registry import ToolRegistry, detect_platform
+from jarvis_core.tools.standard import StandardToolkit
 
 
 @dataclass
-class OmiRuntime:
+class JarvisRuntime:
     database: MemoryDatabase
     router: LLMRouter
     tool_registry: ToolRegistry
@@ -430,7 +430,7 @@ def build_runtime(
     secrets: SecretStore | None = None,
     on_state_change=None,
     on_sentence_ready=None,
-) -> OmiRuntime:
+) -> JarvisRuntime:
     store = secrets or SecretStore()
     providers: dict[str, LLMProvider] = {}
     or_key = store.get_secret("OPENROUTER_API_KEY")
@@ -442,8 +442,8 @@ def build_runtime(
     if not providers:
         raise RuntimeError("Aucune cle LLM configuree (OPENROUTER_API_KEY ou GEMINI_API_KEY).")
 
-    database = MemoryDatabase(data_dir / "omi.db")
-    storage = MemoryStorage(data_dir / "omi.db", database=database)
+    database = MemoryDatabase(data_dir / "jarvis.db")
+    storage = MemoryStorage(data_dir / "jarvis.db", database=database)
     wiki = MarkdownWiki(data_dir / "wiki", auto_git=False)
 
     router = LLMRouter(
@@ -466,11 +466,11 @@ def build_runtime(
         on_state_change=on_state_change,
         on_sentence_ready=on_sentence_ready,
     )
-    return OmiRuntime(database, router, registry, memory_engine, approvals, agent)
+    return JarvisRuntime(database, router, registry, memory_engine, approvals, agent)
 ```
 
 **Note :** si `StandardToolkit` n'expose pas encore de `register_all(registry)`, l'ajouter dans
-`packages/core/omi_core/tools/standard.py` — c'est le seul point d'entrée manquant pour publier les
+`packages/core/jarvis_core/tools/standard.py` — c'est le seul point d'entrée manquant pour publier les
 outils niveaux 0/1 dans le registre avec leurs `RiskLevel`.
 
 **Étape 4 — vert :** `.venv/bin/python -m pytest tests/test_runtime.py -v` → 1 passed.
@@ -478,7 +478,7 @@ outils niveaux 0/1 dans le registre avec leurs `RiskLevel`.
 ### Tâche 2.2 — WebSocket : remplacer l'echo par l'agent en streaming
 
 **Fichiers :**
-- Modifier : `packages/core/omi_core/api/server.py:454-508` (`websocket_endpoint`)
+- Modifier : `packages/core/jarvis_core/api/server.py:454-508` (`websocket_endpoint`)
 - Test : `tests/test_ws_agent.py` (créer)
 
 **Étape 1 — test qui échoue (avec un faux provider)**
@@ -488,9 +488,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from omi_core.api.server import create_app, OmiCoreState
-from omi_core.llm.base import LLMProvider
-from omi_shared.models import ModelCapabilities, StreamDelta, Usage
+from jarvis_core.api.server import create_app, JarvisCoreState
+from jarvis_core.llm.base import LLMProvider
+from jarvis_shared.models import ModelCapabilities, StreamDelta, Usage
 
 
 class EchoProvider(LLMProvider):
@@ -509,7 +509,7 @@ class EchoProvider(LLMProvider):
 
 
 def test_ws_uses_agent_not_echo(tmp_path: Path) -> None:
-    state = OmiCoreState(data_dir=tmp_path / "data", config_dir=Path("config"),
+    state = JarvisCoreState(data_dir=tmp_path / "data", config_dir=Path("config"),
                          legacy_profile_path=tmp_path / "none.json")
     state.runtime = _runtime_with(state, EchoProvider())
     client = TestClient(create_app(state))
@@ -572,13 +572,13 @@ def test_ws_uses_agent_not_echo(tmp_path: Path) -> None:
                     await websocket.send_json({"type": "state", "payload": {"value": "idle"}})
 ```
 
-Ajouter dans `OmiCoreState.__init__` :
+Ajouter dans `JarvisCoreState.__init__` :
 
 ```python
         self.runtime = None  # injecte par create_app() ou par les tests
 ```
 
-et dans `create_app`, après `core_state = state or OmiCoreState()` :
+et dans `create_app`, après `core_state = state or JarvisCoreState()` :
 
 ```python
     if core_state.runtime is None:
@@ -604,7 +604,7 @@ assertion sur la présence de `assistant.delta` + `assistant.done` avec un provi
 **Objectif :** le premier `assistant.delta` doit arriver avant la fin de la génération (indispensable
 pour le TTS et pour la sphère qui passe en `speaking`).
 
-**Fichiers :** `packages/core/omi_core/agent/loop.py:107-136`, `packages/core/omi_core/api/server.py`
+**Fichiers :** `packages/core/jarvis_core/agent/loop.py:107-136`, `packages/core/jarvis_core/api/server.py`
 
 **Approche :** `AgentLoop.run_turn` accepte un paramètre `on_delta: Callable[[str], Awaitable[None]] | None`.
 Dans la boucle `async for delta in self.router.stream(...)`, appeler `await on_delta(delta.text)` au lieu
@@ -617,7 +617,7 @@ déjà si `EchoProvider.stream` yield deux morceaux et que l'assertion porte sur
 
 ### Tâche 2.4 — Événements `tool.call` / `tool.result` vers l'UI
 
-**Fichiers :** `packages/core/omi_core/agent/loop.py`, `packages/core/omi_core/api/server.py`
+**Fichiers :** `packages/core/jarvis_core/agent/loop.py`, `packages/core/jarvis_core/api/server.py`
 
 **Approche :** ajouter deux callbacks `on_tool_call(ToolCall)` et `on_tool_result(ToolResult)` à
 `AgentLoop.__init__`, appelés respectivement avant `asyncio.gather` et après chaque résultat. Le WS les
@@ -628,7 +628,7 @@ traduit en `{"type": "tool.call", "payload": {"id","name","args","risk"}}` et
 `ToolCall(name="system_stats", arguments={})` au premier tour puis un texte au second.
 Attendu : réception de `tool.call`, `tool.result`, puis `assistant.done`.
 
-**Validation :** le store front (`useOmiStore.handleServerEvent`, cas `tool.call`/`tool.result` lignes 47
+**Validation :** le store front (`useJarvisStore.handleServerEvent`, cas `tool.call`/`tool.result` lignes 47
 et 96 du test Vitest) reçoit déjà ces événements — aucun changement front nécessaire.
 
 ### Tâche 2.5 — Pont d'approbation WS ↔ ApprovalManager
@@ -637,18 +637,18 @@ et 96 du test Vitest) reçoit déjà ces événements — aucun changement front
 humaine, au lieu d'expirer en 50 ms.
 
 **Fichiers :**
-- Modifier : `packages/core/omi_core/tools/registry.py:116` (`approval_timeout: float | None = 0.05`)
-- Modifier : `packages/core/omi_core/runtime.py` (brancher `on_approval_requested`)
-- Modifier : `packages/core/omi_core/api/server.py` (consommer la file)
+- Modifier : `packages/core/jarvis_core/tools/registry.py:116` (`approval_timeout: float | None = 0.05`)
+- Modifier : `packages/core/jarvis_core/runtime.py` (brancher `on_approval_requested`)
+- Modifier : `packages/core/jarvis_core/api/server.py` (consommer la file)
 
 **Étape 1 — test qui échoue**
 
 ```python
 def test_sensitive_tool_waits_for_human_approval(tmp_path):
     import asyncio
-    from omi_core.tools.approvals import ApprovalManager
-    from omi_core.tools.registry import ToolRegistry, ToolSpec
-    from omi_shared.models import RiskLevel, ToolCall
+    from jarvis_core.tools.approvals import ApprovalManager
+    from jarvis_core.tools.registry import ToolRegistry, ToolSpec
+    from jarvis_shared.models import RiskLevel, ToolCall
 
     async def scenario():
         mgr = ApprovalManager(ttl_seconds=5)
@@ -688,7 +688,7 @@ def test_sensitive_tool_waits_for_human_approval(tmp_path):
 ```
 
 3. Dans le WS, au moment de `run_turn`, lancer une tâche concurrente qui vide la file et envoie
-   `approval.request` (le schéma existe déjà : `omi_shared.ws_protocol.ApprovalRequestEvent`), et router
+   `approval.request` (le schéma existe déjà : `jarvis_shared.ws_protocol.ApprovalRequestEvent`), et router
    `action.approve` vers `core_state.runtime.approvals.resolve(id, approved)`.
 
 **Étape 4 — vert :** `.venv/bin/python -m pytest tests/test_ws_agent.py -v` → 3 passed.
@@ -698,18 +698,18 @@ d'approbation sur `/alerts`, approuver, vérifier la création du fichier.
 
 ### Tâche 2.6 — Persister les réglages (modèles, règles, liste noire)
 
-**Fichiers :** `packages/core/omi_core/api/server.py:333-350, 412-415, 447-450`
+**Fichiers :** `packages/core/jarvis_core/api/server.py:333-350, 412-415, 447-450`
 
 **Étape 1 — test qui échoue**
 
 ```python
 def test_role_model_survives_restart(tmp_path):
-    state = OmiCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
+    state = JarvisCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
                          legacy_profile_path=tmp_path / "none.json")
     client = TestClient(create_app(state))
     client.put("/api/models/role", json={"role": "agent", "model": "z-ai/glm-5.3"})
 
-    state2 = OmiCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
+    state2 = JarvisCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
                           legacy_profile_path=tmp_path / "none.json")
     client2 = TestClient(create_app(state2))
     agent = [m for m in client2.get("/api/models").json() if m["role"] == "agent"][0]
@@ -728,7 +728,7 @@ Dans `update_role_model`, après mutation :
         return item
 ```
 
-Dans `OmiCoreState.__init__`, après `self.models = self._load_models_config()` :
+Dans `JarvisCoreState.__init__`, après `self.models = self._load_models_config()` :
 
 ```python
         stored = self.db.get_setting("role_models")
@@ -749,50 +749,50 @@ Idem pour `update_rules` (`set_setting("attention_rules", payload.model_dump_jso
 
 ### Tâche 3.1 — Auth non silencieuse
 
-**Fichiers :** `packages/core/omi_core/api/server.py:179-184`
+**Fichiers :** `packages/core/jarvis_core/api/server.py:179-184`
 
 **Test :**
 
 ```python
 def test_refuses_to_start_without_token(tmp_path, monkeypatch):
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
-    monkeypatch.delenv("OMI_ALLOW_INSECURE", raising=False)
-    with pytest.raises(RuntimeError, match="OMI_API_TOKEN"):
-        create_app(OmiCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
+    monkeypatch.delenv("JARVIS_ALLOW_INSECURE", raising=False)
+    with pytest.raises(RuntimeError, match="JARVIS_API_TOKEN"):
+        create_app(JarvisCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
                                 legacy_profile_path=tmp_path / "n.json"))
 ```
 
 **Implémentation :** au début de `create_app` :
 
 ```python
-    if not os.environ.get("OMI_API_TOKEN", "").strip():
-        if os.environ.get("OMI_ALLOW_INSECURE") == "1":
-            logger.warning("OMI_API_TOKEN absent : mode non authentifie (loopback uniquement).")
+    if not os.environ.get("JARVIS_API_TOKEN", "").strip():
+        if os.environ.get("JARVIS_ALLOW_INSECURE") == "1":
+            logger.warning("JARVIS_API_TOKEN absent : mode non authentifie (loopback uniquement).")
         else:
             raise RuntimeError(
-                "OMI_API_TOKEN manquant. Definissez-le dans .env, "
-                "ou OMI_ALLOW_INSECURE=1 pour un usage local sans jeton."
+                "JARVIS_API_TOKEN manquant. Definissez-le dans .env, "
+                "ou JARVIS_ALLOW_INSECURE=1 pour un usage local sans jeton."
             )
 ```
 
 Adapter les tests existants (`tests/test_frontend_repetitif.py` et `tests/test_ws_agent.py`) avec
-`monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")`.
+`monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")`.
 
 **Validation :** suite complète verte.
 
 ### Tâche 3.2 — Évals réelles, plus de résultats fabriqués
 
 **Fichiers :**
-- Modifier : `packages/core/omi_core/api/server.py:356-386` (supprimer le bloc de repli inventé)
-- Modifier : `packages/core/omi_core/cli.py` (option `--save`)
+- Modifier : `packages/core/jarvis_core/api/server.py:356-386` (supprimer le bloc de repli inventé)
+- Modifier : `packages/core/jarvis_core/cli.py` (option `--save`)
 - Modifier : `evals/harness.py` (écrire `latest.json`)
 
 **Étape 1 — test qui échoue**
 
 ```python
 def test_evals_endpoint_returns_404_when_never_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    state = OmiCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    state = JarvisCoreState(data_dir=tmp_path / "d", config_dir=Path("config"),
                          legacy_profile_path=tmp_path / "n.json")
     client = TestClient(create_app(state))
     assert client.get("/api/evals/latest").status_code == 404
@@ -809,7 +809,7 @@ def test_evals_endpoint_returns_404_when_never_run(tmp_path, monkeypatch):
         if not latest_file.exists():
             raise HTTPException(
                 status_code=404,
-                detail="Aucune evaluation enregistree. Lancez `omi eval --save`.",
+                detail="Aucune evaluation enregistree. Lancez `jarvis eval --save`.",
             )
         return EvalSuiteResult.model_validate_json(latest_file.read_text(encoding="utf-8"))
 ```
@@ -835,23 +835,23 @@ Dans `evals/harness.py`, ajouter :
 ```
 
 **Étape 4 — côté front** (`web/src/pages/ConfigPage.tsx:98`) : afficher « Banc d'essai : jamais exécuté
-— lancez `omi eval --save` » quand la requête renvoie 404, au lieu de laisser `evalsQuery.data` indéfini.
+— lancez `jarvis eval --save` » quand la requête renvoie 404, au lieu de laisser `evalsQuery.data` indéfini.
 
-**Validation :** `omi eval --save` puis `curl -s localhost:8765/api/evals/latest | jq .passed` renvoie un
+**Validation :** `jarvis eval --save` puis `curl -s localhost:8765/api/evals/latest | jq .passed` renvoie un
 nombre réel ; sans le fichier, l'API renvoie 404.
 
-### Tâche 3.3 — Point d'entrée `omi` et commande `chat`
+### Tâche 3.3 — Point d'entrée `jarvis` et commande `chat`
 
-**Fichiers :** `packages/core/pyproject.toml`, `packages/core/omi_core/cli.py:47-53`
+**Fichiers :** `packages/core/pyproject.toml`, `packages/core/jarvis_core/cli.py:47-53`
 
-**Problème mesuré :** `packages/core/pyproject.toml` ne déclare aucun `[project.scripts]`, donc `omi eval`
-et `omi chat` n'existent pas ; et `main()` renvoie `0` sans rien faire pour `chat`.
+**Problème mesuré :** `packages/core/pyproject.toml` ne déclare aucun `[project.scripts]`, donc `jarvis eval`
+et `jarvis chat` n'existent pas ; et `main()` renvoie `0` sans rien faire pour `chat`.
 
 **Implémentation :**
 
 ```toml
 [project.scripts]
-omi = "omi_core.cli:main"
+jarvis = "jarvis_core.cli:main"
 ```
 
 ```python
@@ -862,11 +862,11 @@ omi = "omi_core.cli:main"
 avec `_run_chat_cmd` qui construit `build_runtime(...)`, boucle sur `input("> ")`, appelle
 `runtime.agent.run_turn(...)` et imprime le texte + le coût du tour.
 
-**Validation :** `uv sync && omi --help` liste `chat` et `eval` ; `omi chat --model glm` répond.
+**Validation :** `uv sync && jarvis --help` liste `chat` et `eval` ; `jarvis chat --model glm` répond.
 
 ### Tâche 3.4 — Canaux de notification réellement branchés
 
-**Fichiers :** `packages/core/omi_core/runtime.py`, `packages/core/omi_core/channels/*.py`
+**Fichiers :** `packages/core/jarvis_core/runtime.py`, `packages/core/jarvis_core/channels/*.py`
 
 **Constat :** `TelegramChannel`, `TwilioVoiceChannel`, `NtfyChannel` existent mais aucun n'est instancié
 hors tests ; `AttentionEngine._dispatch_decision` appelle `self.on_dispatch(notif, decision)` qui n'est
@@ -917,10 +917,10 @@ Attendu : au moins deux chunks JS, le principal sous 500 Ko.
 **Fichiers :** `web/playwright.config.ts`, `web/tests/app.spec.ts`
 
 **Constat :** les 4 tests E2E tournent contre `web/mock-server.mjs`, donc ils ne prouvent rien sur
-`omi-core`.
+`jarvis-core`.
 
 **Implémentation :** ajouter un second projet Playwright `real-core` dont le `webServer` lance
-`uvicorn omi_core.api.server:app` sur le port 8766 avec `OMI_ALLOW_INSECURE=1` et un `OMI_DATA_DIR`
+`uvicorn jarvis_core.api.server:app` sur le port 8766 avec `JARVIS_ALLOW_INSECURE=1` et un `JARVIS_DATA_DIR`
 temporaire, et un test qui envoie un message et vérifie un `assistant.delta` non-echo.
 
 **Validation :** `cd web && npx playwright test --project=real-core` → vert.
@@ -966,7 +966,7 @@ jobs:
 **Fichier :** `README.md` (actuellement 222 lignes décrivant la v1 : Tkinter, Gemini seul, `install_linux.sh` apt)
 
 **Contenu cible :** architecture v2 (packages, ports 8765/5173), `deploy/install_arch.sh`, variables
-`.env` réelles, `omi chat` / `omi eval`, sécurité (jeton obligatoire, approbations, `<untrusted>`),
+`.env` réelles, `jarvis chat` / `jarvis eval`, sécurité (jeton obligatoire, approbations, `<untrusted>`),
 limites connues. Supprimer les tableaux de la v1 ou les déplacer sous « historique ».
 
 **Validation :** chaque commande du README exécutée une fois sur une machine propre (ou conteneur).
@@ -976,24 +976,24 @@ limites connues. Supprimer les tableaux de la v1 ou les déplacer sous « histor
 ## Fichiers touchés (récapitulatif)
 
 Créés :
-- `packages/core/omi_core/runtime.py`
+- `packages/core/jarvis_core/runtime.py`
 - `tests/test_runtime.py`, `tests/test_ws_agent.py`, `tests/test_memory_unification.py`
 - `.github/workflows/ci.yml`
 
 Modifiés :
-- `packages/core/omi_core/api/server.py` (WS, auth, évals, persistance)
-- `packages/core/omi_core/agent/loop.py` (callbacks delta/outils)
-- `packages/core/omi_core/memory/storage.py` (adaptateur), `memory/schema.py` (migration 2 + settings)
-- `packages/core/omi_core/tools/registry.py` (timeout d'approbation)
-- `packages/core/omi_core/tools/standard.py` (`register_all`)
-- `packages/core/omi_core/cli.py`, `packages/core/pyproject.toml` (script `omi`)
+- `packages/core/jarvis_core/api/server.py` (WS, auth, évals, persistance)
+- `packages/core/jarvis_core/agent/loop.py` (callbacks delta/outils)
+- `packages/core/jarvis_core/memory/storage.py` (adaptateur), `memory/schema.py` (migration 2 + settings)
+- `packages/core/jarvis_core/tools/registry.py` (timeout d'approbation)
+- `packages/core/jarvis_core/tools/standard.py` (`register_all`)
+- `packages/core/jarvis_core/cli.py`, `packages/core/pyproject.toml` (script `jarvis`)
 - `evals/harness.py` (rapport), `web/src/pages/ConfigPage.tsx`, `web/src/App.tsx`,
   `web/playwright.config.ts`, `README.md`, `.gitignore`
 - `core/tools.py` (garde-fou legacy), `tests/test_tools.py`, `tests/test_frontend_repetitif.py`
 
 Supprimés / déplacés :
 - `SCHEMA_SQL` dans `memory/storage.py`
-- `omi-windows/` (archive dans `legacy/`)
+- `jarvis-windows/` (archive dans `legacy/`)
 
 ---
 
@@ -1009,21 +1009,21 @@ PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m 
 cd web && npx vitest run && npx playwright test
 
 # 3. Service réel
-export OMI_API_TOKEN=$(openssl rand -hex 24)
+export JARVIS_API_TOKEN=$(openssl rand -hex 24)
 PYTHONPATH=packages/shared:packages/core:packages/desktop:. \
-  .venv/bin/python -m uvicorn omi_core.api.server:app --host 127.0.0.1 --port 8765 &
-curl -s -H "Authorization: Bearer $OMI_API_TOKEN" localhost:8765/api/health | jq .
+  .venv/bin/python -m uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765 &
+curl -s -H "Authorization: Bearer $JARVIS_API_TOKEN" localhost:8765/api/health | jq .
 
 # 4. Conversation réelle (consomme des tokens)
 #    Dans l'UI : poser une question -> vérifier assistant.delta en streaming,
 #    l'entrée dans /api/messages, et une ligne dans llm_calls.
 
 # 5. Outil sensible
-#    Demander « écris /tmp/omi-test.txt avec bonjour » -> approval.request dans /alerts,
+#    Demander « écris /tmp/jarvis-test.txt avec bonjour » -> approval.request dans /alerts,
 #    approuver -> fichier créé.
 
 # 6. Coût
-curl -s -H "Authorization: Bearer $OMI_API_TOKEN" localhost:8765/api/usage/daily | jq .
+curl -s -H "Authorization: Bearer $JARVIS_API_TOKEN" localhost:8765/api/usage/daily | jq .
 ```
 
 Critères d'acceptation :
@@ -1032,7 +1032,7 @@ Critères d'acceptation :
 - un outil de niveau 2 attend l'humain et s'exécute après approbation ;
 - un changement de modèle survit à un redémarrage ;
 - `/api/evals/latest` renvoie 404 ou un rapport réellement produit, jamais un faux ;
-- `git log --all -- omi_history.db` renvoie 0 ligne sur un clone neuf.
+- `git log --all -- jarvis_history.db` renvoie 0 ligne sur un clone neuf.
 
 ---
 
@@ -1040,7 +1040,7 @@ Critères d'acceptation :
 
 1. **Purge Git irréversible** — réécrit tous les SHA. Question : d'autres clones/PR existent-ils ?
    Si oui, prévoir une fenêtre et prévenir avant `push --force`.
-2. **Coût réel des évals** — `omi eval` utilise aujourd'hui `_EvalMockProvider`. Passer à un modèle réel
+2. **Coût réel des évals** — `jarvis eval` utilise aujourd'hui `_EvalMockProvider`. Passer à un modèle réel
    pour `oral_register` et `prompt_injection` coûte quelques centimes par run ; à décider (option
    `--live`).
 3. **Streaming et `AgentLoop`** — `run_turn` accumule aujourd'hui tout le texte avant de rendre la main ;
@@ -1050,7 +1050,7 @@ Critères d'acceptation :
    dans `standard.py` contre `Callable[..., Any]` dans `registry.ToolSpec`) impose peut-être un adaptateur ;
    à trancher à l'implémentation.
 5. **SQLCipher** — `MemoryDatabase` accepte une `encryption_key` mais rien ne la fournit ; brancher
-   `SecretStore.get_secret("OMI_DB_KEY")` est une tâche à part (chiffrement au repos, plan §2.2).
+   `SecretStore.get_secret("JARVIS_DB_KEY")` est une tâche à part (chiffrement au repos, plan §2.2).
 6. **TTS / voix temps réel** — `GeminiLiveBridge` et `RealtimeVoicePipeline` ne sont pas dans ce plan ;
    ils dépendent de la tâche 2.3 (streaming) et méritent leur propre plan.
 7. **Python 3.14 dans `.venv`** — le venv local tourne en 3.14.7 alors que `.python-version` et

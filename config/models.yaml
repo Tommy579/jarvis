@@ -2,6 +2,16 @@ defaults:
   provider: openrouter
   daily_budget_usd: 5.0
 
+autonomous_pool:
+  - gemini-4-carbon
+  - deepseek/deepseek-v4.1-flash-1017
+  - minimax/minimax-m3
+  - z-ai/glm-5.3
+  - moonshotai/kimi-k3
+  - gemini-4-argon
+  - gemini-4-hydrogen
+  - qwen3.5:2b
+
 roles:
   agent:
     model: deepseek/deepseek-v4.1-flash-1017
@@ -9,26 +19,36 @@ roles:
     fallback:
       - z-ai/glm-5.3
       - minimax/minimax-m3
-      - google/gemini-3.5-flash-lite
+      - moonshotai/kimi-k3
+      - gemini-4-argon
+      - gemini-4-carbon
+  orchestrator:
+    model: gemini-4-argon
+    provider: gemini
+    fallback:
+      - deepseek/deepseek-v4.1-flash-1017
+      - z-ai/glm-5.3
+      - gemini-4-hydrogen
   triage:
-    model: gemini-3.5-flash-lite
+    model: gemini-4-carbon
     provider: gemini
     fallback:
-      - google/gemini-3.5-flash-lite
+      - gemini-4-argon
   vision:
-    model: gemini-3.5-flash-lite
+    model: gemini-4-carbon
     provider: gemini
     fallback:
-      - google/gemini-3.5-flash-lite
+      - gemini-4-argon
   memory:
     model: deepseek/deepseek-v4.1-flash-1017
     provider: openrouter
     fallback:
-      - google/gemini-3.5-flash-lite
+      - gemini-4-carbon
   deep:
     model: gemini-4-hydrogen
     provider: gemini
     fallback:
+      - gemini-4-argon
       - deepseek/deepseek-v4.1-flash-1017
   voice_realtime:
     model: gemini-live
@@ -38,7 +58,7 @@ providers:
   openrouter:
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
-    app_name: OMI
+    app_name: JARVIS
     data_collection: deny
     trusted_for_highly_private: false
   gemini:

@@ -1,11 +1,34 @@
-name: OMI 2.0 CI
+name: JARVIS 2.0 CI
 
 on:
   push:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Installation propre : verifie que les dependances DECLAREES suffisent a demarrer le
+  # service. Sans ce job, un import non declare passe en developpement (le venv a la
+  # dependance par effet de bord) et casse toute installation neuve.
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer le workspace depuis les seules dependances declarees
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install --upgrade pip
+          /tmp/clean/bin/python -m pip install ./packages/shared ./packages/core ./packages/desktop
+      - name: Verifier que le service et le CLI s'importent
+        run: |
+          /tmp/clean/bin/python -c "import jarvis_core.api.server, jarvis_core.cli, jarvis_shared, jarvis_desktop; print('imports OK avec les seules dependances declarees')"
+
   backend:
     runs-on: ubuntu-latest
     steps:
@@ -19,12 +42,12 @@ jobs:
           pip install -e packages/shared -e packages/core -e packages/desktop pytest pytest-asyncio ruff
       - name: Lint and format check
         run: |
-          ruff check packages tests
-          ruff format --check packages tests
+          ruff check packages tests packaging
+          ruff format --check packages tests packaging
       - name: Run pytest
         run: pytest tests -q
       - name: Run eval harness
-        run: omi eval
+        run: jarvis eval
 
   frontend:
     runs-on: ubuntu-latest

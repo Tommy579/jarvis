@@ -1,16 +1,13 @@
 """Tests pour TelegramGateway et les interactions bidirectionnelles Telegram."""
 
-import asyncio
-from unittest.mock import AsyncMock, patch
-
 import pytest
-from omi_core.channels.telegram import TelegramGateway, build_alert_keyboard, build_approval_keyboard
+from jarvis_core.channels.telegram import TelegramGateway
 
 
 @pytest.mark.asyncio
 async def test_telegram_gateway_permissions() -> None:
     gw = TelegramGateway(bot_token="fake_tok", allowed_chat_id=123456)
-    
+
     # Non autorisé
     res_unauth = await gw.handle_text(999999, "Hello")
     assert res_unauth.authorized is False
@@ -90,7 +87,9 @@ async def test_telegram_gateway_voice_and_photo() -> None:
 
 
 def test_telegram_dispatcher_build() -> None:
-    gw = TelegramGateway(bot_token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", allowed_chat_id=123456)
+    gw = TelegramGateway(
+        bot_token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", allowed_chat_id=123456
+    )
     bot, dp = gw.build_aiogram_dispatcher()
     assert bot is not None
     assert dp is not None

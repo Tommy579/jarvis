@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
-from omi_core.agent.loop import AgentLoop, DelegateSubagentArgs, ensure_concise_response
-from omi_core.llm.base import LLMProvider
-from omi_core.llm.router import LLMRouter, RoleRoute
-from omi_core.memory.engine import DEFAULT_PERSONA_PROMPT, MemoryEngine
-from omi_core.memory.storage import MemoryStorage
-from omi_core.memory.wiki import MarkdownWiki
-from omi_core.tools.registry import ToolRegistry
-from omi_shared.models import Message, ModelCapabilities, Role, StreamDelta, ToolCall, Usage
+from jarvis_core.agent.loop import AgentLoop, ensure_concise_response
+from jarvis_core.llm.base import LLMProvider
+from jarvis_core.llm.router import LLMRouter, RoleRoute
+from jarvis_core.memory.engine import MemoryEngine
+from jarvis_core.memory.storage import MemoryStorage
+from jarvis_core.memory.wiki import MarkdownWiki
+from jarvis_core.tools.registry import ToolRegistry
+from jarvis_shared.models import ModelCapabilities, Role, StreamDelta, ToolCall, Usage
 
 
 class _MockProvider(LLMProvider):
@@ -89,7 +88,9 @@ async def test_subagent_tool_execution(tmp_path: Path) -> None:
             [
                 StreamDelta(
                     text="Sous-tache analysee : aucun probleme detecte.",
-                    usage=Usage(model="deep", provider="mock", tokens_in=5, tokens_out=8, cost_usd=0.0),
+                    usage=Usage(
+                        model="deep", provider="mock", tokens_in=5, tokens_out=8, cost_usd=0.0
+                    ),
                 )
             ]
         ]
@@ -102,7 +103,7 @@ async def test_subagent_tool_execution(tmp_path: Path) -> None:
         },
     )
     registry = ToolRegistry()
-    loop = AgentLoop(router=router, tool_registry=registry)
+    AgentLoop(router=router, tool_registry=registry)  # enregistre delegate_subagent
 
     # L'outil doit etre enregistre automatiquement
     spec = registry.get("delegate_subagent")
@@ -113,3 +114,77 @@ async def test_subagent_tool_execution(tmp_path: Path) -> None:
     res = await spec.handler(task="Verifier la charge du serveur", role="deep")
     assert res["ok"] is True
     assert "Sous-tache analysee" in res["result"]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_step_limit_exceeds_eight_when_progressing() -> None:
+    from pydantic import BaseModel
+
+    class _PingArgs(BaseModel):
+        step: int
+
+    # 15 appels d'outils successifs puis reponse finale (> 8 et > BASE_ITERATIONS=12)
+    responses: list[list[StreamDelta]] = [
+        [
+            StreamDelta(
+                tool_calls=[ToolCall(id=f"tc_{i}", name="ping", arguments={"step": i})],
+                usage=Usage(
+                    model="agent", provider="mock", tokens_in=2, tokens_out=2, cost_usd=0.0
+                ),
+            )
+        ]
+        for i in range(15)
+    ]
+    responses.append([StreamDelta(text="Termine apres 15 etapes.")])
+
+    provider = _MockProvider(responses)
+    router = LLMRouter(
+        providers={"mock": provider},
+        roles={"agent": RoleRoute(role_name="agent", model="mock-agent", provider="mock")},
+    )
+    registry = ToolRegistry()
+
+    from jarvis_core.tools.registry import ToolSpec
+
+    async def _ping_handler(step: int) -> dict[str, Any]:
+        return {"ok": True, "step": step}
+
+    registry.register(
+        ToolSpec(
+            name="ping",
+            description="Outil de test",
+            handler=_ping_handler,
+            args_model=_PingArgs,
+        )
+    )
+
+    loop = AgentLoop(router=router, tool_registry=registry)
+    res = await loop.run_turn("Execute 15 etapes")
+    assert res.iterations == 16
+    assert "Termine apres 15 etapes." in res.text
+
+
+@pytest.mark.asyncio
+async def test_main_agent_excludes_direct_coding_tools(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    from jarvis_core.runtime import build_runtime
+
+    rt = build_runtime(
+        data_dir=tmp_path / "data",
+        config_dir=Path(__file__).resolve().parent.parent / "config",
+    )
+    schemas = rt.tool_registry.list_schemas(excluded_tools=rt.agent.excluded_tools)
+    names = {s["function"]["name"] for s in schemas}
+    assert "delegate_subagent" in names
+    assert "start_goal" in names
+    assert "write_file" not in names
+    assert "run_command" not in names
+
+    blocked = await rt.tool_registry.execute(
+        ToolCall(id="tc-w", name="write_file", arguments={"path": "x.py", "content": "pass"}),
+        excluded_tools=rt.agent.excluded_tools,
+    )
+    assert blocked.is_error is True
+    assert blocked.output.get("blocked_by") == "orchestrator_delegation_policy"

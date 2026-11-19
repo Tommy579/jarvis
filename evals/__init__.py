@@ -1,4 +1,4 @@
-"""Banc d'essai reproductible (omi eval) pour comparer les modeles LLM."""
+"""Banc d'essai reproductible (jarvis eval) pour comparer les modeles LLM."""
 
 from .harness import EvalHarness, EvalScenarioResult
 

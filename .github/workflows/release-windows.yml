@@ -1,0 +1,84 @@
+name: Release Windows (exe)
+
+# PyInstaller ne produit pas d'executable Windows depuis Linux : ce workflow tourne sur un
+# runner windows-latest. Il se declenche manuellement (onglet Actions > Run workflow) ou
+# sur un tag v* (l'archive est alors attachee a la release GitHub).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Installer les dependances Python et PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e packages/shared -e packages/core -e packages/desktop pyinstaller
+
+      - name: Compiler le frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Construire l'executable
+        shell: powershell
+        run: ./scripts/build_windows.ps1 -SkipInstall -SkipFrontend
+
+      - name: Verifier que le binaire repond
+        shell: powershell
+        run: |
+          $env:JARVIS_ALLOW_INSECURE = "1"
+          $env:JARVIS_DATA_DIR = "$env:RUNNER_TEMP\jarvis-check"
+          $proc = Start-Process -FilePath "dist\JARVIS\jarvis.exe" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8765/api/health" -UseBasicParsing -TimeoutSec 2
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "Le binaire jarvis.exe ne repond pas sur /api/health" }
+          Write-Host "jarvis.exe repond correctement."
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-windows-x64
+          path: dist/JARVIS-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Creer la release (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" --generate-notes --title "JARVIS 2.0 ${{ github.ref_name }}"
+        continue-on-error: true
+
+      - name: Joindre a la release existante (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" --clobber
+        continue-on-error: true

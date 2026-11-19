@@ -1,6 +1,11 @@
 import { Suspense, lazy, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { GoalTrackerCard } from "../components/GoalTrackerCard";
 import { Icon } from "../components/Icon";
-import { useOmiStore } from "../store/useOmiStore";
+import { RichText } from "../components/RichText";
+import { SlashCommandMenu } from "../components/SlashCommandMenu";
+import { formatModelLabel } from "../lib/modelLabels";
+import { filterSlashCommands, type SlashCommandDef } from "../lib/slashCommands";
+import { useJarvisStore, type ThinkingMode } from "../store/useJarvisStore";
 import type { SensorName, SphereState } from "../types/generated";
 import { AudioEngine } from "../sphere/AudioEngine";
 import { SphereFallback2D } from "../sphere/SphereFallback2D";
@@ -14,7 +19,9 @@ interface HomePageProps {
   onSendText: (text: string) => void;
   onToggleSensor: (sensor: SensorName, paused: boolean) => void;
   onSelectModel: (model: string) => void;
+  onSelectThinking: (mode: ThinkingMode) => void;
   onInterrupt: () => void;
+  onOpenGoals?: () => void;
 }
 
 const QUICK_MODELS = [
@@ -23,13 +30,15 @@ const QUICK_MODELS = [
   "gemma4:31b-cloud",
   "nemotron-3-ultra:cloud",
   "minimax-m3:cloud",
+  "gemini-4-hydrogen",
+  "gemini-4-argon",
+  "gemini-4-carbon",
   "gemini-3-flash-preview",
   "gemini-3.1-pro-preview",
   "deepseek/deepseek-v4.1-flash-1017",
   "z-ai/glm-5.3",
   "minimax/minimax-m3",
-  "google/gemini-3.5-flash-lite",
-  "google/gemini-4-hydrogen",
+  "moonshotai/kimi-k3",
 ];
 
 const STATE_LABELS: Record<SphereState, string> = {
@@ -47,32 +56,86 @@ const SENSOR_META: Record<SensorName, { label: string; icon: "monitor" | "mic" |
   camera: { label: "Caméra", icon: "camera" },
 };
 
+const THINKING_OPTIONS: { value: ThinkingMode; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "off", label: "Off" },
+  { value: "low", label: "Léger" },
+  { value: "medium", label: "Moyen" },
+  { value: "high", label: "Profond" },
+];
+
+const QUICK_PROMPTS = [
+  "Résume mes derniers échanges",
+  "État de mes objectifs",
+  "Vérifie mes alertes en attente",
+];
+
 export function HomePage({
   audioEngine,
   onSendText,
   onToggleSensor,
   onSelectModel,
+  onSelectThinking,
   onInterrupt,
+  onOpenGoals,
 }: HomePageProps) {
-  const sphereState = useOmiStore((s) => s.sphereState);
-  const theme = useOmiStore((s) => s.theme);
-  const partialTranscript = useOmiStore((s) => s.partialTranscript);
-  const finalTranscript = useOmiStore((s) => s.finalTranscript);
-  const streamingText = useOmiStore((s) => s.streamingText);
-  const messages = useOmiStore((s) => s.messages);
-  const sensors = useOmiStore((s) => s.sensors);
-  const activeModel = useOmiStore((s) => s.activeModel);
-  const lastInterruptedAt = useOmiStore((s) => s.lastInterruptedAt);
-  const sessionStartedAt = useOmiStore((s) => s.sessionStartedAt);
+  const sphereState = useJarvisStore((s) => s.sphereState);
+  const theme = useJarvisStore((s) => s.theme);
+  const partialTranscript = useJarvisStore((s) => s.partialTranscript);
+  const finalTranscript = useJarvisStore((s) => s.finalTranscript);
+  const streamingText = useJarvisStore((s) => s.streamingText);
+  const messages = useJarvisStore((s) => s.messages);
+  const sensors = useJarvisStore((s) => s.sensors);
+  const activeModel = useJarvisStore((s) => s.activeModel);
+  const thinkingMode = useJarvisStore((s) => s.thinkingMode);
+  const lastInterruptedAt = useJarvisStore((s) => s.lastInterruptedAt);
+  const sessionStartedAt = useJarvisStore((s) => s.sessionStartedAt);
+  const goalsMap = useJarvisStore((s) => s.goals);
+  const goalMode = useJarvisStore((s) => s.goalMode);
+  const setGoalMode = useJarvisStore((s) => s.setGoalMode);
+  const voiceMode = useJarvisStore((s) => s.voiceMode);
+  const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
+
+  const activeGoal = Object.values(goalsMap)
+    .filter((g) =>
+      ["planning", "running", "verifying", "waiting_user", "waiting_approval", "paused_budget"].includes(
+        g.status
+      )
+    )
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
 
   const [input, setInput] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
   const [expandedPreview, setExpandedPreview] = useState(false);
   const [streamFallback, setStreamFallback] = useState(false);
   const [frameTick, setFrameTick] = useState(0);
+  const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
 
   const cameraSensor = sensors.find((s) => s.sensor === "camera");
   const cameraActive = Boolean(cameraSensor && !cameraSensor.paused && cameraSensor.active);
+  const micSensor = sensors.find((s) => s.sensor === "mic");
+  const micEnabled = Boolean(micSensor && !micSensor.paused);
+
+  useEffect(() => {
+    if (!modelPopoverOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setModelPopoverOpen(false);
+      }
+    };
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setModelPopoverOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [modelPopoverOpen]);
 
   useEffect(() => {
     if (!cameraActive) {
@@ -116,7 +179,7 @@ export function HomePage({
   useEffect(() => {
     if (lastInterruptedAt) {
       setInput("");
-      useOmiStore.getState().clearTranscripts();
+      useJarvisStore.getState().clearTranscripts();
     }
   }, [lastInterruptedAt]);
 
@@ -124,7 +187,7 @@ export function HomePage({
   useEffect(() => {
     if (streamingText) {
       setInput("");
-      useOmiStore.getState().clearTranscripts();
+      useJarvisStore.getState().clearTranscripts();
     }
   }, [streamingText]);
 
@@ -132,7 +195,7 @@ export function HomePage({
     if (lastAssistantId && lastAssistantId !== prevAssistantIdRef.current) {
       prevAssistantIdRef.current = lastAssistantId;
       setInput("");
-      useOmiStore.getState().clearTranscripts();
+      useJarvisStore.getState().clearTranscripts();
     }
   }, [lastAssistantId]);
 
@@ -152,17 +215,41 @@ export function HomePage({
   if (isPlaceholder) {
     liveLine =
       sphereState === "offline"
-        ? "Le service omi-core ne répond pas. Les messages passeront par l'API dès son retour."
+        ? "Le service jarvis-core ne répond pas. Les messages passeront par l'API dès son retour."
         : "Posez une question, ou activez le micro ci-dessous pour parler.";
   }
 
   const TRUNCATE_LIMIT = 240;
-  const isTruncatable = liveLine.length > TRUNCATE_LIMIT && !isPlaceholder;
+  const SUITE_MARKER_RE = /\s*(?:\.\.\.|…)?\s*(?:\[suite\]|\(suite\)|suite\.\.\.)\s*$/i;
+  const hasSuiteMarker = !isPlaceholder && SUITE_MARKER_RE.test(liveLine);
+  const cleanLine = isPlaceholder ? liveLine : liveLine.replace(SUITE_MARKER_RE, "").trimEnd();
+  const isStructured = !isPlaceholder && (cleanLine.includes("\n| ") || cleanLine.startsWith("### "));
+  const isTruncatable = !isStructured && cleanLine.length > TRUNCATE_LIMIT && !isPlaceholder;
   const displayLine =
-    isTruncatable && !expandedPreview ? `${liveLine.slice(0, TRUNCATE_LIMIT).trimEnd()}…` : liveLine;
-
+    isTruncatable && !expandedPreview
+      ? `${cleanLine.slice(0, TRUNCATE_LIMIT).trimEnd()}…`
+      : cleanLine;
   const isBusy =
     sphereState === "thinking" || sphereState === "speaking" || Boolean(streamingText);
+  const showSuiteBtn = isTruncatable || (hasSuiteMarker && !isBusy);
+
+  const slashItems = slashDismissed ? [] : filterSlashCommands(input);
+  const activeSlashIndex = slashItems.length > 0 ? Math.min(slashIndex, slashItems.length - 1) : 0;
+
+  const selectSlashItem = (item: SlashCommandDef, fromTab = false) => {
+    if ((fromTab && item.type !== "immediate") || item.type === "goal") {
+      setInput(`${item.cmd} `);
+      setSlashIndex(0);
+      setSlashDismissed(false);
+      inputRef.current?.focus();
+      return;
+    }
+    setInput("");
+    setSlashIndex(0);
+    setSlashDismissed(false);
+    useJarvisStore.getState().clearTranscripts();
+    onSendText(item.cmd);
+  };
 
   const submit = () => {
     const trimmed = input.trim();
@@ -172,7 +259,9 @@ export function HomePage({
     }
     onSendText(trimmed);
     setInput("");
-    useOmiStore.getState().clearTranscripts();
+    setSlashIndex(0);
+    setSlashDismissed(false);
+    useJarvisStore.getState().clearTranscripts();
   };
 
   const handleSubmit = (e: FormEvent) => {
@@ -181,35 +270,111 @@ export function HomePage({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashItems.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((activeSlashIndex + 1) % slashItems.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex((activeSlashIndex - 1 + slashItems.length) % slashItems.length);
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        selectSlashItem(slashItems[activeSlashIndex], true);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashDismissed(true);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+        e.preventDefault();
+        selectSlashItem(slashItems[activeSlashIndex], false);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
     }
   };
 
+  const currentThinkingLabel =
+    THINKING_OPTIONS.find((t) => t.value === thinkingMode)?.label ?? thinkingMode;
+  const pillLabel =
+    sphereState === "idle" && voiceMode === "standby"
+      ? "Attente « Jarvis »"
+      : STATE_LABELS[sphereState] ?? sphereState;
+
   return (
-    <section className="home" aria-label="Accueil vocal">
+    <section className="home" data-sphere-state={sphereState} aria-label="Accueil vocal">
       <div className="home__top">
-        <span className="state-pill" data-state={sphereState} data-testid="sphere-state-badge">
+        <span
+          className="state-pill"
+          data-state={sphereState}
+          data-voice-mode={voiceMode}
+          data-testid="sphere-state-badge"
+        >
           <span className="dot" aria-hidden="true" />
-          {STATE_LABELS[sphereState] ?? sphereState}
+          {pillLabel}
         </span>
 
-        <label className="model-picker">
-          <span>Modèle</span>
-          <select
-            aria-label="Modèle agent actif"
-            className="select select--sm"
-            value={activeModel}
-            onChange={(e) => onSelectModel(e.target.value)}
+        <div className="home__controls" ref={popoverRef}>
+          <button
+            type="button"
+            className="model-trigger"
+            aria-expanded={modelPopoverOpen}
+            aria-haspopup="dialog"
+            onClick={() => setModelPopoverOpen((v) => !v)}
           >
-            {modelOptions.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </label>
+            <span className="model-trigger__name">{formatModelLabel(activeModel)}</span>
+            <span className="model-trigger__sep" aria-hidden="true">·</span>
+            <span className="model-trigger__think">{currentThinkingLabel}</span>
+            <Icon name="chevron" size={13} className="model-trigger__chev" />
+          </button>
+
+          {modelPopoverOpen && (
+            <div className="model-popover" role="dialog" aria-label="Paramètres du modèle actif">
+              <label className="model-popover__field">
+                <span>Modèle actif</span>
+                <select
+                  aria-label="Modèle agent actif"
+                  className="select select--sm"
+                  value={activeModel}
+                  onChange={(e) => onSelectModel(e.target.value)}
+                >
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {formatModelLabel(m)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="model-popover__field">
+                <span>Raisonnement</span>
+                <div className="model-popover__pills" role="radiogroup" aria-label="Mode de raisonnement du modèle">
+                  {THINKING_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={thinkingMode === opt.value}
+                      className="model-popover__pill"
+                      onClick={() => onSelectThinking(opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {cameraActive && (
@@ -227,61 +392,133 @@ export function HomePage({
       )}
 
       <div className="home__stage">
-        <Suspense
-          fallback={
-            <div
-              className="sphere-wrapper"
-              data-testid="omi-sphere"
-              data-sphere-state={sphereState}
-              data-renderer="canvas2d"
-            >
-              <SphereFallback2D
-                sphereState={sphereState}
-                theme={theme}
-                amplitude={0.12}
-                reducedMotion={false}
-              />
-            </div>
-          }
-        >
-          <VoiceSphere audioEngine={audioEngine} />
-        </Suspense>
+        <div className="sphere-stage" data-state={sphereState}>
+          <div className="sphere-orbit" aria-hidden="true" />
+          <Suspense
+            fallback={
+              <div
+                className="sphere-wrapper"
+                data-testid="jarvis-sphere"
+                data-sphere-state={sphereState}
+                data-renderer="canvas2d"
+              >
+                <SphereFallback2D
+                  sphereState={sphereState}
+                  theme={theme}
+                  amplitude={0.12}
+                  reducedMotion={false}
+                />
+              </div>
+            }
+          >
+            <VoiceSphere audioEngine={audioEngine} />
+          </Suspense>
+        </div>
 
         <div className="live-line-wrap">
-          <p
-            className="live-line"
-            aria-live="polite"
-            data-testid="live-subtitles"
-            data-placeholder={isPlaceholder}
-          >
-            {who && <span className="live-line__who">{who}</span>}
-            {displayLine}
-          </p>
-          {isTruncatable && (
+          {isStructured ? (
+            <div
+              className="live-line live-line--rich"
+              aria-live="polite"
+              data-testid="live-subtitles"
+              data-placeholder={isPlaceholder}
+            >
+              {who && <span className="live-line__who">{who}</span>}
+              <RichText content={cleanLine} />
+            </div>
+          ) : (
+            <p
+              className="live-line"
+              aria-live="polite"
+              data-testid="live-subtitles"
+              data-placeholder={isPlaceholder}
+              data-expanded={expandedPreview}
+            >
+              {who && <span className="live-line__who">{who}</span>}
+              {displayLine}
+            </p>
+          )}
+          {isPlaceholder && sphereState !== "offline" && (
+            <div className="quick-prompts" aria-label="Suggestions rapides">
+              {QUICK_PROMPTS.map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  className="quick-prompt"
+                  onClick={() => onSendText(q)}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
+          {showSuiteBtn && (
             <button
               type="button"
               className="btn btn--ghost btn--sm"
               style={{ alignSelf: "center", fontSize: "var(--fs-xs)", padding: "2px 8px" }}
-              onClick={() => setExpandedPreview((prev) => !prev)}
+              onClick={() => {
+                if (isTruncatable && !expandedPreview) {
+                  setExpandedPreview(true);
+                } else if (hasSuiteMarker) {
+                  onSendText("Donne la suite.");
+                } else {
+                  setExpandedPreview(false);
+                }
+              }}
             >
-              {expandedPreview ? "Réduire" : "Suite"}
+              {isTruncatable && expandedPreview && !hasSuiteMarker ? "Réduire" : "Suite"}
             </button>
           )}
         </div>
       </div>
 
+      {activeGoal && (
+        <div className="home-goal-banner">
+          <GoalTrackerCard goal={activeGoal} compact onOpenGoals={onOpenGoals} />
+        </div>
+      )}
+
       <div className="composer-dock">
         <form className="composer" onSubmit={handleSubmit} noValidate>
+          <SlashCommandMenu
+            items={slashItems}
+            selectedIndex={activeSlashIndex}
+            onHover={setSlashIndex}
+            onSelect={(item) => selectSlashItem(item, false)}
+          />
           <textarea
             ref={inputRef}
             rows={1}
             className="composer__input"
-            placeholder="Écrire à Jarvis…"
+            placeholder={
+              goalMode
+                ? "Décris l'objectif autonome que Jarvis doit atteindre jusqu'au bout…"
+                : voiceMode === "standby"
+                  ? "Dites « Jarvis » pour parler, ou écrivez ici…"
+                  : voiceMode === "active" && wakeWordEnabled
+                    ? "À l'écoute… Dites « coupe le record » pour mettre en veille"
+                    : "Écrire à Jarvis ou / pour les commandes…"
+            }
             aria-label="Message pour Jarvis"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              setSlashIndex(0);
+              setSlashDismissed(false);
+            }}
             onKeyDown={handleKeyDown}
           />
+          <button
+            type="button"
+            className="mic-btn"
+            aria-pressed={micEnabled}
+            aria-label={micEnabled ? "Couper le micro" : "Activer le micro"}
+            title={micEnabled ? "Micro actif — cliquer pour couper" : "Activer le micro"}
+            onClick={() => onToggleSensor("mic", micEnabled)}
+          >
+            <Icon name="mic" size={17} />
+          </button>
           {isBusy ? (
             <button
               type="button"
@@ -307,6 +544,16 @@ export function HomePage({
 
         <div className="composer-hint">
           <div className="sensors" aria-label="Capteurs">
+            <button
+              type="button"
+              className={`sensor-chip goal-mode-chip ${goalMode ? "goal-mode-chip--active" : ""}`}
+              aria-pressed={goalMode}
+              title="Lancer chaque prompt comme objectif autonome supervisé jusqu'à vérification"
+              onClick={() => setGoalMode(!goalMode)}
+            >
+              <span className="dot" aria-hidden="true" />
+              Mode Objectif
+            </button>
             {sensors.map((sensor) => {
               const meta = SENSOR_META[sensor.sensor];
               const on = !sensor.paused;
@@ -326,7 +573,7 @@ export function HomePage({
               );
             })}
           </div>
-          <span style={{ alignSelf: "center" }}>
+          <span className="composer-hint__keys" style={{ alignSelf: "center" }}>
             <span className="kbd">Entrée</span> envoyer · <span className="kbd">Maj</span>+
             <span className="kbd">Entrée</span> nouvelle ligne
           </span>

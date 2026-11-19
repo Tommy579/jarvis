@@ -2,7 +2,7 @@ import { Component, type ReactNode, useEffect, useMemo, useRef, useState } from 
 import { Canvas, useFrame } from "@react-three/fiber";
 import { motion, type MotionValue, useMotionValue, useSpring, useTransform } from "motion/react";
 import * as THREE from "three";
-import { useOmiStore } from "../store/useOmiStore";
+import { useJarvisStore } from "../store/useJarvisStore";
 import { AudioEngine } from "./AudioEngine";
 import { SphereFallback2D } from "./SphereFallback2D";
 import { pointFragmentShader, pointVertexShader, sphereFragmentShader, sphereVertexShader } from "./shaders";
@@ -42,10 +42,10 @@ interface CoreMeshProps {
 }
 
 function SphereCoreMesh({ audioEngine, reducedMotion, pointerX, pointerY }: CoreMeshProps) {
-  const sphereState = useOmiStore((s) => s.sphereState);
-  const theme = useOmiStore((s) => s.theme);
-  const micLevel = useOmiStore((s) => s.micLevel);
-  const setAudioMetrics = useOmiStore((s) => s.setAudioMetrics);
+  const sphereState = useJarvisStore((s) => s.sphereState);
+  const theme = useJarvisStore((s) => s.theme);
+  const micLevel = useJarvisStore((s) => s.micLevel);
+  const setAudioMetrics = useJarvisStore((s) => s.setAudioMetrics);
 
   const parallaxGroupRef = useRef<THREE.Group | null>(null);
   const coreMeshRef = useRef<THREE.Mesh | null>(null);
@@ -301,9 +301,9 @@ interface VoiceSphereProps {
 }
 
 export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
-  const sphereState = useOmiStore((s) => s.sphereState);
-  const theme = useOmiStore((s) => s.theme);
-  const amplitude = useOmiStore((s) => s.audio.amplitude);
+  const sphereState = useJarvisStore((s) => s.sphereState);
+  const theme = useJarvisStore((s) => s.theme);
+  const amplitude = useJarvisStore((s) => s.audio.amplitude);
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [webglReady, setWebglReady] = useState<boolean>(() => detectWebGL());
@@ -404,7 +404,7 @@ export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
     <motion.div
       ref={wrapperRef}
       className="sphere-wrapper"
-      data-testid="omi-sphere"
+      data-testid="jarvis-sphere"
       data-sphere-state={sphereState}
       data-renderer={webglReady ? "webgl" : "canvas2d"}
       data-foreground={isForeground}

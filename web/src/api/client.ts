@@ -1,7 +1,12 @@
+import { getAuthToken } from "../lib/authToken";
 import type {
   AlertRecord,
   ApprovalItem,
   AttentionRules,
+  AutonomousTaskCreate,
+  AutonomousTaskRecord,
+  AutonomyPolicyConfig,
+  AutonomyPolicyUpdate,
   BlacklistConfig,
   ChatMessage,
   DailyUsageItem,
@@ -9,20 +14,36 @@ import type {
   FactCreate,
   FactRecord,
   FactUpdate,
+  GoalCreate,
+  GoalRecord,
+  GoalSteerRequest,
   IntegrationInfo,
+  MCPServerStatus,
   MemoryExport,
   OnboardingStatus,
   PersonRecord,
   RoleModelConfig,
   SystemAutostartConfig,
+  VoiceProfilesConfig,
+  VoiceVerifyResult,
   WikiPage,
 } from "../types/generated";
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
 
+/** Erreur HTTP typée : permet a l'interface de distinguer un 401 (jeton) d'une autre panne. */
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token =
-    typeof window !== "undefined" ? window.localStorage.getItem("omi_api_token") ?? "" : "";
+  const token = getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(init?.headers as Record<string, string> | undefined),
@@ -42,13 +63,18 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Garde errBody tel quel si ce n'est pas du JSON.
     }
-    throw new Error(message);
+    throw new HttpError(message, resp.status);
   }
   return (await resp.json()) as T;
 }
 
 export const apiClient = {
+  getHealth: () => requestJson<{ status: string; service: string }>("/api/health"),
   getMessages: () => requestJson<ChatMessage[]>("/api/messages"),
+  clearMessages: () =>
+    requestJson<{ cleared: number }>("/api/messages/clear", {
+      method: "POST",
+    }),
   sendMessage: (text: string) =>
     requestJson<ChatMessage>("/api/messages/send", {
       method: "POST",
@@ -59,10 +85,54 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ audio_base64, mime_type }),
     }),
+  wakeCheckVoice: (audio_base64: string, mime_type = "audio/wav", wake_threshold?: number) =>
+    requestJson<{ text: string }>("/api/voice/wake-check", {
+      method: "POST",
+      body: JSON.stringify({
+        audio_base64,
+        mime_type,
+        ...(wake_threshold !== undefined ? { wake_threshold } : {}),
+      }),
+    }),
   speakVoice: (text: string) =>
     requestJson<{ audio_base64: string; sample_rate: number }>("/api/voice/speak", {
       method: "POST",
       body: JSON.stringify({ text }),
+    }),
+  setAudioDucking: (active: boolean, ratio = 0.22) =>
+    requestJson<{ active: boolean }>("/api/voice/ducking", {
+      method: "POST",
+      body: JSON.stringify({ active, ratio }),
+    }),
+  getVoiceProfiles: () => requestJson<VoiceProfilesConfig>("/api/voice/profiles"),
+  updateVoiceProfileSettings: (payload: { enabled?: boolean; threshold?: number }) =>
+    requestJson<VoiceProfilesConfig>("/api/voice/profiles/settings", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  enrollVoiceProfile: (payload: {
+    name: string;
+    role: string;
+    audio_base64: string;
+    mime_type?: string;
+  }) =>
+    requestJson<VoiceProfilesConfig>("/api/voice/profiles", {
+      method: "POST",
+      body: JSON.stringify({ mime_type: "audio/wav", ...payload }),
+    }),
+  addVoiceProfileSample: (profileId: string, audio_base64: string, mime_type = "audio/wav") =>
+    requestJson<VoiceProfilesConfig>(`/api/voice/profiles/${profileId}/samples`, {
+      method: "POST",
+      body: JSON.stringify({ audio_base64, mime_type }),
+    }),
+  deleteVoiceProfile: (profileId: string) =>
+    requestJson<VoiceProfilesConfig>(`/api/voice/profiles/${profileId}`, {
+      method: "DELETE",
+    }),
+  verifyVoiceSample: (audio_base64: string, mime_type = "audio/wav") =>
+    requestJson<VoiceVerifyResult>("/api/voice/profiles/verify", {
+      method: "POST",
+      body: JSON.stringify({ audio_base64, mime_type }),
     }),
   getFacts: (params?: { q?: string; category?: string; sensitivity?: string }) => {
     const sp = new URLSearchParams();
@@ -105,12 +175,24 @@ export const apiClient = {
       body: JSON.stringify({ answers }),
     }),
   getModels: () => requestJson<RoleModelConfig[]>("/api/models"),
+  getThinkingMode: () => requestJson<{ mode: string }>("/api/models/thinking"),
+  updateThinkingMode: (mode: string) =>
+    requestJson<{ mode: string }>("/api/models/thinking", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
   updateRoleModel: (role: string, model: string, fallback?: string[]) =>
     requestJson<RoleModelConfig>("/api/models/role", {
       method: "PUT",
       body: JSON.stringify({ role, model, fallback }),
     }),
   getDailyUsage: () => requestJson<DailyUsageItem[]>("/api/usage/daily"),
+  getDailyBudget: () => requestJson<{ daily_budget_usd: number }>("/api/usage/budget"),
+  updateDailyBudget: (daily_budget_usd: number) =>
+    requestJson<{ daily_budget_usd: number }>("/api/usage/budget", {
+      method: "PUT",
+      body: JSON.stringify({ daily_budget_usd }),
+    }),
   getLatestEvals: () => requestJson<EvalSuiteResult>("/api/evals/latest"),
   runEvals: () => requestJson<EvalSuiteResult>("/api/evals/run", { method: "POST" }),
   getAlerts: () => requestJson<AlertRecord[]>("/api/alerts"),
@@ -227,4 +309,80 @@ export const apiClient = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  getAutonomyPolicy: () => requestJson<AutonomyPolicyConfig>("/api/autonomy/policy"),
+  updateAutonomyPolicy: (patch: Partial<AutonomyPolicyUpdate>) =>
+    requestJson<AutonomyPolicyConfig>("/api/autonomy/policy", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  emergencyStop: () =>
+    requestJson<{ ok: boolean; emergency_stop: boolean; cancelled_tasks: string[] }>(
+      "/api/autonomy/emergency-stop",
+      { method: "POST" }
+    ),
+  getAutonomousTasks: (limit = 20) =>
+    requestJson<AutonomousTaskRecord[]>(`/api/autonomy/tasks?limit=${limit}`),
+  createAutonomousTask: (payload: AutonomousTaskCreate) =>
+    requestJson<AutonomousTaskRecord>("/api/autonomy/tasks", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  cancelAutonomousTask: (taskId: string) =>
+    requestJson<AutonomousTaskRecord>(`/api/autonomy/tasks/${taskId}/cancel`, {
+      method: "POST",
+    }),
+  getMcpServers: () => requestJson<MCPServerStatus[]>("/api/mcp/servers"),
+  getGoalModels: () =>
+    requestJson<
+      Array<{
+        id: string;
+        provider: string;
+        label: string;
+        tier: string;
+        strengths: string;
+        in_cost_per_m: number;
+        out_cost_per_m: number;
+        supports_vision: boolean;
+        best_for?: string[];
+      }>
+    >("/api/goals/models"),
+  getGoals: (limit = 30) => requestJson<GoalRecord[]>(`/api/goals?limit=${limit}`),
+  createGoal: (payload: Partial<GoalCreate> & { goal: string }) =>
+    requestJson<GoalRecord>("/api/goals", {
+      method: "POST",
+      body: JSON.stringify({
+        max_cost_usd: 1.5,
+        orchestrator_model: null,
+        allowed_models: null,
+        notify_on_finish: true,
+        ...payload,
+      }),
+    }),
+  getGoal: (goalId: string) => requestJson<GoalRecord>(`/api/goals/${goalId}`),
+  steerGoal: (goalId: string, payload: Partial<GoalSteerRequest> & { message: string }) =>
+    requestJson<GoalRecord>(`/api/goals/${goalId}/steer`, {
+      method: "POST",
+      body: JSON.stringify({
+        resume: true,
+        extra_budget_usd: null,
+        ...payload,
+      }),
+    }),
+  pauseGoal: (goalId: string) =>
+    requestJson<GoalRecord>(`/api/goals/${goalId}/pause`, {
+      method: "POST",
+    }),
+  resumeGoal: (goalId: string) =>
+    requestJson<GoalRecord>(`/api/goals/${goalId}/resume`, {
+      method: "POST",
+    }),
+  cancelGoal: (goalId: string) =>
+    requestJson<GoalRecord>(`/api/goals/${goalId}/cancel`, {
+      method: "POST",
+    }),
+  triggerEmergencyStop: () =>
+    requestJson<{ ok: boolean; emergency_stop: boolean; cancelled_tasks: string[] }>(
+      "/api/autonomy/emergency-stop",
+      { method: "POST" }
+    ),
 };

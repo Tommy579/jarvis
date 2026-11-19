@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-import pytest
 
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.notifications.policy import PolicyStore
-from omi_shared.notifications import NotificationAttempt, NotificationOrder, NotificationPolicy
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.notifications.policy import PolicyStore
+from jarvis_shared.notifications import NotificationAttempt, NotificationOrder
 
 
 def test_migration_3_is_idempotent():

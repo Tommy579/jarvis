@@ -3,20 +3,30 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { apiClient } from "./api/client";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { Icon, type IconName } from "./components/Icon";
+import { JarvisLogo } from "./components/JarvisLogo";
 import { Toaster } from "./components/ui";
 import { setSchemePreference, useColorScheme } from "./lib/colorScheme";
+import { getAuthToken } from "./lib/authToken";
+import { formatModelLabel } from "./lib/modelLabels";
+import {
+  extractWakeWord,
+  isStopRecordCommand,
+  shouldAutoStopVoiceRecord,
+} from "./lib/voiceCommands";
 import { AlertsApprovalsPage } from "./pages/AlertsApprovalsPage";
 import { ConfigPage } from "./pages/ConfigPage";
 import { ConversationPage } from "./pages/ConversationPage";
+import { GoalsPage } from "./pages/GoalsPage";
 import { HomePage } from "./pages/HomePage";
 import { MemoryOnboardingPage } from "./pages/MemoryOnboardingPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { AudioEngine } from "./sphere/AudioEngine";
-import { useOmiStore } from "./store/useOmiStore";
+import { useJarvisStore, type ThinkingMode } from "./store/useJarvisStore";
+import { toast } from "./store/useToastStore";
 import type { SensorName } from "./types/generated";
-import { OmiWsClient } from "./ws/client";
+import { JarvisWsClient } from "./ws/client";
 
-type AppRoute = "/" | "/conversation" | "/alerts" | "/memory" | "/config" | "/not-found";
+type AppRoute = "/" | "/conversation" | "/goals" | "/alerts" | "/memory" | "/config" | "/not-found";
 
 interface RouteMeta {
   path: Exclude<AppRoute, "/not-found">;
@@ -31,35 +41,42 @@ const ROUTES: RouteMeta[] = [
     path: "/",
     label: "Accueil",
     icon: "home",
-    title: "OMI 2.0 | Accueil vocal",
-    description: "Sphère vocale réactive, transcription en direct et capteurs d'OMI 2.0.",
+    title: "JARVIS 2.0 | Accueil vocal",
+    description: "Sphère vocale réactive, transcription en direct et capteurs de JARVIS 2.0.",
   },
   {
     path: "/conversation",
     label: "Conversation",
     icon: "chat",
-    title: "OMI 2.0 | Conversation",
+    title: "JARVIS 2.0 | Conversation",
     description: "Historique complet des échanges, outils appelés et coût par modèle.",
+  },
+  {
+    path: "/goals",
+    label: "Objectifs",
+    icon: "target",
+    title: "JARVIS 2.0 | Objectifs autonomes",
+    description: "Supervision en direct des objectifs, sous-agents multi-modèles et watchdog.",
   },
   {
     path: "/alerts",
     label: "Alertes",
     icon: "bell",
-    title: "OMI 2.0 | Alertes et approbations",
+    title: "JARVIS 2.0 | Alertes et approbations",
     description: "Validation des actions à risque et historique des alertes envoyées.",
   },
   {
     path: "/memory",
-    label: "Memoire",
+    label: "Mémoire",
     icon: "memory",
-    title: "OMI 2.0 | Mémoire",
+    title: "JARVIS 2.0 | Mémoire",
     description: "Faits, wiki personnel, proches et questionnaire de profil.",
   },
   {
     path: "/config",
     label: "Configuration",
     icon: "sliders",
-    title: "OMI 2.0 | Configuration",
+    title: "JARVIS 2.0 | Configuration",
     description: "Apparence, modèles, coûts, intégrations, règles d'attention et capteurs.",
   },
 ];
@@ -77,8 +94,8 @@ function getRouteMeta(route: AppRoute): { title: string; description: string } {
   const found = ROUTES.find((r) => r.path === route);
   if (found) return { title: found.title, description: found.description };
   return {
-    title: "OMI 2.0 | Page introuvable",
-    description: "L'écran demandé n'existe pas dans l'interface OMI 2.0.",
+    title: "JARVIS 2.0 | Page introuvable",
+    description: "L'écran demandé n'existe pas dans l'interface JARVIS 2.0.",
   };
 }
 
@@ -98,50 +115,59 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const audioEngine = useMemo(() => new AudioEngine(), []);
-  const wsClientRef = useRef<OmiWsClient | null>(null);
+  const wsClientRef = useRef<JarvisWsClient | null>(null);
   const ttsReceivedRef = useRef(false);
+  const spokenPrefixRef = useRef("");
   const { resolved: resolvedScheme, system: systemScheme } = useColorScheme();
 
-  const wsConnected = useOmiStore((s) => s.wsConnected);
-  const theme = useOmiStore((s) => s.theme);
-  const sensors = useOmiStore((s) => s.sensors);
-  const approvals = useOmiStore((s) => s.approvals);
-  const lastError = useOmiStore((s) => s.lastError);
+  const wsConnected = useJarvisStore((s) => s.wsConnected);
+  const sphereState = useJarvisStore((s) => s.sphereState);
+  const activeModel = useJarvisStore((s) => s.activeModel);
+  const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
+  const wakeWordThreshold = useJarvisStore((s) => s.wakeWordThreshold);
+  const voiceMode = useJarvisStore((s) => s.voiceMode);
+  const theme = useJarvisStore((s) => s.theme);
+  const sensors = useJarvisStore((s) => s.sensors);
+  const approvals = useJarvisStore((s) => s.approvals);
+  const lastError = useJarvisStore((s) => s.lastError);
 
   const micSensor = sensors.find((s) => s.sensor === "mic");
-  const micActive = Boolean(micSensor && !micSensor.paused && micSensor.active);
+  const micActive = Boolean(micSensor && !micSensor.paused);
   const micActiveRef = useRef(micActive);
   micActiveRef.current = micActive;
   const startMicListeningRef = useRef<() => void>(() => undefined);
+  const lastRecognizedSpeechAtRef = useRef<number>(Date.now());
   const isTranscribingRef = useRef(false);
   const wasInterruptedRef = useRef(false);
 
-  const setTheme = useOmiStore((s) => s.setTheme);
-  const setWsConnected = useOmiStore((s) => s.setWsConnected);
-  const setSphereState = useOmiStore((s) => s.setSphereState);
-  const setActiveModel = useOmiStore((s) => s.setActiveModel);
-  const setMessages = useOmiStore((s) => s.setMessages);
-  const setApprovals = useOmiStore((s) => s.setApprovals);
-  const setAlerts = useOmiStore((s) => s.setAlerts);
-  const setSensors = useOmiStore((s) => s.setSensors);
-  const setError = useOmiStore((s) => s.setError);
-  const resolveApprovalLocal = useOmiStore((s) => s.resolveApprovalLocal);
-  const ackAlertLocal = useOmiStore((s) => s.ackAlertLocal);
-  const appendUserMessage = useOmiStore((s) => s.appendUserMessage);
-  const interruptSpeech = useOmiStore((s) => s.interruptSpeech);
-  const handleServerEvent = useOmiStore((s) => s.handleServerEvent);
+  const setTheme = useJarvisStore((s) => s.setTheme);
+  const setWsConnected = useJarvisStore((s) => s.setWsConnected);
+  const setSphereState = useJarvisStore((s) => s.setSphereState);
+  const setActiveModel = useJarvisStore((s) => s.setActiveModel);
+  const setThinkingMode = useJarvisStore((s) => s.setThinkingMode);
+  const setMessages = useJarvisStore((s) => s.setMessages);
+  const setApprovals = useJarvisStore((s) => s.setApprovals);
+  const setAlerts = useJarvisStore((s) => s.setAlerts);
+  const setSensors = useJarvisStore((s) => s.setSensors);
+  const setError = useJarvisStore((s) => s.setError);
+  const setVoiceMode = useJarvisStore((s) => s.setVoiceMode);
+  const resolveApprovalLocal = useJarvisStore((s) => s.resolveApprovalLocal);
+  const ackAlertLocal = useJarvisStore((s) => s.ackAlertLocal);
+  const appendUserMessage = useJarvisStore((s) => s.appendUserMessage);
+  const interruptSpeech = useJarvisStore((s) => s.interruptSpeech);
+  const handleServerEvent = useJarvisStore((s) => s.handleServerEvent);
 
   const pendingApprovalsCount = approvals.filter((a) => a.status === "pending").length;
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("omi_sidebar_collapsed") === "1";
+    return window.localStorage.getItem("jarvis_sidebar_collapsed") === "1";
   });
 
   const toggleSidebar = useCallback((collapsed?: boolean) => {
     setSidebarCollapsed((prev) => {
       const next = typeof collapsed === "boolean" ? collapsed : !prev;
       if (typeof window !== "undefined") {
-        window.localStorage.setItem("omi_sidebar_collapsed", next ? "1" : "0");
+        window.localStorage.setItem("jarvis_sidebar_collapsed", next ? "1" : "0");
       }
       return next;
     });
@@ -178,30 +204,45 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    const token = window.localStorage.getItem("omi_api_token") ?? undefined;
+    const token = getAuthToken() || undefined;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const envWs = import.meta.env.VITE_WS_URL as string | undefined;
     const wsUrl = envWs && envWs.length > 0 ? envWs : `${protocol}://${window.location.host}/ws`;
 
-    const client = new OmiWsClient({
+    const client = new JarvisWsClient({
       url: wsUrl,
       token,
       onEvent: (ev) => {
         if (!active) return;
         if (ev.type === "state" && ev.payload.value === "thinking") {
           ttsReceivedRef.current = false;
+          spokenPrefixRef.current = "";
         }
         handleServerEvent(ev);
+        if (ev.type === "tool.call" && !ttsReceivedRef.current && !spokenPrefixRef.current) {
+          const streamed = useJarvisStore.getState().streamingText.trim();
+          if (streamed.length >= 12) {
+            spokenPrefixRef.current = streamed;
+            audioEngine.speakText(streamed, apiClient.speakVoice);
+          }
+        }
         if (ev.type === "alert" && ev.payload.message && ev.payload.urgency >= 2) {
           audioEngine.speakText(ev.payload.message, apiClient.speakVoice);
         }
         if (ev.type === "assistant.done") {
           if (!ttsReceivedRef.current) {
-            const msgs = useOmiStore.getState().messages;
+            const msgs = useJarvisStore.getState().messages;
             const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-            if (lastAssistant?.content) {
-              audioEngine.speakText(lastAssistant.content, apiClient.speakVoice);
-            } else if (micActiveRef.current) {
+            const fullText = lastAssistant?.content?.trim() ?? "";
+            if (fullText && fullText !== spokenPrefixRef.current) {
+              const remainder =
+                spokenPrefixRef.current && fullText.startsWith(spokenPrefixRef.current)
+                  ? fullText.slice(spokenPrefixRef.current.length).trim()
+                  : fullText;
+              if (remainder) {
+                audioEngine.speakText(remainder, apiClient.speakVoice);
+              }
+            } else if (!fullText && micActiveRef.current) {
               setTimeout(() => {
                 if (micActiveRef.current) {
                   startMicListeningRef.current();
@@ -218,7 +259,7 @@ export function App() {
       onTtsChunk: (audioBase64) => {
         ttsReceivedRef.current = true;
         // Texte en cours de lecture : permet au moteur audio de reconnaitre son propre echo.
-        const streamed = useOmiStore.getState().streamingText;
+        const streamed = useJarvisStore.getState().streamingText;
         if (streamed) {
           audioEngine.setSpokenText(streamed);
         }
@@ -233,12 +274,13 @@ export function App() {
       apiClient.getAlerts(),
       apiClient.getSensorsBlacklist(),
       apiClient.getModels(),
-    ]).then(([apprRes, alertsRes, blacklistRes, modelsRes]) => {
+      apiClient.getGoals(30),
+    ]).then(([apprRes, alertsRes, blacklistRes, modelsRes, goalsRes]) => {
       if (!active) return;
-      if (apprRes.status === "fulfilled" && useOmiStore.getState().approvals.length === 0) {
+      if (apprRes.status === "fulfilled" && useJarvisStore.getState().approvals.length === 0) {
         setApprovals(apprRes.value);
       }
-      if (alertsRes.status === "fulfilled" && useOmiStore.getState().alerts.length === 0) {
+      if (alertsRes.status === "fulfilled" && useJarvisStore.getState().alerts.length === 0) {
         setAlerts(alertsRes.value);
       }
       if (blacklistRes.status === "fulfilled" && blacklistRes.value.sensors.length > 0) {
@@ -249,6 +291,9 @@ export function App() {
         if (agentCfg?.model) {
           setActiveModel(agentCfg.model);
         }
+      }
+      if (goalsRes.status === "fulfilled") {
+        useJarvisStore.getState().setGoals(goalsRes.value);
       }
     });
 
@@ -270,6 +315,23 @@ export function App() {
     setWsConnected,
   ]);
 
+  const handleSelectModel = useCallback(
+    (model: string) => {
+      setActiveModel(model);
+      wsClientRef.current?.send({ type: "settings.model", payload: { role: "agent", model } });
+      apiClient.updateRoleModel("agent", model).catch(() => undefined);
+    },
+    [setActiveModel]
+  );
+
+  const handleSelectThinking = useCallback(
+    (mode: ThinkingMode) => {
+      setThinkingMode(mode);
+      apiClient.updateThinkingMode(mode).catch(() => undefined);
+    },
+    [setThinkingMode]
+  );
+
   const handleSendText = useCallback(
     async (text: string) => {
       audioEngine.unlock();
@@ -277,15 +339,224 @@ export function App() {
       setError(null);
       const overwrite = wasInterruptedRef.current;
       wasInterruptedRef.current = false;
-      appendUserMessage(text, overwrite);
-      useOmiStore.getState().clearTranscripts();
-      if (wsClientRef.current && useOmiStore.getState().wsConnected) {
-        wsClientRef.current.send({ type: "user.text", payload: { text } });
+      useJarvisStore.getState().clearTranscripts();
+
+      let outgoingText = text.trim();
+      const store = useJarvisStore.getState();
+
+      // Interception des commandes slash (compatibles MoA + /goal Jarvis)
+      if (outgoingText.startsWith("/")) {
+        const spaceIdx = outgoingText.indexOf(" ");
+        const cleanCmd = (spaceIdx === -1 ? outgoingText : outgoingText.slice(0, spaceIdx)).toLowerCase();
+        const cleanArg = spaceIdx === -1 ? "" : outgoingText.slice(spaceIdx + 1).trim();
+
+        if (cleanCmd === "/clear" || cleanCmd === "/new") {
+          store.clearMessagesLocal();
+          apiClient.clearMessages().catch(() => undefined);
+          toast.ok("Nouvelle conversation démarrée.");
+          return;
+        }
+
+        if (cleanCmd === "/skills" || cleanCmd === "/skill" || cleanCmd === "/settings" || cleanCmd === "/config") {
+          navigate("/config");
+          return;
+        }
+
+        if (cleanCmd === "/tint" || cleanCmd === "/theme") {
+          const nextTheme = store.theme === "amber" ? "jarvis-blue" : "amber";
+          setTheme(nextTheme);
+          toast.ok(nextTheme === "amber" ? "Accent laiton activé." : "Accent bleu Jarvis activé.");
+          return;
+        }
+
+        if (cleanCmd === "/workspace") {
+          if (!cleanArg) {
+            store.appendSystemMessage(
+              store.workspace
+                ? `Workspace actif : ${store.workspace}\nUtilisez /workspace <dossier> pour changer ou /workspace reset pour désactiver.`
+                : "Aucun workspace actif. Tapez /workspace <dossier> pour définir le dossier de travail."
+            );
+            return;
+          }
+          if (["reset", "clear", "off"].includes(cleanArg.toLowerCase())) {
+            store.setWorkspace(null);
+            store.appendSystemMessage("Workspace réinitialisé : mode standard actif.");
+            return;
+          }
+          const argSpace = cleanArg.indexOf(" ");
+          const targetWs = argSpace === -1 ? cleanArg : cleanArg.slice(0, argSpace).trim();
+          const promptAfter = argSpace === -1 ? "" : cleanArg.slice(argSpace + 1).trim();
+          store.setWorkspace(targetWs);
+          if (!promptAfter) {
+            store.appendSystemMessage(`Workspace actif défini sur : ${targetWs}`);
+            return;
+          }
+          outgoingText = promptAfter;
+        } else if (cleanCmd === "/local" || cleanCmd === "/council" || cleanCmd === "/moa") {
+          const targetModel = cleanCmd === "/local" ? "qwen3.5:2b" : "gemini-3.1-pro-preview";
+          try {
+            if (store.activeModel !== "qwen3.5:2b" && store.activeModel !== "gemini-3.1-pro-preview") {
+              window.localStorage.setItem("jarvis_auto_model", store.activeModel);
+            }
+          } catch {
+            // stockage indisponible
+          }
+          handleSelectModel(targetModel);
+          if (!cleanArg) {
+            store.appendSystemMessage(
+              cleanCmd === "/local"
+                ? `Modèle local activé (${targetModel}).`
+                : `Mode conseil avancé activé (${targetModel}).`
+            );
+            return;
+          }
+          outgoingText = cleanArg;
+        } else if (cleanCmd === "/auto") {
+          let defaultModel = "deepseek/deepseek-v4.1-flash-1017";
+          try {
+            defaultModel = window.localStorage.getItem("jarvis_auto_model") || defaultModel;
+          } catch {
+            // stockage indisponible
+          }
+          handleSelectModel(defaultModel);
+          store.appendSystemMessage(`Routage automatique rétabli (modèle : ${defaultModel}).`);
+          return;
+        } else if (cleanCmd === "/status") {
+          const activeSensors = store.sensors
+            .map((s) => `${s.sensor} (${s.paused ? "pause" : s.active ? "actif" : "inactif"})`)
+            .join(", ");
+          try {
+            const [health, mcps] = await Promise.all([
+              apiClient.getHealth().catch(() => null),
+              apiClient.getMcpServers().catch(() => []),
+            ]);
+            const mcpSummary =
+              mcps.length > 0
+                ? mcps.map((m) => `${m.name} (${m.connected ? "connecté" : "hors ligne"})`).join(", ")
+                : "aucun";
+            store.appendSystemMessage(
+              `### État des services\n\n` +
+                `| Service | État |\n` +
+                `| --- | --- |\n` +
+                `| Passerelle | ${health?.status === "ok" ? "En ligne" : "Hors ligne"} |\n` +
+                `| WebSocket | ${store.wsConnected ? "Connecté" : "Déconnecté"} |\n` +
+                `| Modèle actif | \`${store.activeModel}\` |\n` +
+                `| Raisonnement | \`${store.thinkingMode}\` |\n` +
+                `| Workspace | ${store.workspace ? `\`${store.workspace}\`` : "aucun"} |\n` +
+                `| Capteurs | ${activeSensors} |\n` +
+                `| Serveurs MCP | ${mcpSummary} |`
+            );
+          } catch {
+            store.appendSystemMessage("Impossible de récupérer l'état complet des services.");
+          }
+          return;
+        } else if (cleanCmd === "/model" || cleanCmd === "/models") {
+          try {
+            const roles = await apiClient.getModels();
+            const rows = roles.map((r) => `| ${r.role} | \`${r.model}\` |`).join("\n");
+            store.appendSystemMessage(
+              `### Configuration des modèles\n\n` +
+                `Modèle actif : \`${store.activeModel}\` · Raisonnement : \`${store.thinkingMode}\`\n\n` +
+                `| Rôle | Modèle |\n` +
+                `| --- | --- |\n` +
+                rows
+            );
+          } catch {
+            store.appendSystemMessage(`Modèle actif : \`${store.activeModel}\``);
+          }
+          return;
+        } else if (cleanCmd === "/usage" || cleanCmd === "/tokens") {
+          const fmtTokens = (n: number): string => {
+            if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+            if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+            return String(n);
+          };
+          try {
+            const [daily, budget] = await Promise.all([
+              apiClient.getDailyUsage(),
+              apiClient.getDailyBudget().catch(() => ({ daily_budget_usd: 0 })),
+            ]);
+            const byModelMap = new Map<
+              string,
+              { model: string; tokens_in: number; tokens_out: number; cost: number }
+            >();
+            for (const d of daily) {
+              const prev = byModelMap.get(d.model) ?? {
+                model: d.model,
+                tokens_in: 0,
+                tokens_out: 0,
+                cost: 0,
+              };
+              prev.tokens_in += d.tokens_in || 0;
+              prev.tokens_out += d.tokens_out || 0;
+              prev.cost += d.cost || 0;
+              byModelMap.set(d.model, prev);
+            }
+            const aggregated = Array.from(byModelMap.values()).sort(
+              (a, b) => b.cost - a.cost || b.tokens_in + b.tokens_out - (a.tokens_in + a.tokens_out)
+            );
+            const totalIn = aggregated.reduce((acc, item) => acc + item.tokens_in, 0);
+            const totalOut = aggregated.reduce((acc, item) => acc + item.tokens_out, 0);
+            const totalCost = aggregated.reduce((acc, item) => acc + item.cost, 0);
+
+            const header =
+              `### Usage IA du jour\n\n` +
+              `Total : **${fmtTokens(totalIn)}** → **${fmtTokens(totalOut)}** jetons · ` +
+              `**$${totalCost.toFixed(2)}** / $${budget.daily_budget_usd.toFixed(2)}`;
+
+            if (aggregated.length === 0) {
+              store.appendSystemMessage(`${header}\n\nAucune consommation enregistrée aujourd'hui.`);
+            } else {
+              const rows = aggregated
+                .map(
+                  (d) =>
+                    `| \`${d.model}\` | ${fmtTokens(d.tokens_in)} | ${fmtTokens(d.tokens_out)} | $${d.cost.toFixed(4)} |`
+                )
+                .join("\n");
+              store.appendSystemMessage(
+                `${header}\n\n| Modèle | Entrée | Sortie | Coût |\n| --- | ---: | ---: | ---: |\n${rows}`
+              );
+            }
+          } catch {
+            store.appendSystemMessage("Impossible de récupérer les statistiques d'usage.");
+          }
+          return;
+        }
+      }
+
+      appendUserMessage(outgoingText, overwrite);
+
+      const isSlashGoal = /^\/goal(?:\s+|$)/i.test(outgoingText);
+      if (isSlashGoal || useJarvisStore.getState().goalMode) {
+        const goalPrompt = isSlashGoal ? outgoingText.replace(/^\/goal\s*/i, "").trim() : outgoingText;
+        if (!goalPrompt) {
+          setError("Précise l'objectif à lancer après /goal.");
+          return;
+        }
+        try {
+          const created = await apiClient.createGoal({
+            goal: goalPrompt,
+            notify_on_finish: true,
+          });
+          useJarvisStore.getState().upsertGoal(created);
+          return;
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Impossible de lancer l'objectif.");
+          return;
+        }
+      }
+
+      const payloadText = store.workspace
+        ? `[Workspace actif : ${store.workspace}]\n${outgoingText}`
+        : outgoingText;
+
+      if (wsClientRef.current && useJarvisStore.getState().wsConnected) {
+        wsClientRef.current.send({ type: "user.text", payload: { text: payloadText } });
         return;
       }
       setSphereState("thinking");
       try {
-        const saved = await apiClient.sendMessage(text);
+        const saved = await apiClient.sendMessage(payloadText);
         const latest = await apiClient.getMessages();
         setMessages(latest);
         if (saved?.content) {
@@ -297,11 +568,14 @@ export function App() {
         setSphereState("idle");
       }
     },
-    [appendUserMessage, audioEngine, setError, setMessages, setSphereState]
+    [appendUserMessage, audioEngine, handleSelectModel, navigate, setError, setMessages, setSphereState, setTheme]
   );
 
   const handleToggleSensor = useCallback(
     async (sensor: SensorName, paused: boolean) => {
+      if (sensor === "mic" && !paused) {
+        audioEngine.unlock();
+      }
       setError(null);
       try {
         const cfg = await apiClient.toggleSensor(sensor, paused);
@@ -317,111 +591,251 @@ export function App() {
     [setError, setSensors]
   );
 
-  const handleSelectModel = useCallback(
-    (model: string) => {
-      setActiveModel(model);
-      wsClientRef.current?.send({ type: "settings.model", payload: { role: "agent", model } });
-      apiClient.updateRoleModel("agent", model).catch(() => undefined);
+  const stopActiveVoiceRecord = useCallback(
+    (reasonMessage: string) => {
+      const st = useJarvisStore.getState();
+      audioEngine.playChime("sleep");
+      useJarvisStore.getState().clearTranscripts();
+      if (st.wakeWordEnabled) {
+        audioEngine.setStandbyMode(true);
+        setVoiceMode("standby");
+        setSphereState(st.wsConnected ? "idle" : "offline");
+      } else {
+        void handleToggleSensor("mic", true);
+      }
+      toast.info(reasonMessage);
     },
-    [setActiveModel]
+    [audioEngine, handleToggleSensor, setSphereState, setVoiceMode]
   );
 
   const startMicListening = useCallback(() => {
     if (!micActiveRef.current) return;
     audioEngine.stopPlayback();
-    setSphereState("listening");
+    const useStandby = useJarvisStore.getState().wakeWordEnabled;
+    audioEngine.setWakeWordThreshold(useJarvisStore.getState().wakeWordThreshold);
+    audioEngine.setStandbyMode(useStandby);
+    setVoiceMode(useStandby ? "standby" : "active");
+    if (useStandby) {
+      const st = useJarvisStore.getState();
+      setSphereState(st.wsConnected ? "idle" : "offline");
+    } else {
+      lastRecognizedSpeechAtRef.current = Date.now();
+      setSphereState("listening");
+    }
+
+    const restoreMicSphereState = () => {
+      const st = useJarvisStore.getState();
+      if (!audioEngine.isPlaying()) {
+        const activeListening = micActiveRef.current && st.voiceMode === "active";
+        setSphereState(activeListening ? "listening" : st.wsConnected ? "idle" : "offline");
+      }
+    };
+
     audioEngine
       .startMicrophone({
         onBargeIn: () => {
           wasInterruptedRef.current = true;
+          lastRecognizedSpeechAtRef.current = Date.now();
           audioEngine.stopPlayback();
           interruptSpeech();
-          setSphereState("listening");
+          const st = useJarvisStore.getState();
+          setSphereState(st.voiceMode === "active" ? "listening" : st.wsConnected ? "idle" : "offline");
         },
         onLiveTranscript: (text) => {
-          useOmiStore.getState().handleServerEvent({
+          if (useJarvisStore.getState().voiceMode !== "active") return;
+          useJarvisStore.getState().handleServerEvent({
             type: "transcript.partial",
             payload: { text, speaker: "user" },
           });
         },
         onUtterance: (wavBase64, mimeType) => {
           if (isTranscribingRef.current) return;
+          const storeNow = useJarvisStore.getState();
+          const inStandby = storeNow.voiceMode === "standby" && storeNow.wakeWordEnabled;
           isTranscribingRef.current = true;
+
+          if (inStandby) {
+            apiClient
+              .wakeCheckVoice(wavBase64, mimeType, storeNow.wakeWordThreshold)
+              .catch(() => apiClient.transcribeVoice(wavBase64, mimeType))
+              .then(({ text }) => {
+                isTranscribingRef.current = false;
+                const { triggered, query } = extractWakeWord(text);
+                if (!triggered) return;
+                lastRecognizedSpeechAtRef.current = Date.now();
+                audioEngine.playChime("wake");
+                audioEngine.setStandbyMode(false);
+                setVoiceMode("active");
+                if (query) {
+                  useJarvisStore.getState().handleServerEvent({
+                    type: "transcript.final",
+                    payload: { text: query, speaker: "user" },
+                  });
+                  void handleSendText(query);
+                } else {
+                  setSphereState("listening");
+                  toast.info("À l'écoute — dites « coupe le record » pour mettre en veille.");
+                }
+              })
+              .catch(() => {
+                isTranscribingRef.current = false;
+              });
+            return;
+          }
+
           setSphereState("thinking");
           apiClient
             .transcribeVoice(wavBase64, mimeType)
             .then(({ text }) => {
               isTranscribingRef.current = false;
               const cleaned = text.trim();
-              if (cleaned) {
-                useOmiStore.getState().handleServerEvent({
-                  type: "transcript.final",
-                  payload: { text: cleaned, speaker: "user" },
-                });
-                void handleSendText(cleaned);
-              } else {
-                const st = useOmiStore.getState();
-                if (!audioEngine.isPlaying()) {
-                  setSphereState(micActiveRef.current ? "listening" : st.wsConnected ? "idle" : "offline");
-                }
+              if (!cleaned) {
+                restoreMicSphereState();
+                return;
               }
+              lastRecognizedSpeechAtRef.current = Date.now();
+              if (useJarvisStore.getState().wakeWordEnabled && isStopRecordCommand(cleaned)) {
+                stopActiveVoiceRecord("Mise en veille vocale — dites « Jarvis » pour reprendre.");
+                return;
+              }
+              useJarvisStore.getState().handleServerEvent({
+                type: "transcript.final",
+                payload: { text: cleaned, speaker: "user" },
+              });
+              void handleSendText(cleaned);
             })
             .catch((err) => {
               isTranscribingRef.current = false;
               setError(err instanceof Error ? err.message : "Échec de la transcription vocale.");
-              const st = useOmiStore.getState();
-              if (!audioEngine.isPlaying()) {
-                setSphereState(micActiveRef.current ? "listening" : st.wsConnected ? "idle" : "offline");
-              }
+              restoreMicSphereState();
             });
         },
       })
       .then((ok) => {
         if (!ok) {
-          const st = useOmiStore.getState();
+          setVoiceMode("off");
+          const st = useJarvisStore.getState();
           setSphereState(st.wsConnected ? "idle" : "offline");
         }
       })
       .catch(() => {
-        const st = useOmiStore.getState();
+        setVoiceMode("off");
+        const st = useJarvisStore.getState();
         setSphereState(st.wsConnected ? "idle" : "offline");
       });
-  }, [audioEngine, handleSendText, interruptSpeech, setError, setSphereState]);
+  }, [
+    audioEngine,
+    handleSendText,
+    interruptSpeech,
+    setError,
+    setSphereState,
+    setVoiceMode,
+    stopActiveVoiceRecord,
+  ]);
   startMicListeningRef.current = startMicListening;
 
   useEffect(() => {
-    audioEngine.onPlaybackEnded = () => {
-      const st = useOmiStore.getState();
-      if (st.sphereState === "speaking") {
-        setSphereState(micActiveRef.current ? "listening" : st.wsConnected ? "idle" : "offline");
+    audioEngine.setWakeWordThreshold(wakeWordThreshold);
+  }, [audioEngine, wakeWordThreshold]);
+
+  useEffect(() => {
+    let keepaliveTimer: number | null = null;
+    const syncDucking = (playing: boolean) => {
+      if (keepaliveTimer !== null) {
+        window.clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
+      if (playing) {
+        if (!useJarvisStore.getState().audioDuckingEnabled) return;
+        void apiClient.setAudioDucking(true).catch(() => undefined);
+        keepaliveTimer = window.setInterval(() => {
+          if (audioEngine.isPlaying() && useJarvisStore.getState().audioDuckingEnabled) {
+            void apiClient.setAudioDucking(true).catch(() => undefined);
+          }
+        }, 12_000);
+      } else {
+        void apiClient.setAudioDucking(false).catch(() => undefined);
       }
     };
+
+    audioEngine.onPlaybackStateChange = syncDucking;
+    audioEngine.onPlaybackEnded = () => {
+      lastRecognizedSpeechAtRef.current = Date.now();
+      const st = useJarvisStore.getState();
+      if (st.sphereState === "speaking") {
+        const activeListening = micActiveRef.current && st.voiceMode === "active";
+        setSphereState(activeListening ? "listening" : st.wsConnected ? "idle" : "offline");
+      }
+    };
+    const restoreOnUnload = () => {
+      if (audioEngine.isPlaying()) {
+        void apiClient.setAudioDucking(false).catch(() => undefined);
+      }
+    };
+    window.addEventListener("beforeunload", restoreOnUnload);
     return () => {
+      window.removeEventListener("beforeunload", restoreOnUnload);
+      if (keepaliveTimer !== null) window.clearInterval(keepaliveTimer);
+      audioEngine.onPlaybackStateChange = undefined;
       audioEngine.onPlaybackEnded = undefined;
+      void apiClient.setAudioDucking(false).catch(() => undefined);
     };
   }, [audioEngine, setSphereState]);
+
+  useEffect(() => {
+    if (voiceMode !== "active") return;
+    lastRecognizedSpeechAtRef.current = Date.now();
+    const timer = window.setInterval(() => {
+      const st = useJarvisStore.getState();
+      const playing = audioEngine.isPlaying();
+      if (!isTranscribingRef.current && (playing || st.sphereState === "speaking" || st.sphereState === "thinking")) {
+        lastRecognizedSpeechAtRef.current = Date.now();
+        return;
+      }
+      if (
+        shouldAutoStopVoiceRecord({
+          voiceMode: st.voiceMode,
+          sphereState: st.sphereState,
+          isTranscribing: isTranscribingRef.current,
+          isPlayingAudio: playing,
+          lastRecognizedAtMs: lastRecognizedSpeechAtRef.current,
+          nowMs: Date.now(),
+        })
+      ) {
+        stopActiveVoiceRecord(
+          st.wakeWordEnabled
+            ? "Aucune voix reconnue depuis 10 s — mise en veille vocale."
+            : "Aucune voix reconnue depuis 10 s — micro coupé."
+        );
+      }
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [voiceMode, audioEngine, stopActiveVoiceRecord]);
 
   useEffect(() => {
     if (micActive) {
       startMicListening();
     } else {
       audioEngine.stopMicrophone();
-      const st = useOmiStore.getState();
+      audioEngine.setStandbyMode(false);
+      setVoiceMode("off");
+      const st = useJarvisStore.getState();
       if (st.sphereState === "listening") {
         setSphereState(st.wsConnected ? "idle" : "offline");
       }
     }
-  }, [micActive, startMicListening, audioEngine, setSphereState]);
+  }, [micActive, wakeWordEnabled, startMicListening, audioEngine, setSphereState, setVoiceMode]);
 
   const handleInterrupt = useCallback(() => {
     wasInterruptedRef.current = true;
     audioEngine.stopPlayback();
     interruptSpeech();
-    if (wsClientRef.current && useOmiStore.getState().wsConnected) {
+    if (wsClientRef.current && useJarvisStore.getState().wsConnected) {
       wsClientRef.current.send({ type: "user.interrupt", payload: { reason: "user_cancel" } });
     }
-    const st = useOmiStore.getState();
-    setSphereState(micActiveRef.current ? "listening" : st.wsConnected ? "idle" : "offline");
+    const st = useJarvisStore.getState();
+    const activeListening = micActiveRef.current && st.voiceMode === "active";
+    setSphereState(activeListening ? "listening" : st.wsConnected ? "idle" : "offline");
   }, [audioEngine, interruptSpeech, setSphereState]);
 
   const handleApproveAction = useCallback(
@@ -522,13 +936,18 @@ export function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="app" data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}>
+      <div
+        className="app"
+        data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
+        data-sphere-state={sphereState}
+      >
         <aside className="sidebar">
           <div className="sidebar__header">
             <div className="sidebar__top">
               <div className="brand">
-                <img src="/favicon.svg" alt="" width={26} height={26} />
-                <span>OMI</span>
+                <JarvisLogo size={28} />
+                <span>JARVIS</span>
+                <span className="brand__ver">2.0</span>
               </div>
               <button
                 type="button"
@@ -544,7 +963,7 @@ export function App() {
               className="status-pill"
               data-online={wsConnected}
               data-testid="ws-status-badge"
-              title={wsConnected ? "Connecté au service omi-core" : "Service omi-core injoignable"}
+              title={wsConnected ? "Connecté au service jarvis-core" : "Service jarvis-core injoignable"}
             >
               <span className="dot" aria-hidden="true" />
               {wsConnected ? "Connecté" : "Hors ligne"}
@@ -584,9 +1003,15 @@ export function App() {
             })}
           </nav>
 
-          <p className="sidebar__footer">
-            Données stockées localement dans ~/omi-data. Aucune clé API dans le navigateur.
-          </p>
+          <div className="sidebar__footer">
+            <div className="sidebar__model" title={activeModel}>
+              <span className="sidebar__model-label">Modèle actif</span>
+              <span className="sidebar__model-value">{formatModelLabel(activeModel)}</span>
+            </div>
+            <p className="sidebar__privacy">
+              Données locales dans ~/jarvis-data. Aucune clé API exposée.
+            </p>
+          </div>
         </aside>
 
         <main className="main">
@@ -629,10 +1054,18 @@ export function App() {
                   onSendText={handleSendText}
                   onToggleSensor={handleToggleSensor}
                   onSelectModel={handleSelectModel}
+                  onSelectThinking={handleSelectThinking}
                   onInterrupt={handleInterrupt}
+                  onOpenGoals={() => navigate("/goals")}
                 />
               )}
-              {route === "/conversation" && <ConversationPage onSendText={handleSendText} />}
+              {route === "/conversation" && (
+                <ConversationPage
+                  onSendText={handleSendText}
+                  onOpenGoals={() => navigate("/goals")}
+                />
+              )}
+              {route === "/goals" && <GoalsPage />}
               {route === "/alerts" && (
                 <AlertsApprovalsPage
                   onApproveAction={handleApproveAction}

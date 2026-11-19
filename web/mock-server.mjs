@@ -469,8 +469,108 @@ const server = http.createServer(async (req, res) => {
     db.blacklist = await readBody(req);
     return sendJson(res, 200, db.blacklist);
   }
+  if (p === "/api/usage/budget" && req.method === "GET") {
+    return sendJson(res, 200, { daily_budget_usd: db.daily_budget_usd ?? 5.0 });
+  }
+  if (p === "/api/usage/budget" && req.method === "PUT") {
+    const body = await readBody(req);
+    db.daily_budget_usd = Number(body.daily_budget_usd ?? 5.0);
+    return sendJson(res, 200, { daily_budget_usd: db.daily_budget_usd });
+  }
+  if (p === "/api/goals/models" && req.method === "GET") {
+    return sendJson(res, 200, [
+      {
+        id: "gemini-4-argon",
+        provider: "gemini",
+        label: "gemini-4-argon",
+        tier: "cheap",
+        strengths: "Orchestration et verification",
+        in_cost_per_m: 0.3,
+        out_cost_per_m: 1.2,
+        supports_vision: true,
+        best_for: ["orchestrator", "verifier"],
+      },
+      {
+        id: "deepseek/deepseek-v4.1-flash-1017",
+        provider: "openrouter",
+        label: "deepseek-v4.1-flash-1017",
+        tier: "ultra_cheap",
+        strengths: "Code et outils rapides",
+        in_cost_per_m: 0.15,
+        out_cost_per_m: 0.6,
+        supports_vision: false,
+        best_for: ["coder"],
+      },
+    ]);
+  }
+  if (p === "/api/goals" && req.method === "GET") {
+    return sendJson(res, 200, db.goals || []);
+  }
+  if (p === "/api/goals" && req.method === "POST") {
+    const body = await readBody(req);
+    const now = new Date().toISOString();
+    const g = {
+      id: `goal_${Date.now()}`,
+      title: String(body.goal || "Objectif").slice(0, 80),
+      goal: String(body.goal || ""),
+      status: "running",
+      success_criteria: [],
+      verified_criteria: [],
+      orchestrator_model: body.orchestrator_model || "gemini-4-argon",
+      allowed_models: ["gemini-4-argon", "deepseek/deepseek-v4.1-flash-1017"],
+      tokens_used: 0,
+      cost_usd: 0,
+      max_cost_usd: Number(body.max_cost_usd || 1.5),
+      progress_pct: 15,
+      current_phase: "Supervision mock active",
+      final_summary: "",
+      pause_reason: null,
+      notify_on_finish: true,
+      subtasks: [],
+      events: [],
+      created_at: now,
+      updated_at: now,
+      finished_at: null,
+    };
+    db.goals = [g, ...(db.goals || [])];
+    return sendJson(res, 200, g);
+  }
+  if (p.startsWith("/api/goals/") && req.method === "GET") {
+    const id = p.split("/")[3];
+    const found = (db.goals || []).find((g) => g.id === id);
+    return found ? sendJson(res, 200, found) : sendJson(res, 404, { detail: "Objectif introuvable" });
+  }
+  if (p.startsWith("/api/goals/") && req.method === "POST") {
+    const parts = p.split("/");
+    const id = parts[3];
+    const action = parts[4];
+    db.goals = (db.goals || []).map((g) => {
+      if (g.id !== id) return g;
+      if (action === "pause") return { ...g, status: "paused" };
+      if (action === "resume" || action === "steer") return { ...g, status: "running", pause_reason: null };
+      if (action === "cancel") return { ...g, status: "cancelled" };
+      return g;
+    });
+    const found = (db.goals || []).find((g) => g.id === id);
+    return found ? sendJson(res, 200, found) : sendJson(res, 404, { detail: "Objectif introuvable" });
+  }
   if (p === "/mock/emit" && req.method === "POST") {
     const body = await readBody(req);
+    // Le vrai jarvis-core persiste l'approbation AVANT de la diffuser en WebSocket :
+    // le mock doit faire de meme, sinon /api/approvals et le flux WS divergent.
+    if (body?.type === "approval.request" && body?.payload?.id) {
+      db.approvals = [
+        {
+          tool_name: "action_protegee",
+          args: {},
+          risk: 2,
+          created_at: new Date().toISOString(),
+          status: "pending",
+          ...body.payload,
+        },
+        ...db.approvals.filter((a) => a.id !== body.payload.id),
+      ];
+    }
     broadcast(body);
     return sendJson(res, 200, { broadcasted: true });
   }
@@ -506,7 +606,7 @@ wss.on("connection", (ws) => {
             })
           );
           ws.send(JSON.stringify({ type: "state", payload: { value: "speaking" } }));
-          const reply = `Bien recu : ${text}. Tout est operationnel sur omi-core.`;
+          const reply = `Bien recu : ${text}. Tout est operationnel sur jarvis-core.`;
           ws.send(JSON.stringify({ type: "assistant.delta", payload: { text: reply, message_id: msgId } }));
           const pcmSample = Buffer.alloc(1024, 12).toString("base64");
           ws.send(JSON.stringify({ type: "tts.chunk", payload: { audio: pcmSample, seq: 1, is_last: true } }));
@@ -565,5 +665,5 @@ wss.on("connection", (ws) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`OMI mock server ecoute sur http://127.0.0.1:${PORT}`);
+  console.log(`JARVIS mock server ecoute sur http://127.0.0.1:${PORT}`);
 });

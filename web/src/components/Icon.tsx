@@ -25,6 +25,7 @@ const PATHS = {
   chevron: "m9 6 6 6-6 6",
   panelLeft: "M4 5h16v14H4V5Zm6 0v14",
   shield: "M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6l-7-3Z",
+  target: "M12 3v3M12 18v3M3 12h3M18 12h3M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10Z",
 } as const;
 
 export type IconName = keyof typeof PATHS;

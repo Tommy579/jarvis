@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from omi_core.api.server import OmiCoreState, create_app
-from omi_core.llm.base import LLMProvider
-from omi_core.runtime import build_runtime
-from omi_core.tools.registry import ToolSpec as RegistryToolSpec
-from omi_shared.models import (
+from jarvis_core.api.server import JarvisCoreState, create_app
+from jarvis_core.llm.base import LLMProvider
+from jarvis_core.runtime import build_runtime
+from jarvis_core.tools.registry import ToolSpec as RegistryToolSpec
+from jarvis_shared.models import (
     Message,
     ModelCapabilities,
     RiskLevel,
@@ -76,8 +76,8 @@ class _ScriptedStreamingProvider(LLMProvider):
                 yield delta
 
 
-def _make_state(tmp_path: Path, streams: list[list[StreamDelta]] | None = None) -> OmiCoreState:
-    state = OmiCoreState(
+def _make_state(tmp_path: Path, streams: list[list[StreamDelta]] | None = None) -> JarvisCoreState:
+    state = JarvisCoreState(
         data_dir=tmp_path / "data",
         config_dir=ROOT_DIR / "config",
         legacy_profile_path=tmp_path / "none.json",
@@ -94,8 +94,8 @@ def _make_state(tmp_path: Path, streams: list[list[StreamDelta]] | None = None) 
 
 
 def test_ws_uses_agent_not_echo(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
 
     state = _make_state(
         tmp_path,
@@ -107,7 +107,7 @@ def test_ws_uses_agent_not_echo(tmp_path: Path, monkeypatch) -> None:
     seen_done = False
     with client.websocket_connect("/ws") as ws:
         assert ws.receive_json() == {"type": "state", "payload": {"value": "idle"}}
-        ws.send_json({"type": "user.text", "payload": {"text": "Salut OMI"}})
+        ws.send_json({"type": "user.text", "payload": {"text": "Salut JARVIS"}})
         while True:
             ev = ws.receive_json()
             if ev["type"] == "assistant.delta":
@@ -124,8 +124,8 @@ def test_ws_uses_agent_not_echo(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_ws_emits_tool_events(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
 
     state = _make_state(
         tmp_path,
@@ -179,8 +179,8 @@ class _DeployArgs(BaseModel):
 
 
 def test_ws_interactive_approval_flow(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
 
     executed: list[str] = []
 
@@ -283,12 +283,12 @@ async def test_sensitive_tool_waits_for_human_approval(tmp_path: Path, monkeypat
 
 
 def test_role_model_survives_restart(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
 
     data_dir = tmp_path / "data"
     app1 = create_app(
-        OmiCoreState(
+        JarvisCoreState(
             data_dir=data_dir,
             config_dir=ROOT_DIR / "config",
             legacy_profile_path=tmp_path / "none.json",
@@ -303,7 +303,7 @@ def test_role_model_survives_restart(tmp_path: Path, monkeypatch) -> None:
     assert put_resp.json()["model"] == "deepseek/deepseek-v4.1-flash"
 
     app2 = create_app(
-        OmiCoreState(
+        JarvisCoreState(
             data_dir=data_dir,
             config_dir=ROOT_DIR / "config",
             legacy_profile_path=tmp_path / "none.json",
@@ -329,21 +329,21 @@ def test_role_model_survives_restart(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_refuses_to_start_without_token(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
-    monkeypatch.delenv("OMI_ALLOW_INSECURE", raising=False)
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
+    monkeypatch.delenv("JARVIS_ALLOW_INSECURE", raising=False)
 
-    state = OmiCoreState(
+    state = JarvisCoreState(
         data_dir=tmp_path / "data",
         config_dir=ROOT_DIR / "config",
         legacy_profile_path=tmp_path / "none.json",
     )
-    with pytest.raises(RuntimeError, match="OMI_API_TOKEN"):
+    with pytest.raises(RuntimeError, match="JARVIS_API_TOKEN"):
         create_app(state)
 
 
 async def test_evals_endpoint_returns_404_when_never_run(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
 
     state = _make_state(tmp_path)
     client = TestClient(create_app(state))

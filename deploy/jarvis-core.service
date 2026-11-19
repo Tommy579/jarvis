@@ -1,0 +1,18 @@
+[Unit]
+Description=JARVIS 2.0 Core Service (FastAPI, Agent, Memoire, Attention)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jarvis
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/jarvis/packages/shared:/opt/jarvis/packages/core:/opt/jarvis/packages/desktop
+ExecStart=/opt/jarvis/.venv/bin/uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

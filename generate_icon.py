@@ -7,8 +7,8 @@ from PIL import Image, ImageDraw
 def create_ico():
     root = Path(__file__).resolve().parent
     svg_path = root / "web" / "public" / "favicon.svg"
-    png_path = root / "omi_icon.png"
-    ico_path = root / "omi_icon.ico"
+    png_path = root / "jarvis_icon.png"
+    ico_path = root / "jarvis_icon.ico"
 
     if svg_path.exists() and shutil.which("rsvg-convert"):
         subprocess.run(

@@ -150,7 +150,7 @@
     "id": "wayland_02_allow_vscode",
     "category": "wayland_security",
     "app_name": "code",
-    "window_title": "loop.py - omi - Visual Studio Code",
+    "window_title": "loop.py - jarvis - Visual Studio Code",
     "expected_blacklisted": false
   }
 ]

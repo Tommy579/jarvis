@@ -2,20 +2,68 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { Icon } from "../components/Icon";
+import { VoiceProfilesCard } from "../components/VoiceProfilesCard";
 import { PageHeader, Segmented } from "../components/ui";
 import { setSchemePreference, useColorScheme, type SchemePreference } from "../lib/colorScheme";
-import { useOmiStore, type OmiTheme } from "../store/useOmiStore";
+import { useJarvisStore, type JarvisTheme } from "../store/useJarvisStore";
 import { errorMessage, toast } from "../store/useToastStore";
+
+const ROLE_LABELS: Record<string, string> = {
+  agent: "Agent principal",
+  orchestrator: "Orchestrateur",
+  triage: "Triage",
+  vision: "Vision",
+  memory: "Mémoire",
+  deep: "Raisonnement profond",
+  voice_realtime: "Voix temps réel",
+};
+
+type ConfigTab = "appearance" | "models" | "autonomy" | "integrations" | "alerts";
+
+const CONFIG_TABS: { value: ConfigTab; label: string }[] = [
+  { value: "appearance", label: "Apparence & Système" },
+  { value: "models", label: "Modèles & Coûts" },
+  { value: "autonomy", label: "Autonomie" },
+  { value: "integrations", label: "Intégrations" },
+  { value: "alerts", label: "Alertes, Voix & Capteurs" },
+];
+
+const HASH_TO_TAB: Record<string, ConfigTab> = {
+  "#apparence": "appearance",
+  "#systeme": "appearance",
+  "#modeles": "models",
+  "#couts": "models",
+  "#autonomie": "autonomy",
+  "#integrations": "integrations",
+  "#attention": "alerts",
+  "#notifications": "alerts",
+  "#voix": "alerts",
+  "#capteurs": "alerts",
+};
 
 export function ConfigPage() {
   const qc = useQueryClient();
-  const theme = useOmiStore((s) => s.theme);
-  const setTheme = useOmiStore((s) => s.setTheme);
-  const setActiveModel = useOmiStore((s) => s.setActiveModel);
-  const setSensors = useOmiStore((s) => s.setSensors);
+  const [activeTab, setActiveTab] = useState<ConfigTab>(() => {
+    if (typeof window !== "undefined") {
+      return HASH_TO_TAB[window.location.hash] ?? "appearance";
+    }
+    return "appearance";
+  });
+  const theme = useJarvisStore((s) => s.theme);
+  const setTheme = useJarvisStore((s) => s.setTheme);
+  const setActiveModel = useJarvisStore((s) => s.setActiveModel);
+  const setSensors = useJarvisStore((s) => s.setSensors);
+  const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
+  const setWakeWordEnabled = useJarvisStore((s) => s.setWakeWordEnabled);
+  const wakeWordThreshold = useJarvisStore((s) => s.wakeWordThreshold);
+  const setWakeWordThreshold = useJarvisStore((s) => s.setWakeWordThreshold);
+  const audioDuckingEnabled = useJarvisStore((s) => s.audioDuckingEnabled);
+  const setAudioDuckingEnabled = useJarvisStore((s) => s.setAudioDuckingEnabled);
   const { preference: schemePref, system: systemScheme } = useColorScheme();
 
   const [newBlacklistApp, setNewBlacklistApp] = useState("");
+  const [allowedDomainsDraft, setAllowedDomainsDraft] = useState("");
+  const [domainsInit, setDomainsInit] = useState(false);
   const [runningEvals, setRunningEvals] = useState(false);
   const [editingIntId, setEditingIntId] = useState<string | null>(null);
   const [cfgToken, setCfgToken] = useState("");
@@ -42,6 +90,14 @@ export function ConfigPage() {
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: apiClient.getModels });
   const usageQuery = useQuery({ queryKey: ["usage"], queryFn: apiClient.getDailyUsage });
+  const budgetQuery = useQuery({ queryKey: ["budget"], queryFn: apiClient.getDailyBudget });
+  const [dailyBudgetDraft, setDailyBudgetDraft] = useState("5.00");
+
+  useEffect(() => {
+    if (budgetQuery.data) {
+      setDailyBudgetDraft(String(budgetQuery.data.daily_budget_usd));
+    }
+  }, [budgetQuery.data]);
   const evalsQuery = useQuery({
     queryKey: ["evals"],
     queryFn: apiClient.getLatestEvals,
@@ -68,6 +124,22 @@ export function ConfigPage() {
     queryKey: ["autostart"],
     queryFn: apiClient.getAutostart,
   });
+  const autonomyQuery = useQuery({
+    queryKey: ["autonomy_policy"],
+    queryFn: apiClient.getAutonomyPolicy,
+  });
+  const tasksQuery = useQuery({
+    queryKey: ["autonomous_tasks"],
+    queryFn: () => apiClient.getAutonomousTasks(10),
+    refetchInterval: 5000,
+  });
+
+  useEffect(() => {
+    if (autonomyQuery.data && !domainsInit) {
+      setAllowedDomainsDraft(autonomyQuery.data.allowed_domains.join(", "));
+      setDomainsInit(true);
+    }
+  }, [autonomyQuery.data, domainsInit]);
 
   const maxCost = Math.max(0.001, ...(usageQuery.data ?? []).map((u) => u.cost));
 
@@ -81,26 +153,25 @@ export function ConfigPage() {
   };
 
   return (
-    <section className="page" aria-label="Modeles, integrations, regles et capteurs">
+    <section className="page" aria-label="Modèles, intégrations, règles et capteurs">
       <PageHeader
-        title="Modeles, Integrations, Regles et Capteurs"
+        title="Modèles, Intégrations, Règles et Capteurs"
         description="Apparence de l'interface, routage des modèles, coûts, connecteurs et règles de confidentialité."
       />
 
-      <div className="settings">
-        <nav className="settings__toc" aria-label="Sections des réglages">
-          <a href="#apparence">Apparence</a>
-          <a href="#systeme">Système</a>
-          <a href="#modeles">Modèles</a>
-          <a href="#couts">Coûts et évaluations</a>
-          <a href="#integrations">Intégrations</a>
-          <a href="#attention">Règles d'attention</a>
-          <a href="#notifications">Téléphonie et ordres</a>
-          <a href="#capteurs">Capteurs et liste noire</a>
-        </nav>
+      <div className="tabs-bar">
+        <Segmented<ConfigTab>
+          label="Catégories de configuration"
+          value={activeTab}
+          onChange={setActiveTab}
+          options={CONFIG_TABS}
+        />
+      </div>
 
-        <div className="settings__sections">
-          {/* Apparence */}
+      <div className="settings__sections">
+        {activeTab === "appearance" && (
+          <>
+            {/* Apparence */}
           <section id="apparence" className="settings__section">
             <h2>Apparence</h2>
             <p>
@@ -154,7 +225,7 @@ export function ConfigPage() {
                   </div>
                 </div>
                 <div className="setting__control">
-                  <Segmented<OmiTheme>
+                  <Segmented<JarvisTheme>
                     label="Couleur d'accent"
                     value={theme}
                     onChange={setTheme}
@@ -185,7 +256,9 @@ export function ConfigPage() {
                         (autostartQuery.data.enabled
                           ? "Activé au démarrage de la session."
                           : "Désactivé au démarrage de la session.")
-                      : "Chargement du statut de démarrage automatique…"}
+                      : autostartQuery.isError
+                        ? "Statut de démarrage automatique indisponible sur cet environnement."
+                        : "Chargement du statut de démarrage automatique…"}
                   </div>
                 </div>
                 <div className="setting__control">
@@ -213,39 +286,212 @@ export function ConfigPage() {
                 </div>
               </div>
             </div>
-          </section>
+            </section>
+          </>
+        )}
 
-          {/* Modeles */}
+        {activeTab === "autonomy" && (
+          <>
+            {/* Autonomie */}
+          <section id="autonomie" className="settings__section">
+            <h2>Autonomie &amp; Contrôle PC</h2>
+            <p>
+              Autorise l'agent à interagir de façon autonome (niveaux 0 à 2) avec le navigateur et
+              les applications sans captures d'écran, tout en bloquant le niveau 3.
+            </p>
+            <div className="card card--flush">
+              <div className="setting">
+                <div className="setting__text">
+                  <div className="setting__label">Mode d'exécution</div>
+                  <div className="setting__desc">
+                    En mode autonome, les clics et saisies navigateur (niveau 2) sont approuvés
+                    automatiquement sur les domaines autorisés.
+                  </div>
+                </div>
+                <div className="setting__control">
+                  {autonomyQuery.data ? (
+                    <Segmented<"supervised" | "autonomous">
+                      label="Mode d'exécution"
+                      value={autonomyQuery.data.mode}
+                      onChange={(nextMode) => {
+                        void runMutation(async () => {
+                          await apiClient.updateAutonomyPolicy({
+                            mode: nextMode,
+                            emergency_stop: false,
+                          });
+                          await qc.invalidateQueries({ queryKey: ["autonomy_policy"] });
+                          return nextMode === "autonomous"
+                            ? "Mode autonome activé."
+                            : "Mode supervisé activé.";
+                        });
+                      }}
+                      options={[
+                        { value: "supervised", label: "Supervisé" },
+                        { value: "autonomous", label: "Autonome" },
+                      ]}
+                    />
+                  ) : autonomyQuery.isError ? (
+                    <span className="badge">Indisponible</span>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="setting" style={{ borderTop: "1px solid var(--line)" }}>
+                <div className="setting__text">
+                  <div className="setting__label">Domaines autorisés (liste blanche)</div>
+                  <div className="setting__desc">
+                    Séparés par des virgules (vide = tous les domaines sauf liste noire).
+                  </div>
+                </div>
+                <div className="setting__control" style={{ display: "flex", gap: "0.5rem" }}>
+                  <input
+                    className="input"
+                    type="text"
+                    placeholder="ex: moodle.univ.fr, quiz.example.com"
+                    value={allowedDomainsDraft}
+                    onChange={(e) => setAllowedDomainsDraft(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      const domains = allowedDomainsDraft
+                        .split(",")
+                        .map((d) => d.trim())
+                        .filter(Boolean);
+                      void runMutation(async () => {
+                        await apiClient.updateAutonomyPolicy({ allowed_domains: domains });
+                        await qc.invalidateQueries({ queryKey: ["autonomy_policy"] });
+                        return "Liste blanche de domaines enregistrée.";
+                      });
+                    }}
+                  >
+                    Enregistrer
+                  </button>
+                </div>
+              </div>
+
+              <div className="setting" style={{ borderTop: "1px solid var(--line)" }}>
+                <div className="setting__text">
+                  <div className="setting__label">Arrêt d'urgence (Kill Switch)</div>
+                  <div className="setting__desc">
+                    {autonomyQuery.data?.emergency_stop
+                      ? "Arrêt d'urgence ACTIF — toutes les tâches autonomes sont bloquées."
+                      : "Stoppe immédiatement toutes les tâches autonomes en cours."}
+                  </div>
+                </div>
+                <div className="setting__control" style={{ display: "flex", gap: "0.5rem" }}>
+                  {autonomyQuery.data?.emergency_stop ? (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => {
+                        void runMutation(async () => {
+                          await apiClient.updateAutonomyPolicy({ emergency_stop: false });
+                          await qc.invalidateQueries({ queryKey: ["autonomy_policy"] });
+                          return "Arrêt d'urgence levé.";
+                        });
+                      }}
+                    >
+                      Réactiver
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn--danger"
+                      onClick={() => {
+                        void runMutation(async () => {
+                          const res = await apiClient.emergencyStop();
+                          await qc.invalidateQueries({ queryKey: ["autonomy_policy"] });
+                          await qc.invalidateQueries({ queryKey: ["autonomous_tasks"] });
+                          return `Arrêt d'urgence activé (${res.cancelled_tasks.length} tâche(s) annulée(s)).`;
+                        });
+                      }}
+                    >
+                      Arrêt d'urgence
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {tasksQuery.data && tasksQuery.data.length > 0 && (
+              <div className="card card--flush" style={{ marginTop: "0.75rem" }}>
+                <div className="card__head">
+                  <h3 className="card__title">Tâches autonomes récentes</h3>
+                </div>
+                <ul className="list">
+                  {tasksQuery.data.slice(0, 5).map((t) => (
+                    <li key={t.id} className="setting">
+                      <div className="setting__text">
+                        <div className="setting__label">
+                          [{t.status}] {t.goal.slice(0, 80)}
+                        </div>
+                        <div className="setting__desc">
+                          {t.iterations}/{t.max_iterations} étapes · ${t.cost_usd.toFixed(4)}
+                          {t.current_step ? ` · ${t.current_step}` : ""}
+                        </div>
+                      </div>
+                      {(t.status === "running" || t.status === "queued") && (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => {
+                            void runMutation(async () => {
+                              await apiClient.cancelAutonomousTask(t.id);
+                              await qc.invalidateQueries({ queryKey: ["autonomous_tasks"] });
+                              return `Tâche ${t.id} annulée.`;
+                            });
+                          }}
+                        >
+                          Annuler
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            </section>
+          </>
+        )}
+
+        {activeTab === "models" && (
+          <>
+            {/* Modeles */}
           <section id="modeles" className="settings__section">
             <h2>Modèles par rôle</h2>
             <p>
               Identifiants Ollama local, OpenRouter ou Gemini utilisés pour chaque rôle et chaîne de
               repli.
             </p>
-            <datalist id="omi-model-suggestions">
+            <datalist id="jarvis-model-suggestions">
               <option value="qwen3.5:2b">Ollama local · Qwen 3.5 2B</option>
               <option value="qwen3.5:0.8b">Ollama local · Qwen 3.5 0.8B</option>
               <option value="gemma4:31b-cloud">Ollama · Gemma 4 31B</option>
               <option value="nemotron-3-ultra:cloud">Ollama · Nemotron 3 Ultra</option>
               <option value="minimax-m3:cloud">Ollama · MiniMax M3</option>
-              <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-              <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+              <option value="gemini-4-hydrogen">Vertex AI · Gemini 4 Hydrogen</option>
+              <option value="gemini-4-argon">Vertex AI · Gemini 4 Argon</option>
+              <option value="gemini-4-carbon">Vertex AI · Gemini 4 Carbon</option>
+              <option value="gemini-3-flash-preview">Vertex AI · Gemini 3 Flash Preview</option>
+              <option value="gemini-3.1-pro-preview">Vertex AI · Gemini 3.1 Pro Preview</option>
               <option value="deepseek/deepseek-v4.1-flash-1017">OpenRouter · DeepSeek v4.1 Flash</option>
               <option value="z-ai/glm-5.3">OpenRouter · GLM 5.3</option>
               <option value="minimax/minimax-m3">OpenRouter · MiniMax M3</option>
-              <option value="google/gemini-3.5-flash-lite">OpenRouter · Gemini 3.5 Flash Lite</option>
+              <option value="moonshotai/kimi-k3">OpenRouter · Kimi K3</option>
             </datalist>
             <div className="card card--flush">
               <ul className="list">
                 {(modelsQuery.data ?? []).map((cfg) => (
                   <li key={cfg.role} className="model-row">
                     <div>
-                      <div className="model-row__role">{cfg.role}</div>
+                      <div className="model-row__role">{ROLE_LABELS[cfg.role] ?? cfg.role}</div>
                       <span className="badge mono">{cfg.provider}</span>
                     </div>
                     <input
                       type="text"
-                      list="omi-model-suggestions"
+                      list="jarvis-model-suggestions"
                       className="input mono"
                       aria-label={`Modèle pour le rôle ${cfg.role}`}
                       defaultValue={cfg.model}
@@ -294,6 +540,57 @@ export function ConfigPage() {
             </div>
 
             <div className="card stack">
+              <form
+                className="cluster"
+                style={{ justifyContent: "space-between", alignItems: "flex-end", gap: "var(--sp-3)" }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const parsed = Number.parseFloat(dailyBudgetDraft);
+                  if (!Number.isFinite(parsed) || parsed < 0) return;
+                  void runMutation(async () => {
+                    const res = await apiClient.updateDailyBudget(parsed);
+                    qc.setQueryData(["budget"], res);
+                    return res.daily_budget_usd === 0
+                      ? "Plafond journalier désactivé (illimité)."
+                      : `Plafond journalier réglé à $${res.daily_budget_usd.toFixed(2)}.`;
+                  });
+                }}
+              >
+                <label className="stack" style={{ gap: 4, flex: "1 1 220px" }}>
+                  <span style={{ fontSize: "var(--fs-xs)" }} className="muted">
+                    Plafond journalier LLM (USD) — 0 = illimité
+                  </span>
+                  <input
+                    type="number"
+                    className="input"
+                    min="0"
+                    max="1000"
+                    step="0.5"
+                    value={dailyBudgetDraft}
+                    onChange={(e) => setDailyBudgetDraft(e.target.value)}
+                  />
+                </label>
+                <div className="cluster" style={{ gap: "var(--sp-2)" }}>
+                  <button type="submit" className="btn btn--primary btn--sm">
+                    Enregistrer
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    onClick={() => {
+                      setDailyBudgetDraft("0");
+                      void runMutation(async () => {
+                        const res = await apiClient.updateDailyBudget(0);
+                        qc.setQueryData(["budget"], res);
+                        return "Plafond journalier désactivé (illimité).";
+                      });
+                    }}
+                  >
+                    Illimité (0)
+                  </button>
+                </div>
+              </form>
+
               {(usageQuery.data ?? []).length === 0 ? (
                 <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>
                   Aucune consommation enregistrée pour l'instant.
@@ -345,16 +642,20 @@ export function ConfigPage() {
                 </div>
               ) : !evalsQuery.isLoading ? (
                 <div className="mono muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Banc d'essai jamais exécuté (ou lancez <span className="kbd">omi eval --save</span>).
+                  Banc d'essai jamais exécuté (ou lancez <span className="kbd">jarvis eval --save</span>).
                 </div>
               ) : null}
             </div>
-          </section>
+            </section>
+          </>
+        )}
 
-          {/* Integrations */}
+        {activeTab === "integrations" && (
+          <>
+            {/* Integrations */}
           <section id="integrations" className="settings__section">
             <h2>Intégrations externes</h2>
-            <p>Connecteurs locaux synchronisés avec la mémoire d'OMI.</p>
+            <p>Connecteurs locaux synchronisés avec la mémoire d'JARVIS.</p>
             <div className="grid-2">
               {(integrationsQuery.data ?? []).map((item) => {
                 const isEditing = editingIntId === item.id;
@@ -608,9 +909,13 @@ export function ConfigPage() {
                 );
               })}
             </div>
-          </section>
+            </section>
+          </>
+        )}
 
-          {/* Regles d'attention */}
+        {activeTab === "alerts" && (
+          <>
+            {/* Regles d'attention */}
           {rulesQuery.data && (
             <section id="attention" className="settings__section">
               <h2>Règles d'attention</h2>
@@ -849,6 +1154,113 @@ export function ConfigPage() {
                 Applications exclues de toute capture d'écran ou d'analyse contextuelle.
               </p>
 
+              <div className="card card--flush">
+                <div className="setting">
+                  <div className="setting__text">
+                    <div className="setting__label">Mot d'activation vocal (« Jarvis »)</div>
+                    <div className="setting__desc">
+                      En mode wake word, le micro attend « Jarvis » pour démarrer et « coupe le record » pour revenir en veille.
+                    </div>
+                  </div>
+                  <div className="setting__control">
+                    <Segmented<"wake" | "direct">
+                      label="Mot d'activation vocal"
+                      value={wakeWordEnabled ? "wake" : "direct"}
+                      onChange={(mode) => {
+                        const enabled = mode === "wake";
+                        setWakeWordEnabled(enabled);
+                        toast.ok(
+                          enabled
+                            ? "Wake word « Jarvis » activé."
+                            : "Écoute directe activée (sans mot d'activation)."
+                        );
+                      }}
+                      options={[
+                        { value: "wake", label: "Wake word « Jarvis »" },
+                        { value: "direct", label: "Écoute directe" },
+                      ]}
+                    />
+                  </div>
+                </div>
+
+                <div className="setting" style={{ borderTop: "1px solid var(--line)" }}>
+                  <div className="setting__text">
+                    <div className="setting__label">
+                      Seuil de détection du wake word ({Math.round(wakeWordThreshold * 100)} %)
+                    </div>
+                    <div className="setting__desc">
+                      Plus le seuil est bas, plus Jarvis réagit facilement à voix basse ; plus il est haut, moins les bruits ambiants déclenchent l'écoute.
+                    </div>
+                  </div>
+                  <div
+                    className="setting__control stack"
+                    style={{ alignItems: "flex-end", gap: "0.45rem" }}
+                  >
+                    <div className="cluster">
+                      {[
+                        { value: 0.22, label: "Sensible (22 %)" },
+                        { value: 0.38, label: "Équilibré (38 %)" },
+                        { value: 0.58, label: "Strict (58 %)" },
+                      ].map((preset) => (
+                        <button
+                          key={preset.value}
+                          type="button"
+                          className={
+                            Math.abs(wakeWordThreshold - preset.value) < 0.025
+                              ? "btn btn--primary"
+                              : "btn"
+                          }
+                          onClick={() => setWakeWordThreshold(preset.value)}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="range"
+                      min={0.15}
+                      max={0.75}
+                      step={0.02}
+                      value={wakeWordThreshold}
+                      aria-label="Seuil de détection du wake word"
+                      style={{ width: "210px" }}
+                      onChange={(e) => setWakeWordThreshold(Number(e.target.value))}
+                    />
+                  </div>
+                </div>
+
+                <div className="setting" style={{ borderTop: "1px solid var(--line)" }}>
+                  <div className="setting__text">
+                    <div className="setting__label">Atténuer les autres sons quand Jarvis parle</div>
+                    <div className="setting__desc">
+                      Baisse automatiquement le volume des autres applications (musique, vidéos, navigateur) pendant que Jarvis parle puis le rétablit juste après.
+                    </div>
+                  </div>
+                  <div className="setting__control">
+                    <Segmented<"on" | "off">
+                      label="Atténuation audio pendant la parole de Jarvis"
+                      value={audioDuckingEnabled ? "on" : "off"}
+                      onChange={(next) => {
+                        const enabled = next === "on";
+                        setAudioDuckingEnabled(enabled);
+                        if (!enabled) {
+                          void apiClient.setAudioDucking(false).catch(() => undefined);
+                        }
+                        toast.ok(
+                          enabled
+                            ? "Atténuation des autres sons activée."
+                            : "Atténuation des autres sons désactivée."
+                        );
+                      }}
+                      options={[
+                        { value: "on", label: "Activé" },
+                        { value: "off", label: "Désactivé" },
+                      ]}
+                    />
+                  </div>
+                </div>
+              </div>
+
               <div className="card stack">
                 <div className="cluster">
                   {blacklistQuery.data.apps.map((appName) => (
@@ -898,7 +1310,7 @@ export function ConfigPage() {
                     type="text"
                     className="input"
                     style={{ flex: 1 }}
-                    placeholder="Application a exclure (ex : signal)"
+                    placeholder="Application à exclure (ex : signal)"
                     aria-label="Application à exclure"
                     value={newBlacklistApp}
                     onChange={(e) => setNewBlacklistApp(e.target.value)}
@@ -910,7 +1322,18 @@ export function ConfigPage() {
               </div>
             </section>
           )}
-        </div>
+
+          {/* Voix reconnues */}
+          <section id="voix" className="settings__section">
+            <h2 style={{ fontSize: "var(--fs-lg)" }}>Voix reconnues</h2>
+            <p>
+              Ajoutez votre voix ainsi que celles de votre entourage (compagne, amis) pour que Jarvis
+              ignore automatiquement toute autre source sonore.
+            </p>
+            <VoiceProfilesCard />
+          </section>
+          </>
+        )}
       </div>
     </section>
   );

@@ -1,13 +1,21 @@
 [project]
-name = "omi-workspace"
+name = "jarvis-workspace"
 version = "2.0.0"
-description = "OMI 2.0 : assistant personnel permanent, multi-fournisseurs et interface web 3D"
+description = "JARVIS 2.0 : assistant personnel permanent, multi-fournisseurs et interface web 3D"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "omi-shared",
-    "omi-core",
-    "omi-desktop",
+    "jarvis-shared",
+    "jarvis-core",
+    "jarvis-desktop",
+]
+
+[dependency-groups]
+# Installe par `uv sync` : sans ce groupe, une synchronisation retire pytest et ruff du venv.
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.17.0",
 ]
 
 [tool.uv.workspace]
@@ -18,14 +26,14 @@ members = [
 ]
 
 [tool.uv.sources]
-omi-shared = { workspace = true }
-omi-core = { workspace = true }
-omi-desktop = { workspace = true }
+jarvis-shared = { workspace = true }
+jarvis-core = { workspace = true }
+jarvis-desktop = { workspace = true }
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["legacy", "web/node_modules", "web/dist", ".venv", "omi-windows"]
+exclude = ["legacy", "web/node_modules", "web/dist", ".venv", "jarvis-windows"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
 import type { MotionValue } from "motion/react";
-import type { OmiTheme } from "../store/useOmiStore";
+import type { JarvisTheme } from "../store/useJarvisStore";
 import type { SphereState } from "../types/generated";
 import { getStateVisualConfig } from "./stateVisuals";
 
 interface SphereFallback2DProps {
   sphereState: SphereState;
-  theme: OmiTheme;
+  theme: JarvisTheme;
   amplitude: number;
   reducedMotion: boolean;
   pointerX?: MotionValue<number>;
@@ -135,7 +135,7 @@ export function SphereFallback2D({
   return (
     <canvas
       ref={canvasRef}
-      aria-label={`Sphere OMI en mode Canvas 2D (${sphereState})`}
+      aria-label={`Sphere JARVIS en mode Canvas 2D (${sphereState})`}
       style={{ width: "100%", height: "100%", display: "block" }}
     />
   );

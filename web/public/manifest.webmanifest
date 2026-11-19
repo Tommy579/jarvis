@@ -1,6 +1,6 @@
 {
-  "name": "OMI 2.0",
-  "short_name": "OMI",
+  "name": "JARVIS 2.0",
+  "short_name": "JARVIS",
   "description": "Assistant personnel permanent avec sphere vocale 3D et memoire editable.",
   "start_url": "/",
   "display": "standalone",
@@ -8,7 +8,7 @@
   "theme_color": "#111316",
   "icons": [
     {
-      "src": "/favicon.svg",
+      "src": "/favicon.svg?v=5",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

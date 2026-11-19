@@ -1,5 +1,5 @@
-const CACHE_NAME = "omi-web-v3";
-const ASSETS = ["/", "/index.html", "/manifest.webmanifest", "/favicon.svg"];
+const CACHE_NAME = "jarvis-web-v12";
+const ASSETS = ["/manifest.webmanifest", "/favicon.svg?v=5"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -18,16 +18,29 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET" || event.request.url.includes("/api/") || event.request.url.includes("/ws")) {
+  if (
+    event.request.method !== "GET" ||
+    event.request.url.includes("/api/") ||
+    event.request.url.includes("/ws")
+  ) {
+    return;
+  }
+  // Navigation HTML : toujours reseau en priorite sans mettre en cache d'index obsolete
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match("/index.html"))
+    );
     return;
   }
   event.respondWith(
     fetch(event.request)
       .then((res) => {
-        const clone = res.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)).catch(() => undefined);
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone)).catch(() => undefined);
+        }
         return res;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/index.html")))
+      .catch(() => caches.match(event.request))
   );
 });

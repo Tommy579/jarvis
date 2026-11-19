@@ -1,0 +1,16 @@
+[Unit]
+Description=JARVIS 2.0 Desktop Agent (Capteurs KDE Wayland, Voix, Icone StatusNotifierItem)
+After=graphical-session.target plasma-kwin_wayland.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/jarvis
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=%h/Documents/jarvis/packages/shared:%h/Documents/jarvis/packages/core:%h/Documents/jarvis/packages/desktop
+ExecStart=%h/Documents/jarvis/.venv/bin/python -m jarvis_desktop.tray_sni
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,13 +1,42 @@
-import type { AudioMetrics } from "../store/useOmiStore";
+import type { AudioMetrics } from "../store/useJarvisStore";
 
-/** Seuil plancher de barge-in : en dessous, c'est du souffle ou une fuite faible. */
-export const BARGE_IN_BASE_THRESHOLD = 0.04;
+/** Seuil plancher de barge-in : exige une voix claire pour couper la parole. */
+export const BARGE_IN_BASE_THRESHOLD = 0.06;
 /** Part du niveau de lecture TTS qu'un vrai utilisateur doit depasser pour couper la parole. */
-export const BARGE_IN_ECHO_RATIO = 0.55;
-/** Duree de parole continue exigee avant de couper (evite les clics et la reverberation). */
-export const BARGE_IN_MIN_MS = 400;
+export const BARGE_IN_ECHO_RATIO = 0.65;
+/** Duree de parole continue exigee avant de couper (evite les clics, bruits et reverberation). */
+export const BARGE_IN_MIN_MS = 450;
 /** Fenetre de grace apres le demarrage du TTS (convergence de l'annulation d'echo). */
-export const BARGE_IN_GRACE_MS = 350;
+export const BARGE_IN_GRACE_MS = 450;
+/** Seuil plancher de detection vocale hors lecture TTS (filtre le souffle du micro). */
+export const SPEECH_BASE_THRESHOLD = 0.016;
+/** Seuil plus sensible uniquement pendant l'attente du wake word ("Jarvis"). */
+export const SPEECH_STANDBY_THRESHOLD = 0.01;
+/** Seuil par defaut de detection du wake word (0.15 = sensible, 0.38 = equilibre, 0.75 = strict). */
+export const DEFAULT_WAKE_WORD_THRESHOLD = 0.38;
+
+/** Convertit le seuil utilisateur (0.15..0.75) en plancher RMS micro en veille. */
+export function standbySpeechThresholdFromWake(wakeThreshold: number): number {
+  const clamped = Math.min(0.75, Math.max(0.15, wakeThreshold));
+  if (clamped <= 0.38) {
+    return 0.004 + ((clamped - 0.15) / 0.23) * 0.006;
+  }
+  return 0.01 + ((clamped - 0.38) / 0.37) * 0.012;
+}
+
+/**
+ * Seuil de detection adapte au bruit ambiant (plancher de souffle du micro).
+ */
+export function speechGateThreshold(
+  noiseFloor: number,
+  standby = false,
+  standbyBase = SPEECH_STANDBY_THRESHOLD
+): number {
+  const base = standby ? standbyBase : SPEECH_BASE_THRESHOLD;
+  const mult = standby ? 1.8 : 2.3;
+  const cap = standby ? Math.max(0.045, standbyBase * 3.2) : 0.065;
+  return Math.max(base, Math.min(cap, Math.max(0, noiseFloor) * mult));
+}
 
 /**
  * Seuil de detection adapte au volume effectivement joue : sur haut-parleur, la fuite
@@ -189,7 +218,54 @@ export class AudioEngine {
   private playbackStartedAt = 0;
   /** Texte que Jarvis est en train de lire, pour reconnaitre sa propre voix dans les transcriptions. */
   private spokenText = "";
+  private standbyMode = false;
+  private standbySpeechThreshold = SPEECH_STANDBY_THRESHOLD;
+  private wasPlaying = false;
   public onPlaybackEnded?: () => void;
+  public onPlaybackStateChange?: (playing: boolean) => void;
+
+  private emitPlaybackState(): void {
+    const playing = this.isPlaying();
+    if (playing !== this.wasPlaying) {
+      this.wasPlaying = playing;
+      this.onPlaybackStateChange?.(playing);
+    }
+  }
+
+  /** Active/desactive le mode veille wake-word (masque les transcriptions ambiantes). */
+  setStandbyMode(standby: boolean): void {
+    this.standbyMode = standby;
+  }
+
+  /** Ajuste le plancher RMS en veille selon le seuil de detection du wake word (0.15..0.75). */
+  setWakeWordThreshold(wakeThreshold: number): void {
+    this.standbySpeechThreshold = standbySpeechThresholdFromWake(wakeThreshold);
+  }
+
+  /** Joue un bref signal sonore Web Audio lors du reveil ("wake") ou de la mise en veille ("sleep"). */
+  playChime(kind: "wake" | "sleep"): void {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    try {
+      const now = ctx.currentTime;
+      const notes = kind === "wake" ? [523.25, 659.25] : [587.33, 440.0];
+      notes.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, now + idx * 0.09);
+        gain.gain.setValueAtTime(0.0001, now + idx * 0.09);
+        gain.gain.exponentialRampToValueAtTime(0.08, now + idx * 0.09 + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.09 + 0.11);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + idx * 0.09);
+        osc.stop(now + idx * 0.09 + 0.12);
+      });
+    } catch {
+      // Ignorer si AudioContext est bloque
+    }
+  }
 
   /** Renseigne le texte lu en cours (utile quand le TTS arrive en flux, sans passer par speakText). */
   setSpokenText(text: string): void {
@@ -264,9 +340,11 @@ export class AudioEngine {
       src.start(startAt);
       this.nextStartTime = startAt + buffer.duration;
       this.activeSources.add(src);
+      this.emitPlaybackState();
       src.onended = () => {
         this.activeSources.delete(src);
         if (this.activeSources.size === 0) {
+          this.emitPlaybackState();
           this.onPlaybackEnded?.();
         }
       };
@@ -344,9 +422,16 @@ export class AudioEngine {
               const trimmed = full.trim();
 
               if (this.isPlaying()) {
-                // Sur haut-parleur, cette API transcrit Jarvis lui-meme : on ignore tout ce qui
-                // ressemble au texte lu, ainsi que la fenetre de convergence de l'annulation d'echo.
-                if (!trimmed || !this.isBargeInAllowed() || isSelfEcho(this.spokenText, trimmed)) {
+                // En veille wake-word ou sur de courts fragments (bruit/echo), ne jamais couper la parole
+                // uniquement sur une hypothese SpeechRecognition : le seuil energetique RMS fait foi.
+                const wordCount = trimmed ? trimmed.split(/\s+/).length : 0;
+                if (
+                  this.standbyMode ||
+                  !trimmed ||
+                  (!isFinal && wordCount < 3) ||
+                  !this.isBargeInAllowed() ||
+                  isSelfEcho(this.spokenText, trimmed)
+                ) {
                   return;
                 }
                 this.stopPlayback();
@@ -359,7 +444,7 @@ export class AudioEngine {
                 }
                 return;
               }
-              if (trimmed) {
+              if (trimmed && !this.standbyMode) {
                 callbacks?.onLiveTranscript?.(trimmed, isFinal);
               }
             };
@@ -392,10 +477,12 @@ export class AudioEngine {
         let totalRecordedMs = 0;
         let inSpeech = false;
         let silenceMs = 0;
+        let noiseFloor = 0.008;
+        let peakRms = 0;
         let bargeInMs = 0;
         let bargeInPreroll: Float32Array[] = [];
 
-        const finalizeUtterance = (minSpeechMs = 150) => {
+        const finalizeUtterance = (minSpeechMs = 250) => {
           if (this.speechRecognizer) {
             try {
               this.speechRecognizer.abort();
@@ -405,8 +492,10 @@ export class AudioEngine {
           }
           const chunks = recordedChunks;
           const totalMs = totalRecordedMs;
+          const maxRms = peakRms;
           recordedChunks = [];
           totalRecordedMs = 0;
+          peakRms = 0;
           preRollChunks = [];
           bargeInMs = 0;
           bargeInPreroll = [];
@@ -414,7 +503,10 @@ export class AudioEngine {
             inSpeech = false;
             callbacks?.onSpeechChange?.(false);
           }
-          if (totalMs < minSpeechMs || chunks.length === 0) return;
+          const minRmsRequired = this.standbyMode
+            ? this.standbySpeechThreshold
+            : SPEECH_BASE_THRESHOLD;
+          if (totalMs < minSpeechMs || chunks.length === 0 || maxRms < minRmsRequired) return;
 
           const totalSamples = chunks.reduce((acc, c) => acc + c.length, 0);
           const merged = new Float32Array(totalSamples);
@@ -483,7 +575,17 @@ export class AudioEngine {
             totalRecordedMs += chunkMs;
           }
 
-          if (rms >= 0.008) {
+          const speechGate = speechGateThreshold(
+            noiseFloor,
+            this.standbyMode,
+            this.standbySpeechThreshold
+          );
+          if (!inSpeech && rms < speechGate) {
+            noiseFloor = noiseFloor * 0.96 + Math.min(rms, 0.04) * 0.04;
+          }
+
+          if (rms >= speechGate) {
+            peakRms = Math.max(peakRms, rms);
             if (!inSpeech) {
               inSpeech = true;
               callbacks?.onSpeechChange?.(true);
@@ -497,8 +599,10 @@ export class AudioEngine {
             silenceMs = 0;
           } else if (inSpeech) {
             silenceMs += chunkMs;
-            if (silenceMs >= 1600) {
-              finalizeUtterance(300);
+            const maxSilence = this.standbyMode ? 850 : 1600;
+            const minSpeech = this.standbyMode ? 150 : 250;
+            if (silenceMs >= maxSilence) {
+              finalizeUtterance(minSpeech);
             }
           }
         };
@@ -583,6 +687,7 @@ export class AudioEngine {
       this.nextStartTime = this.ctx.currentTime;
     }
     this.smoothed = { amplitude: 0, low: 0, mid: 0, high: 0 };
+    this.emitPlaybackState();
   }
 
   sample(dtMs: number, externalMicLevel = 0): AudioMetrics {

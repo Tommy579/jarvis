@@ -1,4 +1,14 @@
 servers:
+  # Alternative aux outils browser_* integres (CDP + arbre d'accessibilite, sans screenshot).
+  # A n'activer que si tu veux des captures d'ecran : les deux pilotent le meme port CDP et
+  # le runtime desactive alors les outils browser_* pour eviter deux implementations
+  # concurrentes sur les memes onglets.
+  playwright:
+    enabled: false
+    transport: stdio
+    command: "npx"
+    args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint", "http://127.0.0.1:9222"]
+    default_risk: 2
   notion:
     enabled: false
     transport: stdio

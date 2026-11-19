@@ -23,7 +23,7 @@ Tout ce qui suit a été vérifié dans le dépôt, pas supposé.
 
 | Élément | État réel | Emplacement |
 |---|---|---|
-| Moteur d'attention (urgence 0-4, canaux, dédup) | Écrit et testé, mais **canaux codés en dur** | `packages/core/omi_core/attention/engine.py:111-203` |
+| Moteur d'attention (urgence 0-4, canaux, dédup) | Écrit et testé, mais **canaux codés en dur** | `packages/core/jarvis_core/attention/engine.py:111-203` |
 | Escalade vers l'appel | `check_escalations()` existe… **jamais appelée hors tests** | `engine.py:344-358` ; seul appel : `tests/test_core_v2.py:382` |
 | Plafond d'appels/jour | Compteur en mémoire, remis à zéro à chaque redémarrage | `engine.py:61-75` |
 | Présence / heures calmes | Hardcodé 23 h-8 h, non lu depuis la politique | `attention/presence.py:22-30` |
@@ -34,7 +34,7 @@ Tout ce qui suit a été vérifié dans le dépôt, pas supposé.
 | Approbations | File asyncio + WebSocket, TTL 120 s, PIN géré | `tools/approvals.py:29-101`, `runtime.py:229-246` |
 | Approbation depuis le téléphone | **Impossible** : rien n'envoie la demande, rien ne la reçoit | — |
 | Notifications persistées | Table `notifications` (canal, urgence, statut, `dedup_key`, `acked_at`) | `memory/schema.py:120-131` |
-| Règles « ordres » | Texte Markdown statique, **non interprété** | `omi-data/wiki/rules.md`, `regles.md` |
+| Règles « ordres » | Texte Markdown statique, **non interprété** | `jarvis-data/wiki/rules.md`, `regles.md` |
 | Outil LLM de notification | Seulement `send_notification` (toast local) | `tools/standard.py:60-62, 336-343` |
 | Réglages persistés | Table `settings` (clé/valeur JSON), utilisée pour `attention_rules` | `memory/schema.py:196-200`, `api/server.py:289-305` |
 | Incohérence d'env | `TWILIO_ALLOWED_USER_NUMBERS` (code) vs `USER_PHONE_NUMBER` (`.env.example`) ; `PUBLIC_WEBHOOK_BASE_URL` absent | `runtime.py:168`, `.env.example:20-31` |
@@ -52,7 +52,7 @@ Trois notions distinctes, trois stockages, un seul point d'entrée pour les lire
 ### 1.1 `NotificationPolicy` — les réglages durables (une seule ligne)
 
 Stockée dans `settings` sous la clé `notification_policy` (JSON), avec `schema_version` pour migrer.
-Modèle Pydantic dans un nouveau module `packages/shared/omi_shared/notifications.py` :
+Modèle Pydantic dans un nouveau module `packages/shared/jarvis_shared/notifications.py` :
 
 ```python
 class NotificationPolicy(BaseModel):
@@ -152,18 +152,18 @@ C'est aussi la phase qui supprime les canaux codés en dur.
 
 ### Tâche 1.1 — Migration 3 et modèles partagés
 
-**Fichiers** : `packages/core/omi_core/memory/schema.py`, `packages/shared/omi_shared/notifications.py`,
-`packages/shared/omi_shared/rest_models.py`
+**Fichiers** : `packages/core/jarvis_core/memory/schema.py`, `packages/shared/jarvis_shared/notifications.py`,
+`packages/shared/jarvis_shared/rest_models.py`
 
 - Ajouter la migration 3 (trois tables ci-dessus + `ALTER TABLE approvals ADD COLUMN delivered_channels TEXT NOT NULL DEFAULT ''` et `answered_via TEXT`).
-- Exporter `NotificationPolicy` et `NotificationOrder` dans `omi_shared` pour que l'API, la CLI et le front partagent les types.
+- Exporter `NotificationPolicy` et `NotificationOrder` dans `jarvis_shared` pour que l'API, la CLI et le front partagent les types.
 - `MemoryDatabase` : `get_policy()/set_policy()`, `list_orders()/upsert_order()/revoke_order()`, `insert_attempt()`.
 
 **Test** : `tests/test_notifications.py::test_migration_3_is_idempotent` (ouvrir deux fois la base, pas d'erreur, `schema_version == 3`).
 
 ### Tâche 1.2 — `PolicyStore` : une seule lecture, un défaut sûr
 
-**Fichier** : `packages/core/omi_core/notifications/policy.py` (nouveau paquet, aux côtés de `channels/`)
+**Fichier** : `packages/core/jarvis_core/notifications/policy.py` (nouveau paquet, aux côtés de `channels/`)
 
 ```python
 class PolicyStore:
@@ -187,7 +187,7 @@ class PolicyStore:
         return current
 ```
 
-- `_mirror_to_wiki` écrit `omi-data/wiki/politique-notifications.md` (même style que `rules.md`) : c'est ce
+- `_mirror_to_wiki` écrit `jarvis-data/wiki/politique-notifications.md` (même style que `rules.md`) : c'est ce
   que l'utilisateur relit, mais **la base reste la source de vérité**. Le wiki est un rendu.
 - Ne jamais relire le Markdown pour décider.
 
@@ -196,7 +196,7 @@ même `data_dir`, `allow_calls=False` conservé).
 
 ### Tâche 1.3 — `AttentionEngine` consomme la politique
 
-**Fichier** : `packages/core/omi_core/attention/engine.py`
+**Fichier** : `packages/core/jarvis_core/attention/engine.py`
 
 Remplacer les listes de canaux codées en dur (`engine.py:120-203`) par un calcul unique :
 
@@ -240,7 +240,7 @@ Points d'attention :
 
 ### Tâche 1.4 — Le tick qui n'existe pas
 
-**Fichiers** : `packages/core/omi_core/api/server.py`, `scheduler/routines.py`
+**Fichiers** : `packages/core/jarvis_core/api/server.py`, `scheduler/routines.py`
 
 Aujourd'hui `check_escalations` et `flush_triage_batch` ne tournent jamais. Ajouter dans le `lifespan`
 du serveur une boucle unique (pas APScheduler pour ça, la granularité est de 30 s) :
@@ -274,7 +274,7 @@ env -u PYTHONPATH .venv/bin/python -m ruff check packages tests
 
 ### Tâche 2.1 — `TwilioClient` réel (fin du stub)
 
-**Fichier** : `packages/core/omi_core/channels/twilio_voice.py`, nouveau `channels/twilio_api.py`
+**Fichier** : `packages/core/jarvis_core/channels/twilio_voice.py`, nouveau `channels/twilio_api.py`
 
 ```python
 class TwilioRest:
@@ -304,7 +304,7 @@ class TwilioRest:
 
 ### Tâche 2.2 — Webhooks FastAPI (le chemin retour)
 
-**Fichier** : `packages/core/omi_core/api/server.py`
+**Fichier** : `packages/core/jarvis_core/api/server.py`
 
 Quatre routes, toutes avec vérification de signature Twilio (`verify_twilio_signature`, déjà écrite) et
 filtrage du numéro appelant (`is_caller_allowed`) :
@@ -316,7 +316,7 @@ filtrage du numéro appelant (`is_caller_allowed`) :
 | `POST /webhooks/twilio/status` | `queued/ringing/in-progress/completed/busy/no-answer/failed` → `NotificationAttempt.status` |
 | `POST /webhooks/twilio/sms` | Réponse SMS (`OUI`/`NON` + code) → approbation |
 
-- Toutes **exemptées du `OMI_API_TOKEN`** (Twilio ne le connaît pas) mais **jamais** sans signature.
+- Toutes **exemptées du `JARVIS_API_TOKEN`** (Twilio ne le connaît pas) mais **jamais** sans signature.
 - Réponse toujours en `text/xml` valide, même en erreur (`<Say>`), pour éviter les reprises Twilio.
 - Idempotence : clé `(external_id, status)` ; un `gather` rejoué ne ré-acquitte pas.
 - L'URL publique vient de `PUBLIC_WEBHOOK_BASE_URL` (à ajouter dans `.env.example` ; documenter ngrok /
@@ -324,7 +324,7 @@ filtrage du numéro appelant (`is_caller_allowed`) :
 
 ### Tâche 2.3 — L'échelle d'escalade, appliquée aux approbations
 
-**Fichier** : nouveau `packages/core/omi_core/notifications/dispatcher.py`
+**Fichier** : nouveau `packages/core/jarvis_core/notifications/dispatcher.py`
 
 ```python
 class ChannelDispatcher:
@@ -351,7 +351,7 @@ class ChannelDispatcher:
 
 ### Tâche 2.4 — Jetons d'action signés (liens ntfy / SMS)
 
-**Fichier** : `packages/core/omi_core/security.py`
+**Fichier** : `packages/core/jarvis_core/security.py`
 
 Aujourd'hui un bouton ntfy pointerait sur `/api/approvals/{id}` sans authentification. Ajouter :
 
@@ -391,9 +391,9 @@ hallucination (« j'ai prévenu Tom » alors que rien n'est parti).
 # 1. ntfy (2 min)
 export NTFY_TOPIC=jarvis-test-xxxx && curl -d "test" https://ntfy.sh/$NTFY_TOPIC
 # 2. Twilio (appel reel, ~0,02 EUR)
-python -m omi_core.cli notify test --channel call
+python -m jarvis_core.cli notify test --channel call
 # 3. approbation bout en bout
-python -m omi_core.cli notify ask "autoriser rm -rf build/ ?" --risk 3
+python -m jarvis_core.cli notify ask "autoriser rm -rf build/ ?" --risk 3
 ```
 
 ---
@@ -406,7 +406,7 @@ une requête, pas une phrase.
 
 ### Tâche 3.1 — Outils exposés au LLM
 
-**Fichier** : nouveau `packages/core/omi_core/tools/notifications.py`, enregistré dans `StandardToolkit.register_all`
+**Fichier** : nouveau `packages/core/jarvis_core/tools/notifications.py`, enregistré dans `StandardToolkit.register_all`
 
 | Outil | Risque | Rôle |
 |---|---|---|
@@ -429,7 +429,7 @@ Règles de conception :
 
 ### Tâche 3.2 — Du langage naturel à l'ordre (deux étages)
 
-**Fichier** : `packages/core/omi_core/notifications/parsing.py`
+**Fichier** : `packages/core/jarvis_core/notifications/parsing.py`
 
 1. **Étage déterministe** (gratuit, couvre 80 % des cas) — expressions régulières françaises :
 
@@ -450,7 +450,7 @@ Règles de conception :
 
 ### Tâche 3.3 — Application dans le moteur
 
-**Fichier** : `packages/core/omi_core/notifications/orders.py`
+**Fichier** : `packages/core/jarvis_core/notifications/orders.py`
 
 ```python
 def match_orders(orders, event) -> list[NotificationOrder]:
@@ -470,8 +470,8 @@ def match_orders(orders, event) -> list[NotificationOrder]:
 
 ### Tâche 3.4 — Cycle de vie visible
 
-- **CLI** : `omi orders list|add|rm`, `omi policy show|set --no-calls --calls-only-emergency`,
-  `omi notify test`.
+- **CLI** : `jarvis orders list|add|rm`, `jarvis policy show|set --no-calls --calls-only-emergency`,
+  `jarvis notify test`.
 - **Chat** : toute création d'ordre renvoie une carte « Ordre actif — [révoquer] » dans le fil.
 - **UI** : section « Ordres et notifications » dans `ConfigPage` (voir phase 4).
 
@@ -503,7 +503,7 @@ PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m 
 ### Tâche 4.1 — Page de configuration
 
 **Fichiers** : `web/src/pages/ConfigPage.tsx` (section notifications vers la ligne 420, à côté des heures
-calmes existantes), `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
+calmes existantes), `web/src/lib/api.ts`, `web/src/store/useJarvisStore.ts`
 
 - Interrupteur **« Jarvis peut m'appeler »** + sous-option **« uniquement urgence extrême »** (radio).
 - Heures calmes (déjà là), plafond d'appels/jour, délai d'escalade.
@@ -545,14 +545,14 @@ calmes existantes), `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
 ## 7. Fichiers touchés (récapitulatif)
 
 **Nouveaux**
-- `packages/shared/omi_shared/notifications.py` — `NotificationPolicy`, `NotificationOrder`, schémas d'outils.
-- `packages/core/omi_core/notifications/__init__.py`
-- `packages/core/omi_core/notifications/policy.py` — `PolicyStore`
-- `packages/core/omi_core/notifications/orders.py` — `match_orders`, cycle de vie
-- `packages/core/omi_core/notifications/dispatcher.py` — `ChannelDispatcher`, échelle d'escalade
-- `packages/core/omi_core/notifications/parsing.py` — phrases → ordres (regex + repli LLM)
-- `packages/core/omi_core/channels/twilio_api.py` — client REST voix/SMS
-- `packages/core/omi_core/tools/notifications.py` — outils LLM
+- `packages/shared/jarvis_shared/notifications.py` — `NotificationPolicy`, `NotificationOrder`, schémas d'outils.
+- `packages/core/jarvis_core/notifications/__init__.py`
+- `packages/core/jarvis_core/notifications/policy.py` — `PolicyStore`
+- `packages/core/jarvis_core/notifications/orders.py` — `match_orders`, cycle de vie
+- `packages/core/jarvis_core/notifications/dispatcher.py` — `ChannelDispatcher`, échelle d'escalade
+- `packages/core/jarvis_core/notifications/parsing.py` — phrases → ordres (regex + repli LLM)
+- `packages/core/jarvis_core/channels/twilio_api.py` — client REST voix/SMS
+- `packages/core/jarvis_core/tools/notifications.py` — outils LLM
 - `tests/test_notifications.py`, `tests/test_orders.py`, `tests/test_twilio_flow.py`, `tests/test_attention_policy.py`
 
 **Modifiés**
@@ -562,7 +562,7 @@ calmes existantes), `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
 - `tools/approvals.py` (TTL politique, canaux de livraison), `tools/standard.py` (enregistrement)
 - `api/server.py` (4 webhooks, `/actions/{token}`, endpoints policy/orders, tick lifespan)
 - `cli.py` (`orders`, `policy`, `notify test`)
-- `web/src/pages/ConfigPage.tsx`, `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
+- `web/src/pages/ConfigPage.tsx`, `web/src/lib/api.ts`, `web/src/store/useJarvisStore.ts`
 - `.env.example` (corriger `TWILIO_ALLOWED_USER_NUMBERS`, ajouter `PUBLIC_WEBHOOK_BASE_URL`,
   `ACTION_TOKEN_SECRET`, `USER_PHONE_NUMBER` si conservé), `README.md`
 
@@ -578,7 +578,7 @@ calmes existantes), `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
    sans réponse en 2 min, SMS ; sans réponse en 10 min, appel avec PIN ; l'agent ne dépasse pas la
    demande et affiche « refusé/expiré » si l'utilisateur ne répond pas.
 2. **« Préviens-moi si le build échoue »** → l'ordre survit à un `systemctl restart`, tire une seule fois
-   (si `max_fires=1`), et `omi orders list` le montre ainsi que sa date d'expiration.
+   (si `max_fires=1`), et `jarvis orders list` le montre ainsi que sa date d'expiration.
 3. **« Ne m'appelle pas sauf en cas d'extrême urgence »** → à 3 h du matin, trois alertes de niveau 3
    n'appellent pas ; une alerte de niveau 4 appelle ; le journal (`notification_attempts`) prouve la
    différence et le plafond tient après redémarrage.
@@ -596,7 +596,7 @@ calmes existantes), `web/src/lib/api.ts`, `web/src/store/useOmiStore.ts`
    possible). Proposition : SMS = notification seulement, l'action se fait par lien signé ou appel + PIN.
 3. **Le wiki comme interface d'édition** : faut-il accepter qu'un utilisateur édite
    `politique-notifications.md` à la main ? Proposition : non en v1 (le fichier est écrasé), puis import
-   explicite `omi policy import` en v2.
+   explicite `jarvis policy import` en v2.
 4. **Fuseau et DST** : `Europe/Paris` codé en dur à plusieurs endroits (`AttentionRules.timezone`).
    Centraliser sur `zoneinfo` et tester le passage à l'heure d'hiver.
 5. **Appels ConversationRelay (Palier B, conversation complète)** : hors périmètre de cette itération —

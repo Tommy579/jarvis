@@ -32,9 +32,13 @@ ENV/
 
 # App specific
 *.spec
+!packaging/*.spec
 *.bat
 *.bak
-package-lock.json
+*.exe
+# Lockfile npm : celui de web/ doit etre versionne (npm ci + cache en CI)
+/package-lock.json
+!web/package-lock.json
 !install.py
 
 # API Keys & Personal Data
@@ -42,10 +46,10 @@ package-lock.json
 *.db
 *.sqlite
 *.sqlite3
-omi_profile.json
-omi-windows/omi_profile.json
-omi-windows/*.db
-omi-data/
+jarvis_profile.json
+jarvis-windows/jarvis_profile.json
+jarvis-windows/*.db
+jarvis-data/
 
 # Local artifacts
 node_modules/
@@ -55,7 +59,7 @@ web/playwright-report/
 web/tsconfig.tsbuildinfo
 web/dist/
 *.log
-omi-data/backups/
-**/omi_profile.json
+jarvis-data/backups/
+**/jarvis_profile.json
 evals/latest.json
 

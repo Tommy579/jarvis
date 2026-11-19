@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Script d'installation OMI 2.0 pour Arch Linux / KDE Wayland
+# Script d'installation JARVIS 2.0 pour Arch Linux / KDE Wayland
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -25,10 +25,10 @@ if [ -d "$ROOT_DIR/web" ] && [ -f "$ROOT_DIR/web/package.json" ]; then
   (cd "$ROOT_DIR/web" && npm ci && npm run build)
 fi
 
-echo "Installation de l'unite systemd utilisateur omi-desktop..."
+echo "Installation de l'unite systemd utilisateur jarvis-desktop..."
 mkdir -p "${HOME}/.config/systemd/user"
-cp -f "$ROOT_DIR/deploy/omi-desktop.service" "${HOME}/.config/systemd/user/omi-desktop.service"
+cp -f "$ROOT_DIR/deploy/jarvis-desktop.service" "${HOME}/.config/systemd/user/jarvis-desktop.service"
 systemctl --user daemon-reload || true
-systemctl --user enable omi-desktop.service || true
+systemctl --user enable jarvis-desktop.service || true
 
 echo "Installation Arch Linux terminee. Pensez a verifier .env et Tailscale."

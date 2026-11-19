@@ -1,4 +1,4 @@
-"""Tests complets pour OMI 2.0 (contrats partages, memoire, connecteurs, canaux, onboarding, API)."""
+"""Tests complets pour JARVIS 2.0 (contrats partages, memoire, connecteurs, canaux, onboarding, API)."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
-from omi_core.api.server import OmiCoreState, create_app
-from omi_core.channels.telegram import (
+from jarvis_core.api.server import JarvisCoreState, create_app
+from jarvis_core.channels.telegram import (
     TelegramGateway,
     build_alert_keyboard,
     build_approval_keyboard,
 )
-from omi_core.integrations import (
+from jarvis_core.integrations import (
     FinanceIntegration,
     GitHubProbesIntegration,
     GmailIntegration,
@@ -23,17 +23,17 @@ from omi_core.integrations import (
     IntegrationRegistry,
     WeatherTransportIntegration,
 )
-from omi_core.integrations.gmail import filter_important_messages
-from omi_core.memory.import_legacy import import_legacy_profile
-from omi_core.memory.schema import MemoryDatabase
-from omi_core.onboarding.service import OnboardingService
-from omi_core.scheduler.routines import RoutineScheduler
-from omi_core.tools.standard import StandardToolkit, extract_clean_html_text
-from omi_desktop.platform.linux import search_files_linux
-from omi_desktop.platform.windows import search_files_windows
-from omi_shared.codegen import generate_typescript
-from omi_shared.rest_models import FactCreate, FactUpdate
-from omi_shared.ws_protocol import ClientWsEvent, ServerWsEvent
+from jarvis_core.integrations.gmail import filter_important_messages
+from jarvis_core.memory.import_legacy import import_legacy_profile
+from jarvis_core.memory.schema import MemoryDatabase
+from jarvis_core.onboarding.service import OnboardingService
+from jarvis_core.scheduler.routines import RoutineScheduler
+from jarvis_core.tools.standard import StandardToolkit, extract_clean_html_text
+from jarvis_desktop.platform.linux import search_files_linux
+from jarvis_desktop.platform.windows import search_files_windows
+from jarvis_shared.codegen import generate_typescript
+from jarvis_shared.rest_models import FactCreate, FactUpdate
+from jarvis_shared.ws_protocol import ClientWsEvent, ServerWsEvent
 from pydantic import TypeAdapter
 
 
@@ -73,7 +73,7 @@ def test_shared_ws_contracts_and_ts_codegen() -> None:
 
 
 def test_memory_schema_crud_search_and_legacy_import(tmp_path: Path) -> None:
-    db = MemoryDatabase(tmp_path / "omi.db")
+    db = MemoryDatabase(tmp_path / "jarvis.db")
     expected_tables = {
         "facts",
         "episodes",
@@ -124,12 +124,12 @@ def test_memory_schema_crud_search_and_legacy_import(tmp_path: Path) -> None:
     db.log_llm_call("agent", "deepseek/deepseek-v4.1-flash-1017", 100, 40, 0.0005, 320.0)
     assert len(db.daily_usage()) == 1
 
-    profile_path = tmp_path / "omi_profile.json"
+    profile_path = tmp_path / "jarvis_profile.json"
     profile_path.write_text(
         json.dumps(
             {
                 "identity": {"name": "Tom", "language": "fr", "timezone": "Europe/Paris"},
-                "work": {"current_projects": ["OMI 2.0"], "tech_stack": ["Python", "React"]},
+                "work": {"current_projects": ["JARVIS 2.0"], "tech_stack": ["Python", "React"]},
                 "preferences": {"communication_style": "concis"},
                 "notes": [{"date": "2026-10-01", "text": "Prefere Wayland a X11."}],
             }
@@ -305,9 +305,9 @@ def test_onboarding_10_modules_and_resume(tmp_path: Path) -> None:
 
 
 def test_fastapi_endpoints_auth_and_ws(tmp_path: Path, monkeypatch) -> None:
-    from omi_core.llm.base import LLMProvider
-    from omi_core.runtime import build_runtime
-    from omi_shared.models import ModelCapabilities, StreamDelta, Usage
+    from jarvis_core.llm.base import LLMProvider
+    from jarvis_core.runtime import build_runtime
+    from jarvis_shared.models import ModelCapabilities, StreamDelta, Usage
 
     class _DeterministicProvider(LLMProvider):
         name = "openrouter"
@@ -332,12 +332,12 @@ def test_fastapi_endpoints_auth_and_ws(tmp_path: Path, monkeypatch) -> None:
             )
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("OMI_ENV_PATH", str(tmp_path / ".env"))
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ENV_PATH", str(tmp_path / ".env"))
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
-    state = OmiCoreState(
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
+    state = JarvisCoreState(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
         legacy_profile_path=tmp_path / "missing.json",
@@ -414,8 +414,8 @@ def test_fastapi_endpoints_auth_and_ws(tmp_path: Path, monkeypatch) -> None:
         assert ev3["type"] == "assistant.done"
         assert ev4["type"] == "state" and ev4["payload"]["value"] == "idle"
 
-    # Verification du rejet Bearer lorsque OMI_API_TOKEN est actif
-    monkeypatch.setenv("OMI_API_TOKEN", "top-secret-token")
+    # Verification du rejet Bearer lorsque JARVIS_API_TOKEN est actif
+    monkeypatch.setenv("JARVIS_API_TOKEN", "top-secret-token")
     assert client.get("/api/models").status_code == 401
     assert (
         client.get("/api/models", headers={"Authorization": "Bearer top-secret-token"}).status_code
@@ -427,8 +427,8 @@ def test_fastapi_endpoints_auth_and_ws(tmp_path: Path, monkeypatch) -> None:
 def test_integrations_oauth_urls_and_callback(tmp_path: Path, monkeypatch) -> None:
     import httpx
 
-    monkeypatch.setenv("OMI_ENV_PATH", str(tmp_path / ".env"))
-    monkeypatch.delenv("OMI_API_TOKEN", raising=False)
+    monkeypatch.setenv("JARVIS_ENV_PATH", str(tmp_path / ".env"))
+    monkeypatch.delenv("JARVIS_API_TOKEN", raising=False)
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "")
     monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "")
     monkeypatch.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
@@ -436,9 +436,9 @@ def test_integrations_oauth_urls_and_callback(tmp_path: Path, monkeypatch) -> No
     monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
     monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("SPOTIFY_ACCESS_TOKEN", raising=False)
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
 
-    state = OmiCoreState(
+    state = JarvisCoreState(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
         legacy_profile_path=tmp_path / "missing.json",
@@ -485,7 +485,9 @@ def test_integrations_oauth_urls_and_callback(tmp_path: Path, monkeypatch) -> No
 
     # Etat invalide rejete
     assert (
-        client.get("/api/oauth/google/callback?state=bad&code=abc", follow_redirects=False).status_code
+        client.get(
+            "/api/oauth/google/callback?state=bad&code=abc", follow_redirects=False
+        ).status_code
         == 400
     )
 
@@ -514,8 +516,8 @@ def test_integrations_oauth_urls_and_callback(tmp_path: Path, monkeypatch) -> No
             return _FakeTokenResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
-    # Callback accessible sans Bearer meme si OMI_API_TOKEN est defini
-    monkeypatch.setenv("OMI_API_TOKEN", "top-secret-token")
+    # Callback accessible sans Bearer meme si JARVIS_API_TOKEN est defini
+    monkeypatch.setenv("JARVIS_API_TOKEN", "top-secret-token")
     cb = client.get(
         f"/api/oauth/google/callback?state={oauth_state}&code=auth-code-123",
         follow_redirects=False,
@@ -539,20 +541,19 @@ def test_outlook_oauth_and_apple_calendar_ics(tmp_path: Path, monkeypatch) -> No
 
     import httpx
     from fastapi.testclient import TestClient
+    from jarvis_core.api.server import JarvisCoreState, create_app
+    from jarvis_core.integrations.apple_calendar import parse_ics_events
 
-    from omi_core.api.server import OmiCoreState, create_app
-    from omi_core.integrations.apple_calendar import parse_ics_events
-
-    monkeypatch.setenv("OMI_ISOLATED_TEST", "1")
+    monkeypatch.setenv("JARVIS_ISOLATED_TEST", "1")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("OMI_ENV_PATH", str(tmp_path / ".env"))
-    monkeypatch.setenv("OMI_ALLOW_INSECURE", "1")
+    monkeypatch.setenv("JARVIS_ENV_PATH", str(tmp_path / ".env"))
+    monkeypatch.setenv("JARVIS_ALLOW_INSECURE", "1")
     monkeypatch.delenv("MICROSOFT_CLIENT_ID", raising=False)
     monkeypatch.delenv("MICROSOFT_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("MICROSOFT_OAUTH_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("APPLE_CALENDAR_ICS_URL", raising=False)
 
-    state = OmiCoreState(
+    state = JarvisCoreState(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
         legacy_profile_path=tmp_path / "missing.json",
@@ -643,9 +644,10 @@ def test_outlook_oauth_and_apple_calendar_ics(tmp_path: Path, monkeypatch) -> No
 
 def test_integration_tools_registered_in_runtime(tmp_path: Path, monkeypatch) -> None:
     import asyncio
-    from omi_core.integrations.gmail import GmailIntegration
-    from omi_core.runtime import build_runtime
-    from omi_shared.models import ToolCall
+
+    from jarvis_core.integrations.gmail import GmailIntegration
+    from jarvis_core.runtime import build_runtime
+    from jarvis_shared.models import ToolCall
 
     monkeypatch.setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "ya29.test")
     rt = build_runtime(
@@ -684,8 +686,9 @@ def test_integration_tools_registered_in_runtime(tmp_path: Path, monkeypatch) ->
 
 def test_standard_toolkit_defaults_to_root_and_run_command(tmp_path: Path) -> None:
     import asyncio
-    from omi_core.runtime import build_runtime
-    from omi_shared.models import ToolCall
+
+    from jarvis_core.runtime import build_runtime
+    from jarvis_shared.models import ToolCall
 
     rt = build_runtime(
         data_dir=tmp_path / "data",
@@ -706,3 +709,178 @@ def test_standard_toolkit_defaults_to_root_and_run_command(tmp_path: Path) -> No
     assert cmd_res.is_error is False
     assert cmd_res.output["cwd"] == "/"
     assert cmd_res.output["stdout"].strip() == "/"
+
+
+def test_run_command_auto_and_write_file_permissions(tmp_path: Path) -> None:
+    import asyncio
+
+    from jarvis_core.runtime import build_runtime
+    from jarvis_shared.models import ToolCall
+
+    rt = build_runtime(
+        data_dir=tmp_path / "data",
+        config_dir=Path(__file__).resolve().parents[1] / "config",
+    )
+
+    # Normal command runs without pre_approved
+    ok_cmd = asyncio.run(
+        rt.tool_registry.execute(
+            ToolCall(id="tc-echo", name="run_command", arguments={"command": "echo hello"})
+        )
+    )
+    assert ok_cmd.is_error is False
+    assert ok_cmd.output["ok"] is True
+    assert ok_cmd.output["stdout"].strip() == "hello"
+
+    # Dangerous commands are blocked
+    for bad in ("rm -rf /", "mkfs.ext4 /dev/sda1", "shutdown -h now"):
+        bad_res = asyncio.run(
+            rt.tool_registry.execute(
+                ToolCall(id="tc-bad", name="run_command", arguments={"command": bad})
+            )
+        )
+        assert bad_res.output["ok"] is False
+        assert "dangereuse" in bad_res.output["error"].lower()
+
+    # write_file works on normal paths without pre_approved
+    target = tmp_path / "sub" / "note.txt"
+    w_ok = asyncio.run(
+        rt.tool_registry.execute(
+            ToolCall(
+                id="tc-w1",
+                name="write_file",
+                arguments={"file_path": str(target), "content": "jarvis"},
+            )
+        )
+    )
+    assert w_ok.output["ok"] is True
+    assert target.read_text(encoding="utf-8") == "jarvis"
+
+    # write_file refuses sensitive system paths
+    w_etc = asyncio.run(
+        rt.tool_registry.execute(
+            ToolCall(
+                id="tc-w2",
+                name="write_file",
+                arguments={"file_path": "/etc/passwd", "content": "nope"},
+            )
+        )
+    )
+    assert w_etc.output["ok"] is False
+    assert "sensible" in w_etc.output["error"].lower()
+
+
+def test_oauth_auto_refresh_on_401(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    import httpx
+    from jarvis_core.integrations.gmail import GmailIntegration
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOOGLE_OAUTH_ACCESS_TOKEN=expired\n", encoding="utf-8")
+    monkeypatch.setenv("JARVIS_ENV_PATH", str(env_file))
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csec")
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "1//refresh-tok")
+
+    calls: list[str] = []
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                req = httpx.Request("GET", "https://gmail.googleapis.com")
+                raise httpx.HTTPStatusError(
+                    "err", request=req, response=httpx.Response(self.status_code, request=req)
+                )
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = (args, kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            _ = (exc_type, exc, tb)
+
+        async def request(self, method: str, url: str, headers: dict, **kwargs):
+            _ = (method, url, kwargs)
+            calls.append(headers["Authorization"])
+            if headers["Authorization"] == "Bearer expired":
+                return _FakeResp(401, {})
+            return _FakeResp(200, {"messages": [{"id": "m-1"}]})
+
+        async def post(self, url: str, data: dict):
+            assert url == "https://oauth2.googleapis.com/token"
+            assert data["refresh_token"] == "1//refresh-tok"
+            return _FakeResp(200, {"access_token": "fresh-tok"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+    gmail = GmailIntegration(access_token="expired", enabled=True)
+    msgs = asyncio.run(gmail.list_messages())
+    assert msgs == [{"id": "m-1"}]
+    assert calls == ["Bearer expired", "Bearer fresh-tok"]
+    assert gmail.access_token == "fresh-tok"
+    assert "fresh-tok" in env_file.read_text(encoding="utf-8")
+
+
+def test_untrusted_history_does_not_block_fresh_user_turn(tmp_path: Path) -> None:
+    import asyncio
+
+    from jarvis_core.agent.loop import AgentLoop
+    from jarvis_core.tools.approvals import ApprovalManager
+    from jarvis_core.tools.registry import ToolRegistry, ToolSpec
+    from jarvis_shared.models import Message, RiskLevel, Role, StreamDelta, ToolCall, Usage
+    from pydantic import BaseModel
+
+    class _SendArgs(BaseModel):
+        to: str
+
+    class _MockRouter:
+        def __init__(self) -> None:
+            self.step = 0
+
+        def is_role_provider_trusted_for_highly_private(self, role: str) -> bool:
+            _ = role
+            return True
+
+        async def stream(self, role, messages, tools=None, temperature=0.2):
+            _ = (role, messages, tools, temperature)
+            self.step += 1
+            if self.step == 1:
+                yield StreamDelta(
+                    tool_calls=[ToolCall(id="tc-1", name="mail_send", arguments={"to": "a@b.c"})],
+                    usage=Usage(model="m", provider="p", tokens_in=1, tokens_out=1),
+                )
+            else:
+                yield StreamDelta(
+                    text="Envoye.",
+                    usage=Usage(model="m", provider="p", tokens_in=1, tokens_out=1),
+                )
+
+    async def _fake_send(to: str) -> dict:
+        return {"ok": True, "to": to}
+
+    registry = ToolRegistry(approval_manager=ApprovalManager(ttl_seconds=0.05))
+    registry.register(
+        ToolSpec(
+            name="mail_send",
+            description="send",
+            handler=_fake_send,
+            args_model=_SendArgs,
+            risk=RiskLevel.SENSITIVE,
+        )
+    )
+    loop = AgentLoop(router=_MockRouter(), tool_registry=registry)
+    loop.history.append(
+        Message(role=Role.USER, content='<untrusted source="gmail">ancien mail</untrusted>')
+    )
+    res = asyncio.run(loop.run_turn("Envoie un mail test a moi-meme"))
+    assert res.tool_results[0].output.get("blocked_by") != "untrusted_context_guard"
