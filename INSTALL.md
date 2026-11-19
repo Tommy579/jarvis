@@ -33,7 +33,7 @@ système `portaudio` doit être présent (le script d'installation s'en occupe).
 ### Étape 1 — Récupérer le projet
 
 ```bash
-git clone https://github.com/Tommy579/omi.git ~/Documents/jarvis
+git clone https://github.com/Tommy579/jarvis.git ~/Documents/jarvis
 cd ~/Documents/jarvis
 ```
 
@@ -130,7 +130,7 @@ Aucune installation de Python n'est nécessaire pour cette option.
 ### Option B — Depuis les sources
 
 ```powershell
-git clone https://github.com/Tommy579/omi.git "$HOME\Documents\jarvis"
+git clone https://github.com/Tommy579/jarvis.git "$HOME\Documents\jarvis"
 cd "$HOME\Documents\jarvis"
 powershell -ExecutionPolicy Bypass -File install_windows.ps1
 ```
