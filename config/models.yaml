@@ -16,6 +16,7 @@ roles:
   agent:
     model: deepseek/deepseek-v4.1-flash-1017
     provider: openrouter
+    thinking_mode: auto
     fallback:
       - z-ai/glm-5.3
       - minimax/minimax-m3
@@ -25,6 +26,7 @@ roles:
   orchestrator:
     model: gemini-4-argon
     provider: gemini
+    thinking_mode: auto
     fallback:
       - deepseek/deepseek-v4.1-flash-1017
       - z-ai/glm-5.3
@@ -32,27 +34,32 @@ roles:
   triage:
     model: gemini-4-carbon
     provider: gemini
+    thinking_mode: auto
     fallback:
       - gemini-4-argon
   vision:
     model: gemini-4-carbon
     provider: gemini
+    thinking_mode: auto
     fallback:
       - gemini-4-argon
   memory:
     model: deepseek/deepseek-v4.1-flash-1017
     provider: openrouter
+    thinking_mode: auto
     fallback:
       - gemini-4-carbon
   deep:
     model: gemini-4-hydrogen
     provider: gemini
+    thinking_mode: auto
     fallback:
       - gemini-4-argon
       - deepseek/deepseek-v4.1-flash-1017
   voice_realtime:
     model: gemini-live
     provider: gemini
+    thinking_mode: auto
 
 providers:
   openrouter:

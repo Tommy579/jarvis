@@ -154,7 +154,7 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route_glm.model, "z-ai/glm-5.3")
 
         # Delegation multimodale : z-ai/glm-5.3 ne supporte pas la vision,
-        # donc l'image passe d'abord par le role 'vision' (gemini-3.5-flash-lite)
+        # donc l'image passe d'abord par le role 'vision' (gemini-4-carbon)
         img_msg = Message(
             role=Role.USER,
             content="Que vois-tu ?",
@@ -162,7 +162,7 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         )
         res_vis = await router.complete(role="agent", messages=[img_msg])
         self.assertEqual(res_vis.text, "Reponse de z-ai/glm-5.3")
-        self.assertTrue(any(m == "gemini-3.5-flash-lite" for m, _ in gem_prov.seen_calls))
+        self.assertTrue(any(m == "gemini-4-carbon" for m, _ in gem_prov.seen_calls))
 
         # Verification du payload OpenRouter (data_collection: deny)
         real_or = OpenRouterProvider(api_key="sk-test")

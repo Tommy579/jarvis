@@ -56,6 +56,7 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> StreamDelta:
         """Appel complet non-streame retournant le texte, les tool_calls et l'usage."""
 
@@ -67,5 +68,6 @@ class LLMProvider(ABC):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """Appel en streaming SSE retournant des fragments de texte, tool_calls et l'usage final."""

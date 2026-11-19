@@ -167,6 +167,7 @@ class OpenRouterProvider(LLMProvider):
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
         stream: bool = False,
+        thinking_mode: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -183,12 +184,14 @@ class OpenRouterProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        thinking_mode = getattr(self, "thinking_mode", "auto")
+        effective_thinking = (
+            thinking_mode if thinking_mode is not None else getattr(self, "thinking_mode", "auto")
+        )
         if self.name == "openrouter":
-            if thinking_mode == "off":
+            if effective_thinking == "off":
                 payload["reasoning"] = {"enabled": False}
-            elif thinking_mode in ("low", "medium", "high"):
-                payload["reasoning"] = {"effort": thinking_mode}
+            elif effective_thinking in ("low", "medium", "high"):
+                payload["reasoning"] = {"effort": effective_thinking}
         return payload
 
     async def fetch_available_models(self) -> dict[str, ModelCapabilities]:
@@ -266,6 +269,7 @@ class OpenRouterProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> StreamDelta:
         payload = self.build_payload(
             model=model,
@@ -274,6 +278,7 @@ class OpenRouterProvider(LLMProvider):
             fallback_models=fallback_models,
             temperature=temperature,
             stream=False,
+            thinking_mode=thinking_mode,
         )
         t0 = time.perf_counter()
 
@@ -339,6 +344,7 @@ class OpenRouterProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """Streaming compatible SSE avec assemblage des fragments de tool_calls."""
         delta = await self.complete(
@@ -347,6 +353,7 @@ class OpenRouterProvider(LLMProvider):
             tools=tools,
             fallback_models=fallback_models,
             temperature=temperature,
+            thinking_mode=thinking_mode,
         )
         # Decoupage phrase par phrase pour alimenter le TTS en streaming immediat
         if delta.text:

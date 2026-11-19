@@ -2056,6 +2056,12 @@
     font-weight: 500;
     text-transform: capitalize;
   }
+  .model-row__controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--sp-2);
+    align-items: center;
+  }
   .model-row__fallback {
     grid-column: 2;
     font-size: var(--fs-xs);
@@ -2063,6 +2069,9 @@
   }
   @media (max-width: 560px) {
     .model-row {
+      grid-template-columns: 1fr;
+    }
+    .model-row__controls {
       grid-template-columns: 1fr;
     }
     .model-row__fallback {

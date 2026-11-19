@@ -101,6 +101,7 @@ from ..integrations.base import (
 )
 from ..integrations.trading_bot import format_trading_webhook_event
 from ..llm.gemini import GeminiProvider
+from ..llm.router import normalize_thinking_mode
 from ..memory.import_legacy import import_legacy_profile
 from ..memory.schema import MemoryDatabase, utc_now_iso
 from ..memory.storage import MemoryStorage
@@ -342,6 +343,13 @@ class JarvisCoreState:
                 saved_roles = [
                     RoleModelConfig.model_validate(item) for item in json.loads(raw_roles)
                 ]
+                for item in saved_roles:
+                    if (
+                        "/" in item.model
+                        and not item.model.startswith("models/")
+                        and item.provider != "openrouter"
+                    ):
+                        item.provider = "openrouter"
                 by_role = {m.role: m for m in saved_roles}
                 merged = [by_role.pop(m.role, m) for m in self.models]
                 merged.extend(by_role.values())
@@ -363,7 +371,7 @@ class JarvisCoreState:
                     item.provider = "gemini"
                     item.supports_vision = True
                 elif item.role in ("agent", "memory", "triage", "vision"):
-                    item.model = "gemini-3-flash-preview"
+                    item.model = "gemini-4-carbon"
                     item.provider = "gemini"
                     item.supports_vision = True
 
@@ -417,7 +425,12 @@ class JarvisCoreState:
                 on_ws_event=self._broadcast_ws_event,
             )
             for cfg in self.models:
-                self.runtime.router.set_role_model(cfg.role, cfg.model, cfg.provider)
+                self.runtime.router.set_role_model(
+                    cfg.role,
+                    cfg.model,
+                    cfg.provider,
+                    thinking_mode=cfg.thinking_mode,
+                )
         return self.runtime
 
     def set_sensor_paused(self, sensor: SensorName, paused: bool) -> BlacklistConfig:
@@ -1006,7 +1019,7 @@ class JarvisCoreState:
                     role="agent",
                     model="deepseek/deepseek-v4.1-flash-1017",
                     provider="openrouter",
-                    fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-3-flash-preview"],
+                    fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-4-carbon"],
                     supports_vision=False,
                     supports_tools=True,
                 )
@@ -1028,6 +1041,9 @@ class JarvisCoreState:
                     model=model_id,
                     provider=provider,
                     fallback=fallback,
+                    thinking_mode=normalize_thinking_mode(
+                        cfg.get("thinking_mode") or cfg.get("reasoning")
+                    ),  # type: ignore[arg-type]
                     supports_vision=supports_vision,
                     supports_tools=role_name != "voice_realtime",
                 )
@@ -1229,10 +1245,20 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             allow_offline=True,
         )
         for cfg in core_state.models:
-            core_state.runtime.router.set_role_model(cfg.role, cfg.model, cfg.provider)
+            core_state.runtime.router.set_role_model(
+                cfg.role,
+                cfg.model,
+                cfg.provider,
+                thinking_mode=cfg.thinking_mode,
+            )
     elif core_state.db.get_setting("role_models"):
         for cfg in core_state.models:
-            core_state.runtime.router.set_role_model(cfg.role, cfg.model, cfg.provider)
+            core_state.runtime.router.set_role_model(
+                cfg.role,
+                cfg.model,
+                cfg.provider,
+                thinking_mode=cfg.thinking_mode,
+            )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1816,6 +1842,9 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     @application.get("/api/models/thinking")
     def get_thinking_mode() -> dict[str, str]:
         runtime = core_state.ensure_runtime()
+        agent_route = runtime.router.roles.get("agent")
+        if agent_route and agent_route.thinking_mode != "auto":
+            return {"mode": agent_route.thinking_mode}
         return {"mode": runtime.router.thinking_mode}
 
     class UpdateThinkingModeRequest(BaseModel):
@@ -1825,6 +1854,14 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     def update_thinking_mode(payload: UpdateThinkingModeRequest) -> dict[str, str]:
         runtime = core_state.ensure_runtime()
         mode = runtime.router.set_thinking_mode(payload.mode)
+        for item in core_state.models:
+            if item.role == "agent":
+                item.thinking_mode = mode  # type: ignore[assignment]
+                core_state.db.set_setting(
+                    "role_models",
+                    json.dumps([m.model_dump() for m in core_state.models]),
+                )
+                break
         return {"mode": mode}
 
     @application.put("/api/models/role", response_model=RoleModelConfig)
@@ -1834,12 +1871,16 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             payload.role,
             payload.model,
             provider=payload.provider,
+            thinking_mode=payload.thinking_mode,
         )
+        if payload.role == "agent" and payload.thinking_mode is not None:
+            runtime.router.thinking_mode = route.thinking_mode
         updated_cfg: RoleModelConfig | None = None
         for item in core_state.models:
             if item.role == payload.role:
                 item.model = route.model
                 item.provider = route.provider
+                item.thinking_mode = route.thinking_mode  # type: ignore[assignment]
                 if payload.fallback is not None:
                     item.fallback = payload.fallback
                     route.fallback = list(payload.fallback)
@@ -1851,6 +1892,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                 model=route.model,
                 provider=route.provider,
                 fallback=payload.fallback or [],
+                thinking_mode=route.thinking_mode,  # type: ignore[arg-type]
             )
             core_state.models.append(updated_cfg)
         core_state.db.set_setting(
@@ -2900,7 +2942,11 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     core_state.db.ack_alert(event.payload.id)
                 elif event.type == "settings.model":
                     update_role_model(
-                        UpdateRoleModelRequest(role=event.payload.role, model=event.payload.model)
+                        UpdateRoleModelRequest(
+                            role=event.payload.role,
+                            model=event.payload.model,
+                            thinking_mode=event.payload.thinking_mode,
+                        )
                     )
                 elif event.type == "sensors.toggle":
                     try:

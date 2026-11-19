@@ -101,6 +101,7 @@ class OllamaProvider(OpenRouterProvider):
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
         stream: bool = False,
+        thinking_mode: str | None = None,
     ) -> dict[str, Any]:
         _ = fallback_models
         payload: dict[str, Any] = {
@@ -111,6 +112,13 @@ class OllamaProvider(OpenRouterProvider):
         }
         if tools:
             payload["tools"] = tools
+        effective_thinking = (
+            thinking_mode if thinking_mode is not None else getattr(self, "thinking_mode", "auto")
+        )
+        if effective_thinking == "off":
+            payload["reasoning_effort"] = "none"
+        elif effective_thinking in ("low", "medium", "high"):
+            payload["reasoning_effort"] = effective_thinking
         return payload
 
     async def fetch_available_models(self) -> dict[str, ModelCapabilities]:
@@ -154,6 +162,7 @@ class OllamaProvider(OpenRouterProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> StreamDelta:
         cleaned = self.clean_model_id(model)
         try:
@@ -163,6 +172,7 @@ class OllamaProvider(OpenRouterProvider):
                 tools=tools,
                 fallback_models=None,
                 temperature=temperature,
+                thinking_mode=thinking_mode,
             )
         except ProviderError as exc:
             # Certains petits modeles Ollama locaux refusent le champ 'tools' avec HTTP 400
@@ -173,5 +183,6 @@ class OllamaProvider(OpenRouterProvider):
                     tools=None,
                     fallback_models=None,
                     temperature=temperature,
+                    thinking_mode=thinking_mode,
                 )
             raise

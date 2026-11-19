@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { apiClient } from "./api/client";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
@@ -140,6 +141,7 @@ export function App() {
   const isTranscribingRef = useRef(false);
   const wasInterruptedRef = useRef(false);
 
+  const queryClient = useQueryClient();
   const setTheme = useJarvisStore((s) => s.setTheme);
   const setWsConnected = useJarvisStore((s) => s.setWsConnected);
   const setSphereState = useJarvisStore((s) => s.setSphereState);
@@ -291,6 +293,9 @@ export function App() {
         if (agentCfg?.model) {
           setActiveModel(agentCfg.model);
         }
+        if (agentCfg?.thinking_mode) {
+          setThinkingMode(agentCfg.thinking_mode);
+        }
       }
       if (goalsRes.status === "fulfilled") {
         useJarvisStore.getState().setGoals(goalsRes.value);
@@ -312,24 +317,34 @@ export function App() {
     setApprovals,
     setMessages,
     setSensors,
+    setThinkingMode,
     setWsConnected,
   ]);
 
   const handleSelectModel = useCallback(
     (model: string) => {
       setActiveModel(model);
-      wsClientRef.current?.send({ type: "settings.model", payload: { role: "agent", model } });
-      apiClient.updateRoleModel("agent", model).catch(() => undefined);
+      wsClientRef.current?.send({
+        type: "settings.model",
+        payload: { role: "agent", model, thinking_mode: null },
+      });
+      apiClient
+        .updateRoleModel("agent", model)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["models"] }))
+        .catch(() => undefined);
     },
-    [setActiveModel]
+    [queryClient, setActiveModel]
   );
 
   const handleSelectThinking = useCallback(
     (mode: ThinkingMode) => {
       setThinkingMode(mode);
-      apiClient.updateThinkingMode(mode).catch(() => undefined);
+      apiClient
+        .updateThinkingMode(mode)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["models"] }))
+        .catch(() => undefined);
     },
-    [setThinkingMode]
+    [queryClient, setThinkingMode]
   );
 
   const handleSendText = useCallback(

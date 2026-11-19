@@ -1,4 +1,5 @@
 import { getAuthToken } from "../lib/authToken";
+import type { ThinkingMode } from "../store/useJarvisStore";
 import type {
   AlertRecord,
   ApprovalItem,
@@ -181,10 +182,15 @@ export const apiClient = {
       method: "PUT",
       body: JSON.stringify({ mode }),
     }),
-  updateRoleModel: (role: string, model: string, fallback?: string[]) =>
+  updateRoleModel: (
+    role: string,
+    model: string,
+    fallback?: string[],
+    thinking_mode?: ThinkingMode
+  ) =>
     requestJson<RoleModelConfig>("/api/models/role", {
       method: "PUT",
-      body: JSON.stringify({ role, model, fallback }),
+      body: JSON.stringify({ role, model, fallback, thinking_mode }),
     }),
   getDailyUsage: () => requestJson<DailyUsageItem[]>("/api/usage/daily"),
   getDailyBudget: () => requestJson<{ daily_budget_usd: number }>("/api/usage/budget"),

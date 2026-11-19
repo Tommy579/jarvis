@@ -281,6 +281,7 @@ class GeminiProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> StreamDelta:
         t0 = time.perf_counter()
         system_parts = [m.content for m in messages if m.role == Role.SYSTEM and m.content]
@@ -335,7 +336,7 @@ class GeminiProvider(LLMProvider):
         def _resolve_vertex_model(raw_model: str) -> str:
             cleaned = raw_model.removeprefix("models/").removeprefix("google/")
             if cleaned in ("gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-live"):
-                return "gemini-3-flash-preview"
+                return "gemini-4-carbon"
             return cleaned
 
         def _invoke() -> Any:
@@ -348,10 +349,16 @@ class GeminiProvider(LLMProvider):
                 # Desactiver l'appel automatique des outils par le SDK Gemini :
                 # c'est AgentLoop qui controle les permissions niveaux 0..3.
                 config["automatic_function_calling"] = {"disable": True}
-            thinking_mode = getattr(self, "thinking_mode", "auto")
+            effective_thinking = (
+                thinking_mode
+                if thinking_mode is not None
+                else getattr(self, "thinking_mode", "auto")
+            )
             thinking_budgets = {"off": 0, "low": 1024, "medium": 4096, "high": 16384}
-            if thinking_mode in thinking_budgets:
-                config["thinking_config"] = {"thinking_budget": thinking_budgets[thinking_mode]}
+            if effective_thinking in thinking_budgets:
+                config["thinking_config"] = {
+                    "thinking_budget": thinking_budgets[effective_thinking]
+                }
             effective_model = _resolve_vertex_model(model) if self.vertexai else model
             try:
                 return client.models.generate_content(
@@ -363,9 +370,9 @@ class GeminiProvider(LLMProvider):
                 err_msg = str(exc).lower()
                 if (
                     "404" in err_msg or "not_found" in err_msg
-                ) and effective_model != "gemini-3-flash-preview":
+                ) and effective_model != "gemini-4-carbon":
                     return client.models.generate_content(
-                        model="gemini-3-flash-preview",
+                        model="gemini-4-carbon",
                         contents=contents,
                         config=config,
                     )
@@ -438,6 +445,7 @@ class GeminiProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         delta = await self.complete(
             model=model,
@@ -445,6 +453,7 @@ class GeminiProvider(LLMProvider):
             tools=tools,
             fallback_models=fallback_models,
             temperature=temperature,
+            thinking_mode=thinking_mode,
         )
         if delta.text:
             sentences = OpenRouterProvider.split_into_sentences(delta.text)
@@ -495,7 +504,7 @@ class GeminiProvider(LLMProvider):
         ]
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-3-flash-preview",
+            model="gemini-4-carbon",
             contents=contents,
             config=types.GenerateContentConfig(temperature=0.0),
         )
@@ -535,7 +544,7 @@ class GeminiProvider(LLMProvider):
         file_path: Path,
         prompt: str,
         mime_type: str | None = None,
-        model: str = "gemini-3-flash-preview",
+        model: str = "gemini-4-carbon",
         with_usage: bool = False,
     ) -> Any:
         """Analyse un fichier audio ou video via Gemini (inline pour petit audio, Files API sinon).

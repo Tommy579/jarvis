@@ -48,6 +48,7 @@ export interface AlertAckEvent {
 export interface SettingsModelPayload {
   role: string;
   model: string;
+  thinking_mode: "auto" | "off" | "low" | "medium" | "high" | null;
 }
 
 export interface SettingsModelEvent {
@@ -366,6 +367,7 @@ export interface RoleModelConfig {
   model: string;
   provider: string;
   fallback: string[];
+  thinking_mode: "auto" | "off" | "low" | "medium" | "high";
   supports_vision: boolean;
   supports_tools: boolean;
 }
@@ -375,6 +377,7 @@ export interface UpdateRoleModelRequest {
   model: string;
   provider: string | null;
   fallback: string[] | null;
+  thinking_mode: "auto" | "off" | "low" | "medium" | "high" | null;
 }
 
 export interface DailyUsageItem {

@@ -140,11 +140,15 @@ class OnboardingAnswerRequest(BaseModel):
 # === Modeles & Couts ===
 
 
+ThinkingModeLiteral = Literal["auto", "off", "low", "medium", "high"]
+
+
 class RoleModelConfig(BaseModel):
     role: str
     model: str
     provider: str
     fallback: list[str] = Field(default_factory=list)
+    thinking_mode: ThinkingModeLiteral = "auto"
     supports_vision: bool = False
     supports_tools: bool = True
 
@@ -154,6 +158,7 @@ class UpdateRoleModelRequest(BaseModel):
     model: str
     provider: str | None = None
     fallback: list[str] | None = None
+    thinking_mode: ThinkingModeLiteral | None = None
 
 
 class DailyUsageItem(BaseModel):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,6 +21,28 @@ from .gemini import DEFAULT_KNOWN_GEMINI_MODELS
 from .ollama import DEFAULT_KNOWN_OLLAMA_MODELS
 from .openrouter import DEFAULT_KNOWN_OPENROUTER_MODELS
 
+VALID_THINKING_MODES: tuple[str, ...] = ("auto", "off", "low", "medium", "high")
+
+
+def normalize_thinking_mode(mode: Any) -> str:
+    """Normalise un niveau de raisonnement vers une valeur supportee."""
+    if mode is False:
+        return "off"
+    if not isinstance(mode, str):
+        return "auto"
+    clean = mode.strip().lower()
+    return clean if clean in VALID_THINKING_MODES else "auto"
+
+
+def _accepts_thinking_mode(fn: Callable[..., Any]) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "thinking_mode" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
 
 @dataclass
 class RoleRoute:
@@ -27,6 +50,7 @@ class RoleRoute:
     model: str
     provider: str
     fallback: list[str] = field(default_factory=list)
+    thinking_mode: str = "auto"
 
 
 DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
@@ -34,25 +58,25 @@ DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
         role_name="agent",
         model="deepseek/deepseek-v4.1-flash-1017",
         provider="openrouter",
-        fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-3-flash-preview"],
+        fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-4-carbon"],
     ),
     "triage": RoleRoute(
         role_name="triage",
-        model="gemini-3.5-flash-lite",
+        model="gemini-4-carbon",
         provider="gemini",
-        fallback=["gemini-3-flash-preview"],
+        fallback=["gemini-4-argon"],
     ),
     "vision": RoleRoute(
         role_name="vision",
-        model="gemini-3.5-flash-lite",
+        model="gemini-4-carbon",
         provider="gemini",
-        fallback=["gemini-3-flash-preview"],
+        fallback=["gemini-4-argon"],
     ),
     "memory": RoleRoute(
         role_name="memory",
         model="deepseek/deepseek-v4.1-flash-1017",
         provider="openrouter",
-        fallback=["gemini-3-flash-preview"],
+        fallback=["gemini-4-carbon"],
     ),
     "deep": RoleRoute(
         role_name="deep",
@@ -123,7 +147,13 @@ class LLMRouter:
         self.providers = providers
         self.thinking_mode: str = "auto"
         self.roles: dict[str, RoleRoute] = {
-            k: RoleRoute(v.role_name, v.model, v.provider, list(v.fallback))
+            k: RoleRoute(
+                v.role_name,
+                v.model,
+                v.provider,
+                list(v.fallback),
+                normalize_thinking_mode(v.thinking_mode),
+            )
             for k, v in (roles or DEFAULT_ROLE_ROUTES).items()
         }
         self.daily_budget_usd = daily_budget_usd
@@ -137,11 +167,10 @@ class LLMRouter:
 
     def set_thinking_mode(self, mode: str) -> str:
         """Définit le mode de raisonnement (auto, off, low, medium, high) sur les providers."""
-        allowed = {"auto", "off", "low", "medium", "high"}
-        clean = mode.strip().lower()
-        if clean not in allowed:
-            clean = "auto"
+        clean = normalize_thinking_mode(mode)
         self.thinking_mode = clean
+        if "agent" in self.roles:
+            self.roles["agent"].thinking_mode = clean
         for provider in self.providers.values():
             setattr(provider, "thinking_mode", clean)
         return clean
@@ -171,9 +200,13 @@ class LLMRouter:
         return {"warnings": warnings, "errors": errors}
 
     def set_role_model(
-        self, role_name: str, model_or_alias: str, provider: str | None = None
+        self,
+        role_name: str,
+        model_or_alias: str,
+        provider: str | None = None,
+        thinking_mode: str | None = None,
     ) -> RoleRoute:
-        """Change a chaud le modele d'un role sans alterer l'historique de conversation."""
+        """Change a chaud le modele (et optionnellement le raisonnement) d'un role."""
         raw = model_or_alias.strip()
         key = raw.lower()
         if key.startswith("ollama/"):
@@ -190,14 +223,12 @@ class LLMRouter:
         elif ":" in raw or raw in DEFAULT_KNOWN_OLLAMA_MODELS:
             provider = "ollama"
             model_or_alias = raw
+        elif "/" in raw and not raw.startswith("models/"):
+            provider = "openrouter"
         elif provider is None:
-            if "/" in raw and not raw.startswith("models/"):
-                provider = "openrouter"
-            else:
-                provider = "gemini"
+            provider = "gemini"
 
-        if provider not in self.providers:
-            # Repli sur tout fournisseur disponible (ex: openrouter pour google/gemini-3.5-flash-lite)
+        if provider not in self.providers and provider != "openrouter":
             if "openrouter" in self.providers:
                 provider = "openrouter"
             else:
@@ -205,11 +236,17 @@ class LLMRouter:
 
         current = self.roles.get(role_name)
         fallback = list(current.fallback) if current else []
+        effective_thinking = (
+            normalize_thinking_mode(thinking_mode)
+            if thinking_mode is not None
+            else (current.thinking_mode if current else "auto")
+        )
         route = RoleRoute(
             role_name=role_name,
             model=model_or_alias,
             provider=provider,
             fallback=fallback,
+            thinking_mode=effective_thinking,
         )
         self.roles[role_name] = route
         return route
@@ -294,28 +331,45 @@ class LLMRouter:
             return True
         return bool(getattr(prov, "vertexai", False) and getattr(prov, "project", None))
 
+    @staticmethod
+    def _infer_provider_for_model(model_id: str) -> str:
+        if ":" in model_id or model_id in DEFAULT_KNOWN_OLLAMA_MODELS:
+            return "ollama"
+        if "/" in model_id and not model_id.startswith("models/"):
+            return "openrouter"
+        return "gemini"
+
     def _candidate_chain(self, route: RoleRoute) -> list[tuple[LLMProvider, str]]:
         chain: list[tuple[LLMProvider, str]] = []
         primary_prov = self.providers.get(route.provider)
-        if self._is_provider_configured(primary_prov):
+        primary_expected = self._infer_provider_for_model(route.model)
+        real_providers = {"gemini", "openrouter", "ollama"}
+        is_primary_compatible = (
+            route.provider not in real_providers
+            or route.provider == primary_expected
+            or (route.provider == "openrouter" and primary_expected == "gemini")
+        )
+        if self._is_provider_configured(primary_prov) and is_primary_compatible:
             chain.append((primary_prov, route.model))  # type: ignore[arg-type]
         for fb_model in route.fallback:
-            fb_prov_name = (
-                "ollama"
-                if (":" in fb_model or fb_model in DEFAULT_KNOWN_OLLAMA_MODELS)
-                else "openrouter"
-                if ("/" in fb_model and not fb_model.startswith("models/"))
-                else "gemini"
-            )
+            fb_prov_name = self._infer_provider_for_model(fb_model)
             fb_prov = self.providers.get(fb_prov_name)
             if not self._is_provider_configured(fb_prov):
-                fb_prov = primary_prov if self._is_provider_configured(primary_prov) else None
+                if (
+                    primary_prov is not None
+                    and route.provider == "openrouter"
+                    and fb_prov_name == "gemini"
+                    and self._is_provider_configured(primary_prov)
+                ):
+                    fb_prov = primary_prov
+                else:
+                    fb_prov = None
             if fb_prov and (fb_prov, fb_model) not in chain:
                 chain.append((fb_prov, fb_model))
         gem_prov = self.providers.get("gemini")
         if self._is_provider_configured(gem_prov) and gem_prov is not None:
-            if (gem_prov, "gemini-3-flash-preview") not in chain:
-                chain.append((gem_prov, "gemini-3-flash-preview"))
+            if (gem_prov, "gemini-4-carbon") not in chain:
+                chain.append((gem_prov, "gemini-4-carbon"))
         return chain
 
     def _resolve_route(
@@ -363,7 +417,11 @@ class LLMRouter:
             model=resolved_model,
             provider=provider or base.provider,
             fallback=fb,
+            thinking_mode=base.thinking_mode,
         )
+
+    def _effective_thinking_mode(self, route: RoleRoute) -> str:
+        return route.thinking_mode if route.thinking_mode != "auto" else self.thinking_mode
 
     async def complete(
         self,
@@ -394,28 +452,26 @@ class LLMRouter:
         if not candidates:
             raise ProviderError(f"Aucun fournisseur configure pour le role '{role}'.")
 
+        effective_thinking = self._effective_thinking_mode(route)
         last_err: Exception | None = None
         for provider, model_id in candidates:
             try:
+                call_kwargs: dict[str, Any] = {
+                    "model": model_id,
+                    "messages": effective_messages,
+                    "tools": tools,
+                    "fallback_models": (
+                        route.fallback if provider.name == "openrouter" else None
+                    ),
+                    "temperature": temperature,
+                }
+                if _accepts_thinking_mode(provider.complete):
+                    call_kwargs["thinking_mode"] = effective_thinking
                 if timeout_s is not None:
                     async with asyncio.timeout(timeout_s):
-                        delta = await provider.complete(
-                            model=model_id,
-                            messages=effective_messages,
-                            tools=tools,
-                            fallback_models=route.fallback
-                            if provider.name == "openrouter"
-                            else None,
-                            temperature=temperature,
-                        )
+                        delta = await provider.complete(**call_kwargs)
                 else:
-                    delta = await provider.complete(
-                        model=model_id,
-                        messages=effective_messages,
-                        tools=tools,
-                        fallback_models=route.fallback if provider.name == "openrouter" else None,
-                        temperature=temperature,
-                    )
+                    delta = await provider.complete(**call_kwargs)
                 self._record_usage(role, delta.usage)
                 return delta
             except Exception as e:
@@ -453,31 +509,29 @@ class LLMRouter:
         if not candidates:
             raise ProviderError(f"Aucun fournisseur configure pour le role '{role}'.")
 
+        effective_thinking = self._effective_thinking_mode(route)
         last_err: Exception | None = None
         for provider, model_id in candidates:
             try:
+                call_kwargs: dict[str, Any] = {
+                    "model": model_id,
+                    "messages": effective_messages,
+                    "tools": tools,
+                    "fallback_models": (
+                        route.fallback if provider.name == "openrouter" else None
+                    ),
+                    "temperature": temperature,
+                }
+                if _accepts_thinking_mode(provider.stream):
+                    call_kwargs["thinking_mode"] = effective_thinking
                 if timeout_s is not None:
                     async with asyncio.timeout(timeout_s):
-                        async for delta in provider.stream(
-                            model=model_id,
-                            messages=effective_messages,
-                            tools=tools,
-                            fallback_models=route.fallback
-                            if provider.name == "openrouter"
-                            else None,
-                            temperature=temperature,
-                        ):
+                        async for delta in provider.stream(**call_kwargs):
                             if delta.usage:
                                 self._record_usage(role, delta.usage)
                             yield delta
                 else:
-                    async for delta in provider.stream(
-                        model=model_id,
-                        messages=effective_messages,
-                        tools=tools,
-                        fallback_models=route.fallback if provider.name == "openrouter" else None,
-                        temperature=temperature,
-                    ):
+                    async for delta in provider.stream(**call_kwargs):
                         if delta.usage:
                             self._record_usage(role, delta.usage)
                         yield delta

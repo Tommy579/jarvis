@@ -1949,7 +1949,7 @@ class BrowserToolkit:
                     target_mime = "audio/mp3"
                     used_mode = "audio_extracted"
 
-            media_model = os.environ.get("JARVIS_MEDIA_MODEL", "gemini-3-flash-preview").strip()
+            media_model = os.environ.get("JARVIS_MEDIA_MODEL", "gemini-4-carbon").strip()
             try:
                 gemini = GeminiProvider()
                 analysis, media_usage = await gemini.analyze_media(

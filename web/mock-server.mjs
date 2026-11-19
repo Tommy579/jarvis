@@ -78,6 +78,7 @@ const db = {
       model: "deepseek/deepseek-v4.1-flash-1017",
       provider: "openrouter",
       fallback: ["z-ai/glm-5.3", "minimax/minimax-m3", "google/gemini-3.5-flash-lite"],
+      thinking_mode: "auto",
       supports_vision: false,
       supports_tools: true,
     },
@@ -86,6 +87,7 @@ const db = {
       model: "gemini-3.5-flash-lite",
       provider: "gemini",
       fallback: ["google/gemini-3.5-flash-lite"],
+      thinking_mode: "auto",
       supports_vision: true,
       supports_tools: true,
     },
@@ -94,6 +96,7 @@ const db = {
       model: "gemini-3.5-flash-lite",
       provider: "gemini",
       fallback: [],
+      thinking_mode: "auto",
       supports_vision: true,
       supports_tools: false,
     },
@@ -421,7 +424,15 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/models" && req.method === "GET") return sendJson(res, 200, db.models);
   if (p === "/api/models/role" && req.method === "PUT") {
     const body = await readBody(req);
-    db.models = db.models.map((m) => (m.role === body.role ? { ...m, model: body.model } : m));
+    db.models = db.models.map((m) =>
+      m.role === body.role
+        ? {
+            ...m,
+            model: body.model,
+            ...(body.thinking_mode ? { thinking_mode: body.thinking_mode } : {}),
+          }
+        : m
+    );
     return sendJson(res, 200, db.models.find((m) => m.role === body.role) || body);
   }
   if (p === "/api/usage/daily" && req.method === "GET") return sendJson(res, 200, db.usage);

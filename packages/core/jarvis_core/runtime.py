@@ -32,7 +32,12 @@ from jarvis_core.llm.catalog import ModelSelectionCatalog
 from jarvis_core.llm.gemini import GeminiProvider
 from jarvis_core.llm.ollama import OllamaProvider
 from jarvis_core.llm.openrouter import OpenRouterProvider
-from jarvis_core.llm.router import DEFAULT_ROLE_ROUTES, LLMRouter, RoleRoute
+from jarvis_core.llm.router import (
+    DEFAULT_ROLE_ROUTES,
+    LLMRouter,
+    RoleRoute,
+    normalize_thinking_mode,
+)
 from jarvis_core.mcp.client import MCPClientManager
 from jarvis_core.memory.engine import MemoryEngine
 from jarvis_core.memory.schema import MemoryDatabase
@@ -69,7 +74,9 @@ class _OfflineProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> StreamDelta:
+        _ = (tools, fallback_models, temperature, thinking_mode)
         text = "Mode hors-ligne actif : configurez OPENROUTER_API_KEY ou GEMINI_API_KEY dans .env."
         tokens_in = sum(len(m.content.split()) for m in messages if m.content)
         return StreamDelta(
@@ -86,8 +93,11 @@ class _OfflineProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         fallback_models: list[str] | None = None,
         temperature: float = 0.2,
+        thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
-        delta = await self.complete(model, messages, tools, fallback_models, temperature)
+        delta = await self.complete(
+            model, messages, tools, fallback_models, temperature, thinking_mode=thinking_mode
+        )
         yield delta
 
 
@@ -249,6 +259,9 @@ def _load_roles(config_dir: Path) -> dict[str, RoleRoute]:
             model=str(cfg.get("model", "")),
             provider=str(cfg.get("provider", default_provider)),
             fallback=[str(f) for f in cfg.get("fallback", [])],
+            thinking_mode=normalize_thinking_mode(
+                cfg.get("thinking_mode") or cfg.get("reasoning")
+            ),
         )
     return roles or DEFAULT_ROLE_ROUTES
 

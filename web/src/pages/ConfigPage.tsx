@@ -5,8 +5,9 @@ import { Icon } from "../components/Icon";
 import { VoiceProfilesCard } from "../components/VoiceProfilesCard";
 import { PageHeader, Segmented } from "../components/ui";
 import { setSchemePreference, useColorScheme, type SchemePreference } from "../lib/colorScheme";
-import { useJarvisStore, type JarvisTheme } from "../store/useJarvisStore";
+import { useJarvisStore, type JarvisTheme, type ThinkingMode } from "../store/useJarvisStore";
 import { errorMessage, toast } from "../store/useToastStore";
+import type { RoleModelConfig } from "../types/generated";
 
 const ROLE_LABELS: Record<string, string> = {
   agent: "Agent principal",
@@ -17,6 +18,14 @@ const ROLE_LABELS: Record<string, string> = {
   deep: "Raisonnement profond",
   voice_realtime: "Voix temps réel",
 };
+
+const THINKING_OPTIONS: { value: ThinkingMode; label: string }[] = [
+  { value: "auto", label: "Raisonnement : Auto" },
+  { value: "off", label: "Raisonnement : Off" },
+  { value: "low", label: "Raisonnement : Léger" },
+  { value: "medium", label: "Raisonnement : Moyen" },
+  { value: "high", label: "Raisonnement : Profond" },
+];
 
 type ConfigTab = "appearance" | "models" | "autonomy" | "integrations" | "alerts";
 
@@ -52,6 +61,7 @@ export function ConfigPage() {
   const theme = useJarvisStore((s) => s.theme);
   const setTheme = useJarvisStore((s) => s.setTheme);
   const setActiveModel = useJarvisStore((s) => s.setActiveModel);
+  const setThinkingMode = useJarvisStore((s) => s.setThinkingMode);
   const setSensors = useJarvisStore((s) => s.setSensors);
   const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
   const setWakeWordEnabled = useJarvisStore((s) => s.setWakeWordEnabled);
@@ -489,24 +499,62 @@ export function ConfigPage() {
                       <div className="model-row__role">{ROLE_LABELS[cfg.role] ?? cfg.role}</div>
                       <span className="badge mono">{cfg.provider}</span>
                     </div>
-                    <input
-                      type="text"
-                      list="jarvis-model-suggestions"
-                      className="input mono"
-                      aria-label={`Modèle pour le rôle ${cfg.role}`}
-                      defaultValue={cfg.model}
-                      onBlur={(e) => {
-                        const val = e.target.value.trim();
-                        if (val && val !== cfg.model) {
+                    <div className="model-row__controls">
+                      <input
+                        type="text"
+                        list="jarvis-model-suggestions"
+                        className="input mono"
+                        aria-label={`Modèle pour le rôle ${cfg.role}`}
+                        defaultValue={cfg.model}
+                        onBlur={(e) => {
+                          const val = e.target.value.trim();
+                          if (val && val !== cfg.model) {
+                            void runMutation(async () => {
+                              const updated = await apiClient.updateRoleModel(
+                                cfg.role,
+                                val,
+                                cfg.fallback,
+                                cfg.thinking_mode
+                              );
+                              qc.setQueryData<RoleModelConfig[]>(["models"], (prev) =>
+                                prev?.map((item) => (item.role === updated.role ? updated : item))
+                              );
+                              if (cfg.role === "agent") setActiveModel(val);
+                              await qc.invalidateQueries({ queryKey: ["models"] });
+                              return `Modèle ${cfg.role} mis à jour.`;
+                            });
+                          }
+                        }}
+                      />
+                      <select
+                        className="select select--sm"
+                        aria-label={`Raisonnement pour le rôle ${cfg.role}`}
+                        value={cfg.thinking_mode ?? "auto"}
+                        onChange={(e) => {
+                          const nextThinking = e.target.value as ThinkingMode;
                           void runMutation(async () => {
-                            await apiClient.updateRoleModel(cfg.role, val, cfg.fallback);
-                            if (cfg.role === "agent") setActiveModel(val);
-                            qc.invalidateQueries({ queryKey: ["models"] });
-                            return `Modèle ${cfg.role} mis à jour.`;
+                            const updated = await apiClient.updateRoleModel(
+                              cfg.role,
+                              cfg.model,
+                              cfg.fallback,
+                              nextThinking
+                            );
+                            qc.setQueryData<RoleModelConfig[]>(["models"], (prev) =>
+                              prev?.map((item) => (item.role === updated.role ? updated : item))
+                            );
+                            if (cfg.role === "agent") setThinkingMode(updated.thinking_mode);
+                            await qc.invalidateQueries({ queryKey: ["models"] });
+                            return `Raisonnement ${cfg.role} mis à jour.`;
                           });
-                        }
-                      }}
-                    />
+                        }}
+                      >
+                        {THINKING_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <div className="model-row__fallback mono">
                       Repli : {cfg.fallback.length > 0 ? cfg.fallback.join(" → ") : "aucun"}
                     </div>

@@ -56,6 +56,7 @@ class AlertAckEvent(BaseModel):
 class SettingsModelPayload(BaseModel):
     role: str
     model: str
+    thinking_mode: Literal["auto", "off", "low", "medium", "high"] | None = None
 
 
 class SettingsModelEvent(BaseModel):
