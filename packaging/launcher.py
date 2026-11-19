@@ -157,7 +157,6 @@ def main() -> int:
     print(f"racine={root} ressources={resources} port={port}")
 
     import uvicorn
-
     from jarvis_core.api.server import create_app
 
     app = create_app()
