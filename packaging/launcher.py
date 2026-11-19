@@ -123,14 +123,27 @@ def open_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def setup_logging(root: Path) -> Path:
+    """Redirige stdout/stderr vers jarvis.log : un binaire fenetre n'a pas de console."""
+    log_path = root / "jarvis.log"
+    try:
+        handle = open(log_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+    except OSError:
+        return log_path
+    sys.stdout = handle
+    sys.stderr = handle
+    return log_path
+
+
 def main() -> int:
     root = app_root()
     resources = resource_root()
     root.mkdir(parents=True, exist_ok=True)
+    log_path = setup_logging(root)
+    print(f"\n=== Demarrage JARVIS 2.0 ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===")
 
     env_path = ensure_env_file(root)
     token = read_token(env_path)
-
     port = int(os.environ.get("JARVIS_PORT") or free_port())
     base_url = f"http://127.0.0.1:{port}"
 
@@ -141,7 +154,10 @@ def main() -> int:
     os.environ.setdefault("JARVIS_PORT", str(port))
     os.environ["JARVIS_CONFIG_DIR"] = str(resources / "config")
 
+    print(f"racine={root} ressources={resources} port={port}")
+
     import uvicorn
+
     from jarvis_core.api.server import create_app
 
     app = create_app()
@@ -153,7 +169,9 @@ def main() -> int:
 
     if not wait_health(base_url):
         print(
-            "jarvis-core n'a pas demarre. Verifiez .env et le journal ci-dessus.", file=sys.stderr
+            f"Echec : jarvis-core ne repond pas sur {base_url}/api/health. "
+            f"Journal complet : {log_path}",
+            file=sys.stderr,
         )
         return 1
 
@@ -172,4 +190,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:  # noqa: BLE001 - dernier filet : on ecrit la trace sur disque
+        import traceback
+
+        traceback.print_exc()
+        try:
+            (app_root() / "jarvis-startup.log").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass
+        sys.exit(1)

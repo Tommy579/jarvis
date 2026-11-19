@@ -21,35 +21,35 @@ export function JarvisLogo({ size = 28, className }: JarvisLogoProps) {
       focusable="false"
     >
       <defs>
-        <linearGradient id={bgId} x1="6" y1="4" x2="58" y2="60" gradientUnits="userSpaceOnUse">
+        <linearGradient id={bgId} x1="2" y1="2" x2="62" y2="62" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#132238" />
           <stop offset="100%" stopColor="#09101A" />
         </linearGradient>
-        <linearGradient id={arcId} x1="14" y1="14" x2="50" y2="50" gradientUnits="userSpaceOnUse">
+        <linearGradient id={arcId} x1="13" y1="13" x2="51" y2="51" gradientUnits="userSpaceOnUse">
           <stop offset="0%" stopColor="#7DD3FC" />
           <stop offset="100%" stopColor="#2563EB" />
         </linearGradient>
       </defs>
-      <rect x="4" y="4" width="56" height="56" rx="15" fill={`url(#${bgId})`} />
+      <rect x="2" y="2" width="60" height="60" rx="15.5" fill={`url(#${bgId})`} />
       <rect
-        x="4.75"
-        y="4.75"
-        width="54.5"
-        height="54.5"
-        rx="14.25"
+        x="2.75"
+        y="2.75"
+        width="58.5"
+        height="58.5"
+        rx="14.75"
         fill="none"
         stroke="#7DD3FC"
         strokeOpacity="0.18"
         strokeWidth="1.2"
       />
       <path
-        d="M 46.5 21.5 A 17.5 17.5 0 1 0 46.5 42.5"
+        d="M 47.5 20.75 A 18.75 18.75 0 1 0 47.5 43.25"
         fill="none"
         stroke={`url(#${arcId})`}
-        strokeWidth="4.2"
+        strokeWidth="4.5"
         strokeLinecap="round"
       />
-      <circle cx="32" cy="32" r="5.5" fill="#E0F2FE" />
+      <circle cx="32" cy="32" r="5.9" fill="#E0F2FE" />
     </svg>
   );
 }
