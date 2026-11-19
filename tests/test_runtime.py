@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from jarvis_core.runtime import build_runtime
 from jarvis_shared.models import SystemEvent
 
@@ -166,6 +167,7 @@ def test_wake_check_endpoint(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_silero_vad_rejects_static_noise() -> None:
+    pytest.importorskip("faster_whisper.vad", reason="VAD Silero fourni par l'extra [voice]")
     import io
     import wave
 

@@ -50,8 +50,9 @@ def test_le_jeton_fonctionne_en_bearer_et_en_parametre(secured_app) -> None:
         )
         # ?token= est le mecanisme utilise par le lanceur pour amorcer le stockage navigateur.
         assert client.get(f"/api/models?token={token}").status_code == 200
-        # L'interface elle-meme reste accessible (c'est elle qui demande le jeton).
-        assert client.get("/").status_code == 200
+        # L'interface elle-meme ne doit jamais etre bloquee par le jeton : c'est elle qui le
+        # demande. 404 seulement si web/dist n'a pas ete compile sur la machine de test.
+        assert client.get("/").status_code != 401
 
 
 def test_le_lanceur_transmet_le_jeton_et_ne_desactive_pas_l_auth() -> None:

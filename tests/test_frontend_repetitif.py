@@ -653,6 +653,7 @@ def test_integration_tools_registered_in_runtime(tmp_path: Path, monkeypatch) ->
     rt = build_runtime(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
+        allow_offline=True,
     )
     tool_names = {schema["function"]["name"] for schema in rt.tool_registry.list_schemas()}
     for expected in (
@@ -693,6 +694,7 @@ def test_standard_toolkit_defaults_to_root_and_run_command(tmp_path: Path) -> No
     rt = build_runtime(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
+        allow_offline=True,
     )
     list_res = asyncio.run(
         rt.tool_registry.execute(ToolCall(id="tc-ls", name="list_directory", arguments={}))
@@ -720,6 +722,7 @@ def test_run_command_auto_and_write_file_permissions(tmp_path: Path) -> None:
     rt = build_runtime(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parents[1] / "config",
+        allow_offline=True,
     )
 
     # Normal command runs without pre_approved

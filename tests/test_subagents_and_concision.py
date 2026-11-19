@@ -174,6 +174,7 @@ async def test_main_agent_excludes_direct_coding_tools(tmp_path: Path, monkeypat
     rt = build_runtime(
         data_dir=tmp_path / "data",
         config_dir=Path(__file__).resolve().parent.parent / "config",
+        allow_offline=True,
     )
     schemas = rt.tool_registry.list_schemas(excluded_tools=rt.agent.excluded_tools)
     names = {s["function"]["name"] for s in schemas}
