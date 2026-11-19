@@ -1,0 +1,14 @@
+# Fins de ligne : PowerShell 5.1 n'accepte pas les here-strings (@" ... "@) ecrits avec
+# des fins de ligne LF, et les scripts bash cassent en CRLF. On fixe les deux.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+
+# Binaires
+*.png binary
+*.ico binary
+*.db binary

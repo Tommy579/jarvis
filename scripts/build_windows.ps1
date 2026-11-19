@@ -1,9 +1,9 @@
-# ═══════════════════════════════════════════════════════
-#   JARVIS 2.0 — Construction du binaire Windows (PowerShell)
+# =======================================================
+#   JARVIS 2.0  Construction du binaire Windows (PowerShell)
 #   A executer SUR WINDOWS : PyInstaller ne produit pas d'exe depuis Linux.
 #   Usage: powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 #   Options: -SkipInstall (deps deja installees), -SkipFrontend, -NoZip
-# ═══════════════════════════════════════════════════════
+# =======================================================
 
 param(
     [switch]$SkipInstall,
@@ -21,7 +21,7 @@ $DistDir = Join-Path $RootDir "dist\JARVIS"
 $ZipPath = Join-Path $RootDir "dist\JARVIS-windows-x64.zip"
 $PythonBin = Join-Path $RootDir ".venv\Scripts\python.exe"
 
-Write-Host "`n=== JARVIS 2.0 — build Windows ===" -ForegroundColor Cyan
+Write-Host "`n=== JARVIS 2.0  build Windows ===" -ForegroundColor Cyan
 
 # 1/5 Environnement
 if (-not (Test-Path $PythonBin)) {

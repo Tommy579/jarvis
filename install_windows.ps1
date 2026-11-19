@@ -1,7 +1,7 @@
-﻿# ═══════════════════════════════════════════════════════
-#   JARVIS 2.0.0 — Automated Windows Installer (PowerShell)
+# =======================================================
+#   JARVIS 2.0.0  Automated Windows Installer (PowerShell)
 #   Usage: powershell -ExecutionPolicy Bypass -File install_windows.ps1
-# ═══════════════════════════════════════════════════════
+# =======================================================
 
 param(
     [string]$GeminiApiKey = $env:GEMINI_API_KEY
