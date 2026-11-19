@@ -20,12 +20,21 @@ Set-Location $RootDir
 $DistDir = Join-Path $RootDir "dist\JARVIS"
 $ZipPath = Join-Path $RootDir "dist\JARVIS-windows-x64.zip"
 $PythonBin = Join-Path $RootDir ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonBin)) {
+    # Pas de venv local (CI, ou Python systeme deja provisionne) : on utilise le python du PATH.
+    $systemPython = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $systemPython) {
+        throw "Python introuvable. Lancez d'abord: powershell -ExecutionPolicy Bypass -File install_windows.ps1"
+    }
+    $PythonBin = $systemPython.Source
+    Write-Host "  INFO: pas de .venv, utilisation de $PythonBin" -ForegroundColor Yellow
+}
 
 Write-Host "`n=== JARVIS 2.0  build Windows ===" -ForegroundColor Cyan
 
 # 1/5 Environnement
-if (-not (Test-Path $PythonBin)) {
-    throw "Environnement introuvable. Lancez d'abord: powershell -ExecutionPolicy Bypass -File install_windows.ps1"
+if (-not (Test-Path $PythonBin) -and -not $SkipInstall) {
+    throw "Python introuvable. Lancez d'abord: powershell -ExecutionPolicy Bypass -File install_windows.ps1"
 }
 
 if (-not $SkipInstall) {
