@@ -88,6 +88,13 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     type: "immediate",
     aliases: ["/theme"],
   },
+  {
+    cmd: "/help",
+    arg: "",
+    desc: "Afficher toutes les commandes disponibles",
+    type: "immediate",
+    aliases: ["/aide"],
+  },
 ];
 
 export function filterSlashCommands(inputValue: string): SlashCommandDef[] {

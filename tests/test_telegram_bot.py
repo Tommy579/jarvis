@@ -1,7 +1,15 @@
 """Tests pour TelegramGateway et les interactions bidirectionnelles Telegram."""
 
+from pathlib import Path
+
 import pytest
-from jarvis_core.channels.telegram import TelegramGateway
+from jarvis_core.api.server import (
+    JarvisCoreState,
+    execute_telegram_command,
+    execute_telegram_text,
+    resolve_workspace_directory,
+)
+from jarvis_core.channels.telegram import TELEGRAM_SUPPORTED_COMMANDS, TelegramGateway
 
 
 @pytest.mark.asyncio
@@ -94,3 +102,121 @@ def test_telegram_dispatcher_build() -> None:
     assert bot is not None
     assert dp is not None
     assert dp.message is not None
+
+
+@pytest.mark.asyncio
+async def test_telegram_gui_commands_whitelist_and_help() -> None:
+    received: list[tuple[str, str]] = []
+
+    async def mock_cmd(cmd: str, arg: str) -> str:
+        received.append((cmd, arg))
+        return f"OK {cmd}:{arg}"
+
+    gw = TelegramGateway(bot_token="fake_tok", allowed_chat_id=123456, on_command=mock_cmd)
+    gui_commands = [
+        "/workspace",
+        "/clear",
+        "/new",
+        "/usage",
+        "/tokens",
+        "/local",
+        "/council",
+        "/moa",
+        "/auto",
+        "/model",
+        "/models",
+        "/status",
+        "/goal",
+        "/goals",
+        "/skills",
+        "/skill",
+        "/settings",
+        "/config",
+        "/tint",
+        "/theme",
+        "/help",
+    ]
+    for raw in gui_commands:
+        res = await gw.handle_text(123456, f"{raw} test")
+        assert res.authorized is True
+        assert res.reply_text == f"OK {raw.lstrip('/')}:test"
+
+    assert len(received) == len(gui_commands)
+
+    # /help sans callback doit afficher toutes les commandes
+    gw_default = TelegramGateway(bot_token="fake_tok", allowed_chat_id=123456)
+    help_res = await gw_default.handle_text(123456, "/help")
+    assert help_res.authorized is True
+    for cmd in ("/workspace", "/clear", "/usage", "/local", "/council", "/auto", "/goal", "/skills", "/settings", "/tint", "/status", "/model", "/help"):
+        assert cmd in help_res.reply_text
+    assert "goal" in TELEGRAM_SUPPORTED_COMMANDS
+
+
+@pytest.mark.asyncio
+async def test_telegram_execute_gui_commands(tmp_path: Path, monkeypatch) -> None:
+    state = JarvisCoreState(data_dir=tmp_path)
+    state.ensure_runtime()
+
+    captured_prompts: list[str] = []
+
+    async def fake_run_chat_turn(text: str, **kwargs):
+        captured_prompts.append(text)
+        return type("Msg", (), {"content": f"ECHO: {text}"})()
+
+    monkeypatch.setattr(state, "run_chat_turn", fake_run_chat_turn)
+
+    # /help liste toutes les commandes
+    help_out = await execute_telegram_command(state, "help", "")
+    for expected in ("/workspace", "/clear", "/usage", "/local", "/council", "/auto", "/goal", "/skills", "/settings", "/tint", "/help"):
+        assert expected in help_out
+
+    # /workspace + message + reset (resolution vers ~/Documents/marges)
+    fake_home = tmp_path / "home"
+    marges_dir = fake_home / "Documents" / "marges"
+    marges_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    ws_empty = await execute_telegram_command(state, "workspace", "")
+    assert "Aucun workspace" in ws_empty
+    ws_missing = await execute_telegram_command(state, "workspace", "dossier_inexistant")
+    assert "Dossier introuvable" in ws_missing
+    ws_set = await execute_telegram_command(state, "workspace", "marges")
+    assert ws_set == "Workspace actif défini sur : ~/Documents/marges"
+    resolved_p, display_p = resolve_workspace_directory("marges")
+    assert resolved_p == marges_dir.resolve()
+    assert display_p == "~/Documents/marges"
+    text_reply = await execute_telegram_text(state, "analyse ce dossier")
+    assert "[Workspace actif : ~/Documents/marges]" in text_reply
+    assert captured_prompts[-1] == "[Workspace actif : ~/Documents/marges]\nanalyse ce dossier"
+    ws_reset = await execute_telegram_command(state, "workspace", "reset")
+    assert "réinitialisé" in ws_reset
+
+    # /local, /council, /auto (sans arg)
+    initial_model = state.get_agent_model().model
+    local_out = await execute_telegram_command(state, "local", "")
+    assert "qwen3.5:2b" in local_out
+    assert state.get_agent_model().model == "qwen3.5:2b"
+
+    council_out = await execute_telegram_command(state, "council", "question test")
+    assert state.get_agent_model().model == "gemini-3.1-pro-preview"
+    assert "ECHO: question test" == council_out
+
+    auto_out = await execute_telegram_command(state, "auto", "")
+    assert initial_model in auto_out
+    assert state.get_agent_model().model == initial_model
+
+    # /clear / /new
+    state.db.add_message("user", "hello")
+    clear_out = await execute_telegram_command(state, "clear", "")
+    assert "1 message" in clear_out
+    assert state.db.list_messages() == []
+
+    # /usage, /status, /model, /skills, /settings, /tint
+    assert "Usage IA du jour" in await execute_telegram_command(state, "usage", "")
+    assert "Jarvis opérationnel" in await execute_telegram_command(state, "status", "")
+    assert "Configuration des modèles" in await execute_telegram_command(state, "models", "")
+    assert "Skills & Outils" in await execute_telegram_command(state, "skills", "")
+    assert "Paramètres actuels" in await execute_telegram_command(state, "settings", "")
+    tint_out = await execute_telegram_command(state, "tint", "")
+    assert "Accent" in tint_out
+    assert "Usage : /goal" in await execute_telegram_command(state, "goal", "")

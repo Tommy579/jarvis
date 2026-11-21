@@ -222,9 +222,8 @@ class AgentLoop:
             ToolSpec(
                 name="delegate_subagent",
                 description=(
-                    "Délègue une sous-tâche complexe ou spécialisée à un sous-agent autonome. "
-                    "Le moteur principal (modèle choisi par l'utilisateur) peut orchestrer et subdiviser "
-                    "les tâches complexes en plusieurs sous-agents et agréger leurs résultats."
+                    "Délègue une action ponctuelle (commande shell, lancement d'app/GUI/serveur, vérification de port ou modification ciblée) "
+                    "ou une sous-tâche spécialisée à un sous-agent autonome rapide, sans lancer de plan lourd."
                 ),
                 handler=_handle_delegate_subagent,
                 args_model=DelegateSubagentArgs,

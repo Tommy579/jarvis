@@ -484,6 +484,7 @@ export function ConfigPage() {
               <option value="gemini-4-hydrogen">Vertex AI · Gemini 4 Hydrogen</option>
               <option value="gemini-4-argon">Vertex AI · Gemini 4 Argon</option>
               <option value="gemini-4-carbon">Vertex AI · Gemini 4 Carbon</option>
+              <option value="gemini-3.5-flash-lite">Vertex AI · Gemini 3.5 Flash Lite</option>
               <option value="gemini-3-flash-preview">Vertex AI · Gemini 3 Flash Preview</option>
               <option value="gemini-3.1-pro-preview">Vertex AI · Gemini 3.1 Pro Preview</option>
               <option value="deepseek/deepseek-v4.1-flash-1017">OpenRouter · DeepSeek v4.1 Flash</option>

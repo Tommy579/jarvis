@@ -36,6 +36,73 @@ def build_alert_keyboard(alert_id: str) -> list[list[dict[str, str]]]:
     ]
 
 
+TELEGRAM_SUPPORTED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "start",
+        "help",
+        "model",
+        "models",
+        "status",
+        "pause",
+        "brief",
+        "remember",
+        "forget",
+        "quiet",
+        "auto",
+        "local",
+        "council",
+        "moa",
+        "tasks",
+        "stop",
+        "goal",
+        "goals",
+        "workspace",
+        "clear",
+        "new",
+        "usage",
+        "tokens",
+        "skills",
+        "skill",
+        "settings",
+        "config",
+        "tint",
+        "theme",
+    }
+)
+
+TELEGRAM_HELP_TEXT = (
+    "👋 Bonjour ! Je suis Jarvis, votre assistant personnel.\n\n"
+    "Vous pouvez m'écrire directement, m'envoyer des notes vocales ou des photos, "
+    "ou utiliser les commandes suivantes :\n\n"
+    "💬 Conversation & Mémoire\n"
+    "- /clear (ou /new) : démarrer une nouvelle conversation\n"
+    "- /brief : résumé des notifications et événements récents\n"
+    "- /remember <fait> : mémoriser un fait\n"
+    "- /forget <fait> : oublier un fait\n"
+    "- /vocal <message> : demander une réponse vocale\n\n"
+    "🧠 Modèles & Workspace\n"
+    "- /model (ou /models) [modèle] : afficher les modèles ou changer le modèle actif\n"
+    "- /local [message] : activer le modèle local (qwen3.5:2b)\n"
+    "- /council (ou /moa) [message] : activer le mode conseil avancé\n"
+    "- /auto [objectif] : rétablir le routage auto (sans argument) ou lancer une tâche autonome\n"
+    "- /workspace [dossier | reset] : définir ou afficher le dossier de travail actif\n\n"
+    "🎯 Objectifs & Tâches\n"
+    "- /goal <objectif> : lancer un objectif autonome supervisé\n"
+    "- /goals : lister les objectifs récents\n"
+    "- /tasks : lister les tâches autonomes récentes\n"
+    "- /stop : arrêt d'urgence des tâches et objectifs\n\n"
+    "⚙️ Système & Suivi\n"
+    "- /status : état des services, modèle, capteurs, workspace et MCP\n"
+    "- /usage (ou /tokens) : jetons consommés et coût IA du jour\n"
+    "- /skills (ou /skill) : serveurs MCP, outils et intégrations actifs\n"
+    "- /settings (ou /config) : résumé de la configuration actuelle\n"
+    "- /tint (ou /theme) : basculer l'accent visuel (laiton / bleu Jarvis)\n"
+    "- /quiet : mode silencieux\n"
+    "- /pause : suspendre temporairement les notifications\n"
+    "- /help : afficher cette aide complète"
+)
+
+
 class TelegramGateway:
     """Gestionnaire Telegram avec liste blanche stricte et support aiogram."""
 
@@ -81,26 +148,14 @@ class TelegramGateway:
             return TelegramMessageResult(authorized=False, reply_text="")
 
         cmd = command.lstrip("/").split("@", 1)[0].lower()
-        supported = {
-            "start",
-            "help",
-            "model",
-            "status",
-            "pause",
-            "brief",
-            "remember",
-            "forget",
-            "quiet",
-            "auto",
-            "tasks",
-            "stop",
-        }
-        if cmd not in supported:
+        if cmd not in TELEGRAM_SUPPORTED_COMMANDS:
             return TelegramMessageResult(
                 authorized=True,
                 reply_text=(
-                    "Commande inconnue. Commandes disponibles : "
-                    "/start, /status, /brief, /model, /remember, /forget, /pause, /quiet, /auto, /tasks, /stop."
+                    "Commande inconnue. Tapez /help pour la liste complète.\n"
+                    "Commandes disponibles : /start, /help, /status, /brief, /model, /local, "
+                    "/council, /auto, /workspace, /usage, /clear, /goal, /goals, /tasks, "
+                    "/stop, /skills, /settings, /tint, /remember, /forget, /pause, /quiet."
                 ),
             )
         if self.on_command:
@@ -109,7 +164,7 @@ class TelegramGateway:
         if cmd in ("start", "help"):
             return TelegramMessageResult(
                 authorized=True,
-                reply_text="Bonjour ! Je suis Jarvis. Écrivez-moi, envoyez-moi un vocal ou tapez /status.",
+                reply_text=TELEGRAM_HELP_TEXT,
             )
         return TelegramMessageResult(authorized=True, reply_text=f"Commande /{cmd} recue.")
 

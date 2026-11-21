@@ -71,6 +71,14 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const apiClient = {
   getHealth: () => requestJson<{ status: string; service: string }>("/api/health"),
+  resolveWorkspace: (path: string) =>
+    requestJson<{ found: boolean; path: string | null; display: string | null }>(
+      "/api/workspace/resolve",
+      {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }
+    ),
   getMessages: () => requestJson<ChatMessage[]>("/api/messages"),
   clearMessages: () =>
     requestJson<{ cleared: number }>("/api/messages/clear", {

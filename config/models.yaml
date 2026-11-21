@@ -22,7 +22,7 @@ roles:
       - minimax/minimax-m3
       - moonshotai/kimi-k3
       - gemini-4-argon
-      - gemini-4-carbon
+      - gemini-3.5-flash-lite
   orchestrator:
     model: gemini-4-argon
     provider: gemini
@@ -48,7 +48,7 @@ roles:
     provider: openrouter
     thinking_mode: auto
     fallback:
-      - gemini-4-carbon
+      - gemini-3.5-flash-lite
   deep:
     model: gemini-4-hydrogen
     provider: gemini

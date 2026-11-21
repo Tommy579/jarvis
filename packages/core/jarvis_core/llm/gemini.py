@@ -335,8 +335,8 @@ class GeminiProvider(LLMProvider):
 
         def _resolve_vertex_model(raw_model: str) -> str:
             cleaned = raw_model.removeprefix("models/").removeprefix("google/")
-            if cleaned in ("gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-live"):
-                return "gemini-4-carbon"
+            if cleaned in ("gemini-2.5-flash", "gemini-live"):
+                return "gemini-3.5-flash-lite"
             return cleaned
 
         def _invoke() -> Any:
@@ -370,9 +370,9 @@ class GeminiProvider(LLMProvider):
                 err_msg = str(exc).lower()
                 if (
                     "404" in err_msg or "not_found" in err_msg
-                ) and effective_model != "gemini-4-carbon":
+                ) and effective_model != "gemini-3.5-flash-lite":
                     return client.models.generate_content(
-                        model="gemini-4-carbon",
+                        model="gemini-3.5-flash-lite",
                         contents=contents,
                         config=config,
                     )
@@ -504,7 +504,7 @@ class GeminiProvider(LLMProvider):
         ]
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-4-carbon",
+            model="gemini-3.5-flash-lite",
             contents=contents,
             config=types.GenerateContentConfig(temperature=0.0),
         )
@@ -544,7 +544,7 @@ class GeminiProvider(LLMProvider):
         file_path: Path,
         prompt: str,
         mime_type: str | None = None,
-        model: str = "gemini-4-carbon",
+        model: str = "gemini-3.5-flash-lite",
         with_usage: bool = False,
     ) -> Any:
         """Analyse un fichier audio ou video via Gemini (inline pour petit audio, Files API sinon).

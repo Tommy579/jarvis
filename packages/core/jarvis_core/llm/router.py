@@ -58,7 +58,7 @@ DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
         role_name="agent",
         model="deepseek/deepseek-v4.1-flash-1017",
         provider="openrouter",
-        fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-4-carbon"],
+        fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-3.5-flash-lite"],
     ),
     "triage": RoleRoute(
         role_name="triage",
@@ -76,7 +76,7 @@ DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
         role_name="memory",
         model="deepseek/deepseek-v4.1-flash-1017",
         provider="openrouter",
-        fallback=["gemini-4-carbon"],
+        fallback=["gemini-3.5-flash-lite"],
     ),
     "deep": RoleRoute(
         role_name="deep",
@@ -366,10 +366,14 @@ class LLMRouter:
                     fb_prov = None
             if fb_prov and (fb_prov, fb_model) not in chain:
                 chain.append((fb_prov, fb_model))
+        or_prov = self.providers.get("openrouter")
+        if self._is_provider_configured(or_prov) and or_prov is not None:
+            if (or_prov, "deepseek/deepseek-v4.1-flash-1017") not in chain:
+                chain.append((or_prov, "deepseek/deepseek-v4.1-flash-1017"))
         gem_prov = self.providers.get("gemini")
         if self._is_provider_configured(gem_prov) and gem_prov is not None:
-            if (gem_prov, "gemini-4-carbon") not in chain:
-                chain.append((gem_prov, "gemini-4-carbon"))
+            if (gem_prov, "gemini-3.5-flash-lite") not in chain:
+                chain.append((gem_prov, "gemini-3.5-flash-lite"))
         return chain
 
     def _resolve_route(

@@ -1597,7 +1597,11 @@ class GoalToolkit:
         tools: list[tuple[str, str, type[BaseModel], Any, RiskLevel]] = [
             (
                 "start_goal",
-                "Lance un objectif autonome complet orchestre par un superviseur et des sous-agents low-cost jusqu'a verification finale.",
+                (
+                    "Reserve uniquement aux projets complexes ou taches longues multi-etapes (ne pas utiliser pour "
+                    "une commande simple, un lancement d'app/GUI ou une verification ponctuelle : preferer delegate_subagent). "
+                    "Lance un objectif autonome complet orchestre jusqu'a verification finale."
+                ),
                 StartGoalArgs,
                 self.start_goal,
                 RiskLevel.REVERSIBLE_WRITE,

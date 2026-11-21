@@ -9,6 +9,7 @@ import { Toaster } from "./components/ui";
 import { setSchemePreference, useColorScheme } from "./lib/colorScheme";
 import { getAuthToken } from "./lib/authToken";
 import { formatModelLabel } from "./lib/modelLabels";
+import { SLASH_COMMANDS } from "./lib/slashCommands";
 import {
   extractWakeWord,
   isStopRecordCommand,
@@ -401,9 +402,22 @@ export function App() {
           const argSpace = cleanArg.indexOf(" ");
           const targetWs = argSpace === -1 ? cleanArg : cleanArg.slice(0, argSpace).trim();
           const promptAfter = argSpace === -1 ? "" : cleanArg.slice(argSpace + 1).trim();
-          store.setWorkspace(targetWs);
+          let resolvedWs = targetWs;
+          try {
+            const resolved = await apiClient.resolveWorkspace(targetWs);
+            if (!resolved.found || !resolved.display) {
+              store.appendSystemMessage(
+                `Dossier introuvable : \`${targetWs}\`. Indiquez un chemin existant (ex: \`~/Documents/marges\`).`
+              );
+              return;
+            }
+            resolvedWs = resolved.display;
+          } catch {
+            // Passerelle hors ligne : conserver le chemin saisi tel quel
+          }
+          store.setWorkspace(resolvedWs);
           if (!promptAfter) {
-            store.appendSystemMessage(`Workspace actif défini sur : ${targetWs}`);
+            store.appendSystemMessage(`Workspace actif défini sur : ${resolvedWs}`);
             return;
           }
           outgoingText = promptAfter;
@@ -535,6 +549,16 @@ export function App() {
           } catch {
             store.appendSystemMessage("Impossible de récupérer les statistiques d'usage.");
           }
+          return;
+        } else if (cleanCmd === "/help" || cleanCmd === "/aide") {
+          const rows = SLASH_COMMANDS.map((c) => {
+            const signature = c.arg ? `\`${c.cmd} ${c.arg}\`` : `\`${c.cmd}\``;
+            const aliases = c.aliases?.length ? ` (${c.aliases.join(", ")})` : "";
+            return `| ${signature}${aliases} | ${c.desc} |`;
+          }).join("\n");
+          store.appendSystemMessage(
+            `### Commandes disponibles\n\n| Commande | Description |\n| --- | --- |\n${rows}`
+          );
           return;
         }
       }

@@ -33,6 +33,7 @@ const QUICK_MODELS = [
   "gemini-4-hydrogen",
   "gemini-4-argon",
   "gemini-4-carbon",
+  "gemini-3.5-flash-lite",
   "gemini-3-flash-preview",
   "gemini-3.1-pro-preview",
   "deepseek/deepseek-v4.1-flash-1017",

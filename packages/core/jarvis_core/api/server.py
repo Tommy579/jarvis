@@ -433,6 +433,55 @@ class JarvisCoreState:
                 )
         return self.runtime
 
+    def update_role_model(
+        self,
+        role: str,
+        model: str,
+        *,
+        provider: str | None = None,
+        thinking_mode: str | None = None,
+        fallback: list[str] | None = None,
+    ) -> RoleModelConfig:
+        """Met a jour le modele (et optionnellement le raisonnement) d'un role et le persiste."""
+        runtime = self.ensure_runtime()
+        route = runtime.router.set_role_model(
+            role,
+            model,
+            provider=provider,
+            thinking_mode=thinking_mode,
+        )
+        if role == "agent" and thinking_mode is not None:
+            runtime.router.thinking_mode = route.thinking_mode
+        updated_cfg: RoleModelConfig | None = None
+        for item in self.models:
+            if item.role == role:
+                item.model = route.model
+                item.provider = route.provider
+                item.thinking_mode = route.thinking_mode  # type: ignore[assignment]
+                if fallback is not None:
+                    item.fallback = fallback
+                    route.fallback = list(fallback)
+                updated_cfg = item
+                break
+        if updated_cfg is None:
+            updated_cfg = RoleModelConfig(
+                role=role,
+                model=route.model,
+                provider=route.provider,
+                fallback=fallback or [],
+                thinking_mode=route.thinking_mode,  # type: ignore[arg-type]
+            )
+            self.models.append(updated_cfg)
+        self.db.set_setting(
+            "role_models",
+            json.dumps([m.model_dump() for m in self.models]),
+        )
+        return updated_cfg
+
+    def get_agent_model(self) -> RoleModelConfig | None:
+        """Retourne la configuration du role principal (agent)."""
+        return next((m for m in self.models if m.role == "agent"), self.models[0] if self.models else None)
+
     def set_sensor_paused(self, sensor: SensorName, paused: bool) -> BlacklistConfig:
         detail: str | None = None
         active = not paused
@@ -1019,7 +1068,7 @@ class JarvisCoreState:
                     role="agent",
                     model="deepseek/deepseek-v4.1-flash-1017",
                     provider="openrouter",
-                    fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-4-carbon"],
+                    fallback=["z-ai/glm-5.3", "minimax/minimax-m3", "gemini-3.5-flash-lite"],
                     supports_vision=False,
                     supports_tools=True,
                 )
@@ -1224,6 +1273,386 @@ class DailyBudgetUpdate(BaseModel):
     daily_budget_usd: float = Field(ge=0.0, le=1000.0)
 
 
+class WorkspaceResolveRequest(BaseModel):
+    path: str = Field(min_length=1)
+
+
+def format_workspace_display(path: Path) -> str:
+    """Formate un chemin de workspace avec ~ lorsqu'il se trouve sous HOME."""
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    if resolved == home:
+        return "~"
+    try:
+        rel = resolved.relative_to(home)
+        return f"~/{rel.as_posix()}"
+    except ValueError:
+        return str(resolved)
+
+
+def resolve_workspace_directory(raw: str, base_root: Path | None = None) -> tuple[Path | None, str]:
+    """Resout un nom ou chemin de dossier workspace et retourne (chemin_absolu, affichage)."""
+    cleaned = raw.strip().strip("\"'")
+    if not cleaned:
+        return None, ""
+
+    expanded = Path(cleaned).expanduser()
+    if expanded.is_absolute():
+        if expanded.is_dir():
+            resolved = expanded.resolve()
+            return resolved, format_workspace_display(resolved)
+        return None, cleaned
+
+    home = Path.home().resolve()
+    candidates: list[Path] = [
+        home / expanded,
+        home / "Documents" / expanded,
+        home / "Desktop" / expanded,
+        home / "Bureau" / expanded,
+        home / "Projects" / expanded,
+        home / "Projets" / expanded,
+    ]
+    if base_root is not None:
+        candidates.append(base_root / expanded)
+    candidates.append(Path.cwd() / expanded)
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            resolved = candidate.resolve()
+            return resolved, format_workspace_display(resolved)
+
+    if "/" not in cleaned and "\\" not in cleaned:
+        needle = cleaned.lower()
+        for parent in (home / "Documents", home):
+            if not parent.is_dir():
+                continue
+            try:
+                for child in parent.iterdir():
+                    if child.is_dir() and child.name.lower() == needle:
+                        resolved = child.resolve()
+                        return resolved, format_workspace_display(resolved)
+            except OSError:
+                continue
+
+    return None, cleaned
+
+
+def _fmt_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+def _with_telegram_workspace(core_state: JarvisCoreState, text: str) -> str:
+    ws = (core_state.db.get_setting("telegram_workspace") or "").strip()
+    if not ws:
+        return text
+    return f"[Workspace actif : {ws}]\n{text}"
+
+
+def _backup_telegram_auto_model(core_state: JarvisCoreState) -> None:
+    agent_cfg = core_state.get_agent_model()
+    if agent_cfg and agent_cfg.model not in ("qwen3.5:2b", "gemini-3.1-pro-preview"):
+        core_state.db.set_setting("telegram_auto_model", agent_cfg.model)
+
+
+def _default_auto_model(core_state: JarvisCoreState) -> str:
+    saved = (core_state.db.get_setting("telegram_auto_model") or "").strip()
+    if saved:
+        return saved
+    defaults = core_state._load_models_config()
+    agent_def = next((m for m in defaults if m.role == "agent"), defaults[0] if defaults else None)
+    return agent_def.model if agent_def else "deepseek/deepseek-v4.1-flash-1017"
+
+
+async def execute_telegram_text(core_state: JarvisCoreState, text: str) -> str:
+    """Traite un message texte Telegram en conservant le workspace actif."""
+    rt = core_state.runtime
+    if rt and getattr(rt, "attention", None):
+        rt.attention.presence.record_telegram_activity()
+    payload = _with_telegram_workspace(core_state, text)
+    res = await core_state.run_chat_turn(payload)
+    return res.content
+
+
+def _tg_format_status(core_state: JarvisCoreState) -> str:
+    rt = core_state.ensure_runtime()
+    pol = rt.policy_store.get() if getattr(rt, "policy_store", None) else None
+    agent_cfg = core_state.get_agent_model()
+    ws = (core_state.db.get_setting("telegram_workspace") or "").strip()
+    sensors = ", ".join(
+        f"{s.sensor} ({'pause' if s.paused else 'actif' if s.active else 'inactif'})"
+        for s in core_state.blacklist.sensors
+    )
+    mcps = rt.mcp_manager.status_summary() if getattr(rt, "mcp_manager", None) else []
+    mcp_summary = (
+        ", ".join(
+            f"{m['name']} ({'connecté' if m.get('connected') else 'hors ligne'})" for m in mcps
+        )
+        if mcps
+        else "aucun"
+    )
+    return (
+        f"🟢 Jarvis opérationnel.\n"
+        f"- Présence PC : {'Oui' if rt.attention.presence.is_at_pc else 'Non'}\n"
+        f"- Heures calmes : {pol.quiet_start if pol else '23:00'} - {pol.quiet_end if pol else '08:00'}\n"
+        f"- Modèle actif : {agent_cfg.model if agent_cfg else 'défaut'}\n"
+        f"- Raisonnement : {agent_cfg.thinking_mode if agent_cfg else 'auto'}\n"
+        f"- Workspace : {ws or 'aucun'}\n"
+        f"- Capteurs : {sensors or 'aucun'}\n"
+        f"- Serveurs MCP : {mcp_summary}"
+    )
+
+
+def _tg_format_usage(core_state: JarvisCoreState) -> str:
+    daily = core_state.db.daily_usage()
+    raw_budget = core_state.db.get_setting("daily_budget_usd")
+    budget = float(raw_budget) if raw_budget is not None else 5.0
+
+    by_model: dict[str, dict[str, float | int]] = {}
+    for item in daily:
+        entry = by_model.setdefault(
+            item.model,
+            {"tokens_in": 0, "tokens_out": 0, "cost": 0.0},
+        )
+        entry["tokens_in"] = int(entry["tokens_in"]) + (item.tokens_in or 0)
+        entry["tokens_out"] = int(entry["tokens_out"]) + (item.tokens_out or 0)
+        entry["cost"] = float(entry["cost"]) + (item.cost or 0.0)
+
+    ordered = sorted(
+        by_model.items(),
+        key=lambda kv: (float(kv[1]["cost"]), int(kv[1]["tokens_in"]) + int(kv[1]["tokens_out"])),
+        reverse=True,
+    )
+    total_in = sum(int(v["tokens_in"]) for _, v in ordered)
+    total_out = sum(int(v["tokens_out"]) for _, v in ordered)
+    total_cost = sum(float(v["cost"]) for _, v in ordered)
+    header = (
+        f"📊 Usage IA du jour\n"
+        f"Total : {_fmt_tokens(total_in)} → {_fmt_tokens(total_out)} jetons · "
+        f"${total_cost:.2f} / ${budget:.2f}"
+    )
+    if not ordered:
+        return f"{header}\nAucune consommation enregistrée aujourd'hui."
+    lines = [
+        f"- {model} : {_fmt_tokens(int(v['tokens_in']))} → "
+        f"{_fmt_tokens(int(v['tokens_out']))} (${float(v['cost']):.4f})"
+        for model, v in ordered
+    ]
+    return header + "\n" + "\n".join(lines)
+
+
+def _tg_format_skills(core_state: JarvisCoreState) -> str:
+    rt = core_state.ensure_runtime()
+    mcps = rt.mcp_manager.status_summary() if getattr(rt, "mcp_manager", None) else []
+    mcp_lines = (
+        [
+            f"- {m['name']} ({'connecté' if m.get('connected') else 'hors ligne'})"
+            for m in mcps
+        ]
+        if mcps
+        else ["- aucun serveur MCP configuré"]
+    )
+    integrations = [
+        f"{i.id} ({'actif' if i.enabled else 'inactif'})"
+        for i in core_state.integrations.list_info()
+    ]
+    tools_count = len(rt.tool_registry.list_schemas())
+    return (
+        f"🧩 Skills & Outils ({tools_count} outil(s) actif(s))\n"
+        f"Serveurs MCP :\n" + "\n".join(mcp_lines) + "\n"
+        f"Intégrations : {', '.join(integrations) if integrations else 'aucune'}"
+    )
+
+
+def _tg_format_settings(core_state: JarvisCoreState) -> str:
+    rt = core_state.ensure_runtime()
+    pol = rt.policy_store.get() if getattr(rt, "policy_store", None) else None
+    agent_cfg = core_state.get_agent_model()
+    raw_budget = core_state.db.get_setting("daily_budget_usd")
+    budget = float(raw_budget) if raw_budget is not None else 5.0
+    ws = (core_state.db.get_setting("telegram_workspace") or "").strip()
+    theme = (core_state.db.get_setting("ui_theme") or "jarvis-blue").strip()
+    return (
+        f"⚙️ Paramètres actuels\n"
+        f"- Modèle agent : {agent_cfg.model if agent_cfg else 'défaut'} "
+        f"(raisonnement : {agent_cfg.thinking_mode if agent_cfg else 'auto'})\n"
+        f"- Budget quotidien : ${budget:.2f}\n"
+        f"- Heures calmes : {pol.quiet_start if pol else '23:00'} - {pol.quiet_end if pol else '08:00'}\n"
+        f"- Workspace Telegram : {ws or 'aucun'}\n"
+        f"- Thème UI : {theme}\n"
+        f"Utilisez /model, /local, /council, /auto, /workspace ou /tint pour modifier."
+    )
+
+
+async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: str) -> str:
+    """Execute une commande slash Telegram en s'alignant sur les commandes GUI et Bot."""
+    from jarvis_core.channels.telegram import TELEGRAM_HELP_TEXT
+
+    rt = core_state.runtime
+    if rt and getattr(rt, "attention", None):
+        rt.attention.presence.record_telegram_activity()
+
+    if cmd in ("start", "help"):
+        return TELEGRAM_HELP_TEXT
+    if cmd == "status":
+        return _tg_format_status(core_state)
+    if cmd in ("clear", "new"):
+        cleared = core_state.db.clear_messages()
+        return f"🧹 Nouvelle conversation démarrée ({cleared} message(s) effacé(s))."
+    if cmd == "workspace":
+        if not arg:
+            ws = (core_state.db.get_setting("telegram_workspace") or "").strip()
+            if ws:
+                return (
+                    f"Workspace actif : {ws}\n"
+                    "Utilisez /workspace <dossier> pour changer ou /workspace reset pour désactiver."
+                )
+            return "Aucun workspace actif. Tapez /workspace <dossier> pour définir le dossier de travail."
+        if arg.lower() in ("reset", "clear", "off"):
+            core_state.db.set_setting("telegram_workspace", "")
+            return "Workspace réinitialisé : mode standard actif."
+        parts = arg.split(maxsplit=1)
+        target_ws = parts[0].strip()
+        prompt_after = parts[1].strip() if len(parts) > 1 else ""
+        resolved_path, display_ws = resolve_workspace_directory(
+            target_ws, base_root=core_state.base_root
+        )
+        if resolved_path is None:
+            return (
+                f"Dossier introuvable : {target_ws}. "
+                "Indiquez un chemin existant (ex: ~/Documents/marges)."
+            )
+        core_state.db.set_setting("telegram_workspace", display_ws)
+        if not prompt_after:
+            return f"Workspace actif défini sur : {display_ws}"
+        res = await core_state.run_chat_turn(f"[Workspace actif : {display_ws}]\n{prompt_after}")
+        return res.content
+    if cmd in ("local", "council", "moa"):
+        target_model = "qwen3.5:2b" if cmd == "local" else "gemini-3.1-pro-preview"
+        _backup_telegram_auto_model(core_state)
+        core_state.update_role_model("agent", target_model)
+        if arg:
+            res = await core_state.run_chat_turn(_with_telegram_workspace(core_state, arg))
+            return res.content
+        return (
+            f"Modèle local activé ({target_model})."
+            if cmd == "local"
+            else f"Mode conseil avancé activé ({target_model})."
+        )
+    if cmd == "auto":
+        if not arg:
+            default_model = _default_auto_model(core_state)
+            core_state.update_role_model("agent", default_model)
+            return f"Routage automatique rétabli (modèle : {default_model})."
+        rt = core_state.ensure_runtime()
+        if not rt.task_manager:
+            return "Gestionnaire autonome indisponible."
+        try:
+            rec = rt.task_manager.start_task(goal=arg, notify_on_finish=True)
+            return (
+                f"🚀 Tâche autonome {rec.id} lancée (max {rec.max_iterations} étapes). "
+                "Je te préviens dès que c'est terminé."
+            )
+        except Exception as exc:
+            return f"Impossible de lancer la tâche : {exc}"
+    if cmd in ("model", "models"):
+        rt = core_state.ensure_runtime()
+        if arg:
+            _backup_telegram_auto_model(core_state)
+            updated = core_state.update_role_model("agent", arg)
+            return f"Modèle actif (agent) changé pour : {updated.model} ({updated.provider})."
+        agent_cfg = core_state.get_agent_model()
+        rows = "\n".join(f"- {m.role} : {m.model}" for m in core_state.models)
+        thinking = agent_cfg.thinking_mode if agent_cfg else rt.router.thinking_mode
+        return (
+            f"🧠 Configuration des modèles\n"
+            f"Modèle actif : {agent_cfg.model if agent_cfg else 'défaut'} · Raisonnement : {thinking}\n"
+            f"{rows}"
+        )
+    if cmd in ("usage", "tokens"):
+        return _tg_format_usage(core_state)
+    if cmd in ("skills", "skill"):
+        return _tg_format_skills(core_state)
+    if cmd in ("settings", "config"):
+        return _tg_format_settings(core_state)
+    if cmd in ("tint", "theme"):
+        current_theme = (core_state.db.get_setting("ui_theme") or "jarvis-blue").strip()
+        next_theme = "jarvis-blue" if current_theme == "amber" else "amber"
+        core_state.db.set_setting("ui_theme", next_theme)
+        return (
+            "🎨 Accent laiton activé (préférence enregistrée)."
+            if next_theme == "amber"
+            else "🎨 Accent bleu Jarvis activé (préférence enregistrée)."
+        )
+    if cmd == "brief":
+        res = await core_state.run_chat_turn(
+            "Fais-moi un résumé concis des notifications et événements récents."
+        )
+        return res.content
+    if cmd == "remember":
+        if not arg:
+            return "Usage : /remember <fait à mémoriser>"
+        res = await core_state.run_chat_turn(f"Mémorise ce fait : {arg}")
+        return res.content
+    if cmd == "forget":
+        if not arg:
+            return "Usage : /forget <fait à oublier>"
+        res = await core_state.run_chat_turn(f"Oublie ce fait : {arg}")
+        return res.content
+    if cmd == "quiet":
+        return "Mode silencieux ajusté."
+    if cmd == "pause":
+        return "Notifications temporairement suspendues."
+    if cmd == "goal":
+        if not arg:
+            return "Usage : /goal <objectif complet à atteindre>"
+        rt = core_state.ensure_runtime()
+        if not rt.goal_manager:
+            return "Orchestrateur d'objectifs indisponible."
+        try:
+            g = rt.goal_manager.start_goal(goal_text=arg, notify_on_finish=True)
+            return (
+                f"🎯 Objectif {g.id} lancé (orchestrateur : {g.orchestrator_model}, "
+                f"budget max : ${g.max_cost_usd:.2f}). Je supervise jusqu'à vérification."
+            )
+        except Exception as exc:
+            return f"Impossible de lancer l'objectif : {exc}"
+    if cmd == "goals":
+        rt = core_state.ensure_runtime()
+        if not rt.goal_manager:
+            return "Orchestrateur d'objectifs indisponible."
+        goals = rt.goal_manager.list_goals(limit=5)
+        if not goals:
+            return "Aucun objectif enregistré."
+        return "\n".join(
+            f"- {g.id} [{g.status} {g.progress_pct}%] (${g.cost_usd:.3f}) : {g.title[:55]}"
+            for g in goals
+        )
+    if cmd == "tasks":
+        rt = core_state.ensure_runtime()
+        if not rt.task_manager:
+            return "Gestionnaire autonome indisponible."
+        items = rt.task_manager.list_tasks(limit=5)
+        if not items:
+            return "Aucune tâche autonome enregistrée."
+        return "\n".join(
+            f"- {t.id} [{t.status}] ({t.iterations}/{t.max_iterations}) : {t.goal[:60]}"
+            for t in items
+        )
+    if cmd == "stop":
+        rt = core_state.ensure_runtime()
+        if not rt.task_manager:
+            return "Gestionnaire autonome indisponible."
+        cancelled = rt.task_manager.emergency_stop_all()
+        if rt.goal_manager:
+            cancelled.extend(rt.goal_manager.emergency_stop_all())
+        return f"🛑 Arrêt d'urgence activé ({len(cancelled)} tâche(s)/objectif(s) annulé(s))."
+    return f"Commande /{cmd} reçue."
+
+
 def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         load_dotenv(override=False)
@@ -1302,11 +1731,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     from jarvis_core.channels.telegram import TelegramGateway
 
                     async def _tg_text(text: str) -> str:
-                        rt = core_state.runtime
-                        if rt and getattr(rt, "attention", None):
-                            rt.attention.presence.record_telegram_activity()
-                        res = await core_state.run_chat_turn(text)
-                        return res.content
+                        return await execute_telegram_text(core_state, text)
 
                     async def _tg_voice(audio_bytes: bytes) -> tuple[str, bytes | None]:
                         rt = core_state.runtime
@@ -1384,102 +1809,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                         return "Alerte acquittée."
 
                     async def _tg_cmd(cmd: str, arg: str) -> str:
-                        rt = core_state.runtime
-                        if rt and getattr(rt, "attention", None):
-                            rt.attention.presence.record_telegram_activity()
-                        if cmd in ("start", "help"):
-                            return (
-                                "👋 Bonjour ! Je suis Jarvis, votre assistant personnel.\n\n"
-                                "Vous pouvez :\n"
-                                "- M'écrire directement vos messages ou questions\n"
-                                "- M'envoyer des notes vocales (réponse vocale avec Gemini TTS)\n"
-                                "- M'envoyer des photos à analyser\n"
-                                "- Utiliser les commandes : /status, /brief, /remember, /forget, /quiet"
-                            )
-                        if cmd == "status":
-                            pol = rt.policy_store.get() if rt else None
-                            return (
-                                f"🟢 Jarvis opérationnel.\n"
-                                f"- Présence PC : {'Oui' if rt.attention.presence.is_at_pc else 'Non'}\n"
-                                f"- Heures calmes : {pol.quiet_start if pol else '23:00'} - {pol.quiet_end if pol else '08:00'}\n"
-                                f"- Modèle actif : {core_state.models[0].model if core_state.models else 'défaut'}"
-                            )
-                        if cmd == "brief":
-                            res = await core_state.run_chat_turn(
-                                "Fais-moi un résumé concis des notifications et événements récents."
-                            )
-                            return res.content
-                        if cmd == "remember":
-                            if not arg:
-                                return "Usage : /remember <fait à mémoriser>"
-                            res = await core_state.run_chat_turn(f"Mémorise ce fait : {arg}")
-                            return res.content
-                        if cmd == "forget":
-                            if not arg:
-                                return "Usage : /forget <fait à oublier>"
-                            res = await core_state.run_chat_turn(f"Oublie ce fait : {arg}")
-                            return res.content
-                        if cmd == "quiet":
-                            return "Mode silencieux ajusté."
-                        if cmd == "model":
-                            return f"Modèle actif : {core_state.models[0].model if core_state.models else 'défaut'}"
-                        if cmd == "pause":
-                            return "Notifications temporairement suspendues."
-                        if cmd == "goal":
-                            if not arg:
-                                return "Usage : /goal <objectif complet à atteindre>"
-                            if not rt or not rt.goal_manager:
-                                return "Orchestrateur d'objectifs indisponible."
-                            try:
-                                g = rt.goal_manager.start_goal(goal_text=arg, notify_on_finish=True)
-                                return (
-                                    f"🎯 Objectif {g.id} lancé (orchestrateur : {g.orchestrator_model}, "
-                                    f"budget max : ${g.max_cost_usd:.2f}). Je supervise jusqu'à vérification."
-                                )
-                            except Exception as exc:
-                                return f"Impossible de lancer l'objectif : {exc}"
-                        if cmd == "goals":
-                            if not rt or not rt.goal_manager:
-                                return "Orchestrateur d'objectifs indisponible."
-                            goals = rt.goal_manager.list_goals(limit=5)
-                            if not goals:
-                                return "Aucun objectif enregistré."
-                            return "\n".join(
-                                f"- {g.id} [{g.status} {g.progress_pct}%] (${g.cost_usd:.3f}) : {g.title[:55]}"
-                                for g in goals
-                            )
-                        if cmd == "auto":
-                            if not arg:
-                                return "Usage : /auto <objectif de la tâche autonome>"
-                            if not rt or not rt.task_manager:
-                                return "Gestionnaire autonome indisponible."
-                            try:
-                                rec = rt.task_manager.start_task(goal=arg, notify_on_finish=True)
-                                return (
-                                    f"🚀 Tâche autonome {rec.id} lancée (max {rec.max_iterations} étapes). "
-                                    "Je te préviens dès que c'est terminé."
-                                )
-                            except Exception as exc:
-                                return f"Impossible de lancer la tâche : {exc}"
-                        if cmd == "tasks":
-                            if not rt or not rt.task_manager:
-                                return "Gestionnaire autonome indisponible."
-                            items = rt.task_manager.list_tasks(limit=5)
-                            if not items:
-                                return "Aucune tâche autonome enregistrée."
-                            lines = [
-                                f"- {t.id} [{t.status}] ({t.iterations}/{t.max_iterations}) : {t.goal[:60]}"
-                                for t in items
-                            ]
-                            return "\n".join(lines)
-                        if cmd == "stop":
-                            if not rt or not rt.task_manager:
-                                return "Gestionnaire autonome indisponible."
-                            cancelled = rt.task_manager.emergency_stop_all()
-                            if rt.goal_manager:
-                                cancelled.extend(rt.goal_manager.emergency_stop_all())
-                            return f"🛑 Arrêt d'urgence activé ({len(cancelled)} tâche(s)/objectif(s) annulé(s))."
-                        return f"Commande /{cmd} reçue."
+                        return await execute_telegram_command(core_state, cmd, arg)
 
                     tg_gateway = TelegramGateway(
                         bot_token=tg_token,
@@ -1595,6 +1925,15 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     @application.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "jarvis-core"}
+
+    @application.post("/api/workspace/resolve")
+    def resolve_workspace_endpoint(payload: WorkspaceResolveRequest) -> dict[str, Any]:
+        resolved_path, display_ws = resolve_workspace_directory(
+            payload.path, base_root=core_state.base_root
+        )
+        if resolved_path is None:
+            return {"found": False, "path": None, "display": None}
+        return {"found": True, "path": str(resolved_path), "display": display_ws}
 
     # === Conversation ===
 
@@ -1866,40 +2205,13 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.put("/api/models/role", response_model=RoleModelConfig)
     def update_role_model(payload: UpdateRoleModelRequest) -> RoleModelConfig:
-        runtime = core_state.ensure_runtime()
-        route = runtime.router.set_role_model(
+        return core_state.update_role_model(
             payload.role,
             payload.model,
             provider=payload.provider,
             thinking_mode=payload.thinking_mode,
+            fallback=payload.fallback,
         )
-        if payload.role == "agent" and payload.thinking_mode is not None:
-            runtime.router.thinking_mode = route.thinking_mode
-        updated_cfg: RoleModelConfig | None = None
-        for item in core_state.models:
-            if item.role == payload.role:
-                item.model = route.model
-                item.provider = route.provider
-                item.thinking_mode = route.thinking_mode  # type: ignore[assignment]
-                if payload.fallback is not None:
-                    item.fallback = payload.fallback
-                    route.fallback = list(payload.fallback)
-                updated_cfg = item
-                break
-        if updated_cfg is None:
-            updated_cfg = RoleModelConfig(
-                role=payload.role,
-                model=route.model,
-                provider=route.provider,
-                fallback=payload.fallback or [],
-                thinking_mode=route.thinking_mode,  # type: ignore[arg-type]
-            )
-            core_state.models.append(updated_cfg)
-        core_state.db.set_setting(
-            "role_models",
-            json.dumps([m.model_dump() for m in core_state.models]),
-        )
-        return updated_cfg
 
     @application.get("/api/usage/daily", response_model=list[DailyUsageItem])
     def get_daily_usage(days: int = Query(default=14, ge=1, le=90)) -> list[DailyUsageItem]:

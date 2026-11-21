@@ -204,4 +204,21 @@ async def test_router_never_sends_openrouter_slug_to_gemini() -> None:
     assert route.provider == "openrouter"
 
     await router.complete("agent", [Message(role=Role.USER, content="Salut")])
-    assert gem_prov.calls == [("gemini-4-carbon", "auto")]
+    assert gem_prov.calls == [("gemini-3.5-flash-lite", "auto")]
+
+
+def test_router_candidate_chain_uses_lightweight_fallbacks() -> None:
+    or_prov = _ThinkingAwareProvider(name="openrouter")
+    gem_prov = _ThinkingAwareProvider(name="gemini")
+    router = LLMRouter(
+        providers={"openrouter": or_prov, "gemini": gem_prov},
+        roles={
+            "agent": RoleRoute("agent", "gemini-4-hydrogen", "gemini", fallback=[]),
+        },
+    )
+    chain = router._candidate_chain(router.get_role_route("agent"))
+    assert [(p.name, m) for p, m in chain] == [
+        ("gemini", "gemini-4-hydrogen"),
+        ("openrouter", "deepseek/deepseek-v4.1-flash-1017"),
+        ("gemini", "gemini-3.5-flash-lite"),
+    ]
