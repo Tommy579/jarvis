@@ -1824,7 +1824,20 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     telegram_bot, telegram_dp = tg_gateway.build_aiogram_dispatcher()
 
                     async def _run_tg():
+                        from aiogram.types import BotCommand
+
+                        from jarvis_core.channels.telegram import TELEGRAM_MENU_COMMANDS
+
                         logger.info("Bot Telegram démarré pour chat_id=%s", tg_chat)
+                        try:
+                            await telegram_bot.set_my_commands(
+                                [
+                                    BotCommand(command=cmd, description=desc)
+                                    for cmd, desc in TELEGRAM_MENU_COMMANDS
+                                ]
+                            )
+                        except Exception as exc:
+                            logger.debug("Synchronisation menu commandes Telegram: %s", exc)
                         try:
                             await telegram_dp.start_polling(telegram_bot, handle_signals=False)
                         except asyncio.CancelledError:

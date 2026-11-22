@@ -70,6 +70,30 @@ TELEGRAM_SUPPORTED_COMMANDS: frozenset[str] = frozenset(
     }
 )
 
+TELEGRAM_MENU_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("help", "Afficher toutes les commandes"),
+    ("status", "État des services et modèles"),
+    ("workspace", "Définir ou afficher le workspace actif"),
+    ("clear", "Nouvelle conversation (effacer l'historique)"),
+    ("usage", "Consommation de jetons et coût du jour"),
+    ("model", "Afficher ou changer le modèle actif"),
+    ("local", "Activer le modèle local (qwen3.5:2b)"),
+    ("council", "Activer le mode conseil avancé"),
+    ("auto", "Routage auto ou tâche autonome"),
+    ("goal", "Lancer un objectif autonome supervisé"),
+    ("goals", "Lister les objectifs récents"),
+    ("tasks", "Lister les tâches autonomes"),
+    ("stop", "Arrêt d'urgence des tâches et objectifs"),
+    ("brief", "Résumé des notifications et événements"),
+    ("remember", "Mémoriser un fait"),
+    ("forget", "Oublier un fait"),
+    ("skills", "Serveurs MCP, outils et intégrations"),
+    ("settings", "Résumé de la configuration actuelle"),
+    ("tint", "Basculer l'accent visuel"),
+    ("quiet", "Mode silencieux"),
+    ("pause", "Suspendre les notifications"),
+)
+
 TELEGRAM_HELP_TEXT = (
     "👋 Bonjour ! Je suis Jarvis, votre assistant personnel.\n\n"
     "Vous pouvez m'écrire directement, m'envoyer des notes vocales ou des photos, "
