@@ -63,6 +63,9 @@ show_missing = false
 python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
+# Les modules hors perimetre sont analyses mais leurs erreurs ne sont pas remontees : le
+# perimetre reste explicite et identique en local et en CI (install editable).
+follow_imports = "silent"
 # Perimetre progressif : on ajoute des fichiers au fur et a mesure, sans bloquer sur l'existant.
 files = [
     "packages/shared/jarvis_shared",
