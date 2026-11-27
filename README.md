@@ -2,7 +2,19 @@
 
 Assistant personnel local compose d'un service central Python (`jarvis-core`), d'une interface web React/TypeScript (`web/`) et d'une couche bureautique (`jarvis-desktop`).
 
-**Installation guidee (Linux, Windows, executable) : [INSTALL.md](INSTALL.md)**
+**Installation guidee (Linux, Windows, executable) : [INSTALL.md](INSTALL.md)** — **Depannage : [docs/FAQ.md](docs/FAQ.md)**
+
+## Apercu
+
+| Accueil | Conversation |
+|---|---|
+| ![Accueil](docs/screenshots/accueil.png) | ![Conversation](docs/screenshots/conversation.png) |
+
+| Configuration | Mobile |
+|---|---|
+| ![Configuration](docs/screenshots/configuration.png) | ![Mobile](docs/screenshots/mobile.png) |
+
+Captures generees depuis le serveur de simulation : `cd web && node scripts/capture-screenshots.mjs`.
 
 ## Architecture
 
