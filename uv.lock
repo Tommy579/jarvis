@@ -1264,7 +1264,7 @@ wheels = [
 
 [[package]]
 name = "jarvis-core"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "aiogram" },
@@ -1328,7 +1328,7 @@ provides-extras = ["voice", "memory"]
 
 [[package]]
 name = "jarvis-desktop"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "packages/desktop" }
 dependencies = [
     { name = "jarvis-shared" },
@@ -1364,7 +1364,7 @@ provides-extras = ["ocr", "windows"]
 
 [[package]]
 name = "jarvis-shared"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "packages/shared" }
 dependencies = [
     { name = "pydantic" },
@@ -1375,7 +1375,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.9.0" }]
 
 [[package]]
 name = "jarvis-workspace"
-version = "2.0.1"
+version = "2.0.2"
 source = { virtual = "." }
 dependencies = [
     { name = "jarvis-core" },

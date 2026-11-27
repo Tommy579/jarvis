@@ -35,8 +35,8 @@ système `portaudio` doit être présent (le script d'installation s'en occupe).
 ```bash
 # depuis la page Releases du dépôt GitHub, télécharger l'archive ET SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing   # doit afficher « OK »
-tar -xzf jarvis-2.0.1-linux-x86_64.tar.gz
-cd jarvis-2.0.1
+tar -xzf jarvis-2.0.2-linux-x86_64.tar.gz
+cd jarvis-2.0.2
 bash install_linux.sh
 ```
 
@@ -190,7 +190,7 @@ dist\JARVIS-windows-x64.zip
 Sans machine Windows, poussez un tag et laissez la CI construire l'archive :
 
 ```bash
-git tag v2.0.1 && git push origin v2.0.1
+git tag v2.0.2 && git push origin v2.0.2
 ```
 
 Le workflow `Release Windows (exe)` compile, **vérifie que `jarvis.exe` répond sur
