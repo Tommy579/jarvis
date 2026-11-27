@@ -51,6 +51,9 @@ else
     ok ".env existant conservé"
 fi
 
+# Le fichier contient des cles API : lisible par le seul proprietaire.
+chmod 600 "$ENV_FILE" 2>/dev/null || warn "Impossible de restreindre les permissions de $ENV_FILE"
+
 # ── Step 2: Dépendances système ─────────────────────────
 step "2/5 · Dépendances système"
 

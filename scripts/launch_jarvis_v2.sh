@@ -53,6 +53,7 @@ if [ -z "$TOKEN" ]; then
     TOKEN="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(32))')" ||
         fail "Generation du jeton impossible."
     touch "$ENV_FILE" || fail "Impossible d'ecrire dans $ENV_FILE."
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
     if grep -qE '^JARVIS_API_TOKEN=' "$ENV_FILE"; then
         sed -i "s|^JARVIS_API_TOKEN=.*|JARVIS_API_TOKEN=${TOKEN}|" "$ENV_FILE"
     else
