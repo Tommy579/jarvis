@@ -7,9 +7,10 @@ from typing import Any
 
 import pytest
 from jarvis_core.runtime import build_runtime
+from jarvis_core.tools.visual_artifact import PresentVisualArtifactArgs, VisualArtifactToolkit
 from jarvis_shared.models import ToolCall
 from jarvis_shared.ws_protocol import ServerWsEvent
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 
 @pytest.mark.asyncio
@@ -131,3 +132,67 @@ async def test_present_visual_artifact_raspberry_pi_led(tmp_path: Path) -> None:
     assert validated.type == "visual.artifact"
     assert len(validated.payload.steps) == 3
     assert validated.payload.steps[2].active_connections == ["w1", "w2", "w3"]
+
+
+@pytest.mark.asyncio
+async def test_colors_are_sanitized_and_positions_clamped() -> None:
+    emitted: list[dict[str, Any]] = []
+    toolkit = VisualArtifactToolkit(on_ws_event=lambda _event, payload: emitted.append(payload))
+
+    await toolkit.present_visual_artifact(
+        title="Test",
+        elements=[
+            {
+                "id": "a",
+                "label": "A",
+                "color": "url(http://evil.test/x.png)",
+                "x": 999,
+                "y": -5,
+                "z": 99,
+            },
+            {"id": "b", "label": "B", "color": "#ef4444"},
+        ],
+        steps=[
+            {
+                "title": "Etape 1",
+                "spoken_text": "Voici A.",
+                "reveal_elements": ["a", "inconnu"],
+                "highlight_elements": ["inconnu"],
+            }
+        ],
+    )
+
+    payload = emitted[0]
+    first = payload["elements"][0]
+    assert first["color"] == "#38bdf8"
+    assert first["x"] == 96.0
+    assert first["y"] == 4.0
+    assert first["z"] == 25.0
+    assert payload["elements"][1]["color"] == "#ef4444"
+    # "b" n'est reference par aucune etape : l'outil le revele a la premiere etape.
+    assert payload["steps"][0]["reveal_elements"] == ["a", "b"]
+    assert payload["steps"][0]["highlight_elements"] == []
+
+
+@pytest.mark.asyncio
+async def test_elements_not_referenced_are_revealed_in_first_step() -> None:
+    emitted: list[dict[str, Any]] = []
+    toolkit = VisualArtifactToolkit(on_ws_event=lambda _event, payload: emitted.append(payload))
+
+    await toolkit.present_visual_artifact(
+        title="T",
+        elements=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+        steps=[{"title": "E1", "spoken_text": "s"}, {"title": "E2", "spoken_text": "s"}],
+    )
+
+    assert [element["id"] for element in emitted[0]["elements"]] == ["a", "b"]
+    assert set(emitted[0]["steps"][0]["reveal_elements"]) == {"a", "b"}
+
+
+def test_oversized_payload_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PresentVisualArtifactArgs(
+            title="T",
+            elements=[{"id": f"e{i}", "label": "x"} for i in range(81)],
+            steps=[{"title": "E", "spoken_text": "s"}],
+        )

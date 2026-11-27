@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable
 from typing import Any, Literal
@@ -26,10 +27,25 @@ def _clamp_pct(val: float, default: float = 50.0) -> float:
     return round(max(4.0, min(96.0, num)), 2)
 
 
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+DEFAULT_ELEMENT_COLOR = "#38bdf8"
+
+
+def _safe_color(value: str | None, default: str = DEFAULT_ELEMENT_COLOR) -> str:
+    """N'accepte qu'une couleur hexadecimale.
+
+    Une valeur libre finit dans `fill`/`stroke` SVG : `url(http://...)` y declencherait une
+    requete sortante depuis le navigateur. Le modele ne doit pas pouvoir choisir cela.
+    """
+    candidate = (value or "").strip()
+    return candidate if _HEX_COLOR_RE.match(candidate) else default
+
+
 class VisualElementInput(BaseModel):
     id: str = Field(
         ...,
         min_length=1,
+        max_length=64,
         description="Identifiant unique de l'élément (ex: 'rpi', 'led_1', 'wire_gpio17').",
     )
     kind: VisualElementKind = Field(
@@ -39,54 +55,72 @@ class VisualElementInput(BaseModel):
             "'sensor', 'button', 'wire' (câble), 'node', 'box', 'cylinder', 'sphere', 'arrow', 'label', 'svg_path'."
         ),
     )
-    label: str = Field(..., min_length=1, description="Nom lisible affiché sur le schéma.")
+    label: str = Field(
+        ..., min_length=1, max_length=120, description="Nom lisible affiché sur le schéma."
+    )
     sublabel: str | None = Field(
-        default=None, description="Sous-titre technique (ex: '330 Ω', 'GPIO 17')."
+        default=None, max_length=120, description="Sous-titre technique (ex: '330 Ω', 'GPIO 17')."
     )
     color: str = Field(
-        default="#38bdf8", description="Couleur hexadécimale (ex: '#ef4444', '#22c55e', '#38bdf8')."
+        default="#38bdf8",
+        max_length=32,
+        description="Couleur hexadécimale (ex: '#ef4444', '#22c55e', '#38bdf8').",
     )
     x: float = Field(default=50.0, description="Position horizontale normalisée 0..100.")
     y: float = Field(default=50.0, description="Position verticale normalisée 0..100.")
     z: float = Field(default=0.0, description="Hauteur 3D optionnelle (-20..20).")
     width: float = Field(default=14.0, description="Largeur normalisée (4..45).")
     height: float = Field(default=10.0, description="Hauteur normalisée (4..45).")
-    from_id: str | None = Field(default=None, description="ID source pour 'wire' ou 'arrow'.")
-    to_id: str | None = Field(default=None, description="ID cible pour 'wire' ou 'arrow'.")
-    from_pin: str | None = Field(
-        default=None, description="Broche de départ (ex: 'GPIO 17 (Pin 11)')."
+    from_id: str | None = Field(
+        default=None, max_length=64, description="ID source pour 'wire' ou 'arrow'."
     )
-    to_pin: str | None = Field(default=None, description="Broche d'arrivée (ex: 'Anode (+)').")
-    svg_path: str | None = Field(default=None, description="Chemin SVG optionnel pour 'svg_path'.")
+    to_id: str | None = Field(
+        default=None, max_length=64, description="ID cible pour 'wire' ou 'arrow'."
+    )
+    from_pin: str | None = Field(
+        default=None, max_length=120, description="Broche de départ (ex: 'GPIO 17 (Pin 11)')."
+    )
+    to_pin: str | None = Field(
+        default=None, max_length=120, description="Broche d'arrivée (ex: 'Anode (+)')."
+    )
+    svg_path: str | None = Field(
+        default=None, max_length=2000, description="Chemin SVG optionnel pour 'svg_path'."
+    )
 
 
 class VisualStepInput(BaseModel):
-    title: str = Field(..., min_length=1, description="Titre court de l'étape.")
+    title: str = Field(..., min_length=1, max_length=160, description="Titre court de l'étape.")
     spoken_text: str = Field(
         ...,
         min_length=1,
+        max_length=600,
         description="Phrase complète et concise que Jarvis prononce à voix haute pendant cette étape.",
     )
     annotation: str = Field(
-        default="", description="Note technique courte affichée en badge sur le canevas."
+        default="",
+        max_length=200,
+        description="Note technique courte affichée en badge sur le canevas.",
     )
     reveal_elements: list[str] = Field(
         default_factory=list,
+        max_length=80,
         description="IDs des composants/câbles qui apparaissent à cette étape.",
     )
     highlight_elements: list[str] = Field(
         default_factory=list,
+        max_length=80,
         description="IDs des éléments mis en avant (focus caméra / halo) à cette étape.",
     )
     active_connections: list[str] = Field(
         default_factory=list,
+        max_length=80,
         description="IDs des câbles/flèches où circule un flux animé à cette étape.",
     )
 
 
 class PresentVisualArtifactArgs(BaseModel):
-    title: str = Field(..., min_length=1, description="Titre du montage ou schéma.")
-    subtitle: str = Field(default="", description="Sous-titre bref.")
+    title: str = Field(..., min_length=1, max_length=160, description="Titre du montage ou schéma.")
+    subtitle: str = Field(default="", max_length=240, description="Sous-titre bref.")
     mode: Literal["2d", "3d"] = Field(
         default="3d",
         description="Mode initial : '3d' pour un montage matériel/circuit ou objet 3D, '2d' pour un schéma/flux/motion.",
@@ -98,11 +132,13 @@ class PresentVisualArtifactArgs(BaseModel):
     elements: list[VisualElementInput] = Field(
         ...,
         min_length=1,
+        max_length=80,
         description="Liste des composants, blocs et connexions du montage.",
     )
     steps: list[VisualStepInput] = Field(
         ...,
         min_length=1,
+        max_length=30,
         description="Étapes séquentielles synchronisées avec la voix.",
     )
     auto_play: bool = Field(
@@ -142,7 +178,7 @@ class VisualArtifactToolkit:
                 kind=el.kind,
                 label=el.label,
                 sublabel=el.sublabel,
-                color=el.color or "#38bdf8",
+                color=_safe_color(el.color),
                 x=_clamp_pct(el.x),
                 y=_clamp_pct(el.y),
                 z=max(-25.0, min(25.0, float(el.z))),
