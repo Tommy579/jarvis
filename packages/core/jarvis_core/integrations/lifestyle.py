@@ -27,8 +27,9 @@ class SpotifyIntegration(BaseIntegration):
 
     def __init__(self, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = True
         self.access_token = os.environ.get("SPOTIFY_ACCESS_TOKEN", "")
-        self.connected = bool(self.access_token or os.environ.get("SPOTIFY_CLIENT_ID"))
+        self.connected = bool(self.access_token)
 
     def is_oauth_client_configured(self) -> bool:
         return bool(

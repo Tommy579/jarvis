@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import hashlib
 import hmac
 import html
 import json
@@ -27,7 +28,7 @@ from urllib.parse import quote
 
 import httpx
 import yaml
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
@@ -115,6 +116,8 @@ from ..integrations.base import (
     build_google_oauth_authorize_url,
     build_microsoft_oauth_authorize_url,
     build_spotify_oauth_authorize_url,
+    default_oauth_redirect_uri,
+    write_secret_env_0600,
 )
 from ..integrations.trading_bot import format_trading_webhook_event
 from ..llm.gemini import GeminiProvider
@@ -127,7 +130,14 @@ from ..onboarding.service import OnboardingService
 from ..runtime import JarvisRuntime, build_runtime
 from ..scheduler.briefings import agenda_from_events, build_evening_review, build_morning_briefing
 from ..scheduler.routines import RoutineScheduler
-from ..security import SecretStore, SlidingWindowRateLimiter, verify_action_token
+from ..security import (
+    SecretStore,
+    SlidingWindowRateLimiter,
+    redact_sensitive_text,
+    sign_session_cookie,
+    verify_action_token,
+    verify_session_cookie,
+)
 from ..updates import check_for_update
 from ..voice_profiles import VoiceProfileStore, decode_audio_to_16k
 
@@ -300,7 +310,8 @@ class JarvisCoreState:
     ) -> None:
         base_root = _resolve_base_root()
         self.base_root = base_root
-        self.env_file = base_root / ".env"
+        env_override = os.environ.get("JARVIS_ENV_PATH", "").strip()
+        self.env_file = Path(env_override).expanduser() if env_override else (base_root / ".env")
         self._is_isolated_test = data_dir is not None
         self._custom_data_dir = data_dir is not None
         if (
@@ -344,7 +355,12 @@ class JarvisCoreState:
         self._ws_fanout_tasks: list[asyncio.Task[Any]] = []
         self._last_proactive_alert_ts: float = 0.0
         self._consumed_action_tokens: OrderedDict[str, float] = OrderedDict()
+        self._consumed_action_approvals: OrderedDict[str, float] = OrderedDict()
+        self._consumed_oauth_codes: OrderedDict[str, float] = OrderedDict()
         self._action_rate_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60.0)
+        self._auth_fail_limiter = SlidingWindowRateLimiter(max_requests=30, window_seconds=60.0)
+        self._oauth_rate_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60.0)
+        self._webhook_rate_limiter = SlidingWindowRateLimiter(max_requests=30, window_seconds=60.0)
         self.integrations = IntegrationRegistry(
             [
                 GoogleCalendarIntegration(),
@@ -1381,11 +1397,28 @@ def _build_routine_scheduler(state: "JarvisCoreState") -> "RoutineScheduler":
     return scheduler
 
 
+_SESSION_COOKIE_NAME = "jarvis_session"
+_SESSION_COOKIE_TTL_SECONDS = 43200
+_OAUTH_CALLBACK_PATH_RE = re.compile(r"^/api/oauth/[a-z0-9_-]{1,32}/callback$")
+_LOOPBACK_PEERS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_TRUSTED_REDIRECT_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+_MAX_WEBHOOK_BODY_BYTES = 65_536
+_MAX_OAUTH_STATES = 128
+
+
+def _is_valid_api_token(expected: str, candidate: str | None) -> bool:
+    if not expected:
+        return True
+    if not candidate:
+        return False
+    return hmac.compare_digest(candidate.strip(), expected)
+
+
 def _check_token(request_token: str | None) -> None:
     expected = os.environ.get("JARVIS_API_TOKEN", "").strip()
     if not expected:
         return
-    if not request_token or not hmac.compare_digest(request_token.strip(), expected):
+    if not _is_valid_api_token(expected, request_token):
         raise HTTPException(status_code=401, detail="Jeton d'acces invalide ou manquant.")
 
 
@@ -2112,32 +2145,97 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
+    @application.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
+        logger.exception("Erreur interne non geree sur %s %s", request.method, request.url.path)
+        return Response(
+            content=json.dumps({"detail": "Erreur interne du serveur."}),
+            status_code=500,
+            media_type="application/json",
+        )
+
     @application.middleware("http")
     async def security_headers_middleware(request: Request, call_next: Any) -> Response:
-        is_dedicated_webhook = request.url.path == "/api/webhooks/trading" and bool(
-            os.environ.get("TRADER_WEBHOOK_TOKEN", "").strip()
-        )
+        path = request.url.path
+        peer = request.client.host if request.client else "unknown"
+        expected_api_tok = os.environ.get("JARVIS_API_TOKEN", "").strip()
+        is_public_health = path == "/api/health" and request.method in ("GET", "HEAD")
+        is_oauth_callback = request.method == "GET" and bool(_OAUTH_CALLBACK_PATH_RE.match(path))
+        is_trading_webhook = path == "/api/webhooks/trading"
+        used_query_token = False
+        bootstrap_session_cookie = False
+
         if (
-            request.url.path.startswith("/api/")
-            and request.url.path != "/api/health"
-            and not request.url.path.startswith("/api/oauth/")
-            and not is_dedicated_webhook
+            path.startswith("/api/")
+            and not is_public_health
+            and not is_oauth_callback
+            and not is_trading_webhook
         ):
-            auth = request.headers.get("Authorization", "")
-            token = (
-                auth[7:].strip()
-                if auth.startswith("Bearer ")
-                else request.query_params.get("token")
-            )
-            try:
-                _check_token(token)
-            except HTTPException as exc:
+            if expected_api_tok and core_state._auth_fail_limiter.is_limited(f"auth:{peer}"):
                 return Response(
-                    content=json.dumps({"detail": exc.detail}),
-                    status_code=exc.status_code,
+                    content=json.dumps(
+                        {"detail": "Trop de tentatives d'authentification echouees."}
+                    ),
+                    status_code=429,
                     media_type="application/json",
                 )
-        response = await call_next(request)
+            auth = request.headers.get("Authorization", "")
+            bearer_tok = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+            cookie_val = request.cookies.get(_SESSION_COOKIE_NAME)
+            query_tok = (
+                request.query_params.get("token") if request.method in ("GET", "HEAD") else None
+            )
+
+            authenticated = not expected_api_tok
+            if expected_api_tok:
+                if bearer_tok and _is_valid_api_token(expected_api_tok, bearer_tok):
+                    authenticated = True
+                elif cookie_val and verify_session_cookie(expected_api_tok, cookie_val):
+                    authenticated = True
+                elif query_tok and _is_valid_api_token(expected_api_tok, query_tok):
+                    authenticated = True
+                    used_query_token = True
+                    bootstrap_session_cookie = True
+
+            if not authenticated:
+                if expected_api_tok:
+                    core_state._auth_fail_limiter.allow(f"auth:{peer}")
+                return Response(
+                    content=json.dumps({"detail": "Jeton d'acces invalide ou manquant."}),
+                    status_code=401,
+                    media_type="application/json",
+                )
+        elif (
+            expected_api_tok
+            and request.method in ("GET", "HEAD")
+            and "token" in request.query_params
+        ):
+            nav_tok = request.query_params.get("token")
+            if _is_valid_api_token(expected_api_tok, nav_tok):
+                used_query_token = True
+                bootstrap_session_cookie = True
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("Erreur interne non geree sur %s %s", request.method, path)
+            response = Response(
+                content=json.dumps({"detail": "Erreur interne du serveur."}),
+                status_code=500,
+                media_type="application/json",
+            )
+        if used_query_token:
+            response.headers["Cache-Control"] = "no-store, private"
+        if bootstrap_session_cookie and expected_api_tok:
+            response.set_cookie(
+                key=_SESSION_COOKIE_NAME,
+                value=sign_session_cookie(expected_api_tok, ttl=_SESSION_COOKIE_TTL_SECONDS),
+                max_age=_SESSION_COOKIE_TTL_SECONDS,
+                httponly=True,
+                samesite="strict",
+                secure=request.url.scheme == "https",
+                path="/",
+            )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -2148,6 +2246,29 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:;"
         )
         return response
+
+    @application.post("/api/auth/session")
+    def create_auth_session(request: Request, response: Response) -> dict[str, Any]:
+        expected = os.environ.get("JARVIS_API_TOKEN", "").strip()
+        if expected:
+            cookie_val = sign_session_cookie(expected, ttl=_SESSION_COOKIE_TTL_SECONDS)
+            response.set_cookie(
+                key=_SESSION_COOKIE_NAME,
+                value=cookie_val,
+                max_age=_SESSION_COOKIE_TTL_SECONDS,
+                httponly=True,
+                samesite="strict",
+                secure=request.url.scheme == "https",
+                path="/",
+            )
+        response.headers["Cache-Control"] = "no-store, private"
+        return {"ok": True, "ttl_seconds": _SESSION_COOKIE_TTL_SECONDS}
+
+    @application.post("/api/auth/logout")
+    def logout_auth_session(response: Response) -> dict[str, bool]:
+        response.delete_cookie(key=_SESSION_COOKIE_NAME, path="/")
+        response.headers["Cache-Control"] = "no-store, private"
+        return {"ok": True}
 
     @application.get("/api/health")
     def health() -> dict[str, str]:
@@ -2231,7 +2352,10 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Erreur transcription : {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Erreur transcription : {redact_sensitive_text(str(exc))}",
+            ) from exc
 
     @application.post("/api/voice/wake-check")
     async def wake_check_voice(payload: VoiceTranscribeRequest) -> dict[str, str]:
@@ -2245,7 +2369,10 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Erreur wake-check : {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Erreur wake-check : {redact_sensitive_text(str(exc))}",
+            ) from exc
 
     @application.post("/api/voice/speak")
     async def speak_voice(payload: VoiceSpeakRequest) -> dict[str, Any]:
@@ -2597,18 +2724,45 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.post("/api/approvals/{approval_id}", response_model=ApprovalItem)
     async def decide_approval(approval_id: str, payload: ApprovalDecisionRequest) -> ApprovalItem:
-        item = core_state.db.decide_approval(approval_id, payload.approved)
+        existing = next((a for a in core_state.db.list_approvals() if a.id == approval_id), None)
+        runtime = core_state.ensure_runtime()
+        mem_req = runtime.approvals.get_request(approval_id)
+        if existing is None and mem_req is None:
+            raise HTTPException(status_code=404, detail="Demande d'approbation introuvable.")
+
+        current_status = mem_req.status if mem_req is not None else existing.status  # type: ignore[union-attr]
+        if current_status != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Demande d'approbation deja resolue ({current_status}).",
+            )
+
+        expires_raw = mem_req.expires_at if mem_req is not None else existing.expires_at  # type: ignore[union-attr]
+        if datetime.now(timezone.utc) >= datetime.fromisoformat(expires_raw):
+            if mem_req is not None:
+                runtime.approvals.resolve(approval_id, False)
+            core_state.db.decide_approval(approval_id, False)
+            raise HTTPException(status_code=410, detail="Demande d'approbation expiree.")
+
+        effective_approved = bool(payload.approved)
+        if mem_req is not None:
+            resolved_req = runtime.approvals.resolve(approval_id, effective_approved)
+            if resolved_req.status == "expired":
+                core_state.db.decide_approval(approval_id, False)
+                raise HTTPException(status_code=410, detail="Demande d'approbation expiree.")
+            effective_approved = resolved_req.status == "approved"
+
+        core_state._consumed_action_approvals[approval_id] = time.time()
+        while len(core_state._consumed_action_approvals) > 1000:
+            core_state._consumed_action_approvals.popitem(last=False)
+
+        item = core_state.db.decide_approval(approval_id, effective_approved)
         if not item:
             raise HTTPException(status_code=404, detail="Demande d'approbation introuvable.")
-        runtime = core_state.ensure_runtime()
-        try:
-            runtime.approvals.resolve(approval_id, payload.approved)
-        except KeyError:
-            pass
-        _broadcast_approval_resolved(approval_id, payload.approved, "web")
+        _broadcast_approval_resolved(approval_id, effective_approved, "web")
         return item
 
-    # === Actions signées (SMS / Push ntfy) ===
+    # === Actions signees (SMS / Push ntfy) ===
 
     def _action_token_error_response() -> Response:
         html_err = (
@@ -2617,11 +2771,35 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center;} .card{background:#1e293b;padding:30px;border-radius:16px;max-width:400px;border:1px solid #334155;} h2{color:#f43f5e;margin-top:0;} p{color:#94a3b8;font-size:16px;}</style></head>"
             "<body><div class='card'><h2>Lien expiré ou invalide</h2><p>Ce jeton d'action est introuvable, expiré ou déjà utilisé.</p></div></body></html>"
         )
-        return Response(content=html_err, status_code=400, media_type="text/html")
+        return Response(
+            content=html_err,
+            status_code=400,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     def _get_action_token_secret() -> str:
         runtime = core_state.ensure_runtime()
         return runtime.action_token_secret or core_state.secrets.get_secret("ACTION_TOKEN_SECRET")
+
+    def _is_approval_still_actionable(approval_id: str) -> bool:
+        if approval_id in core_state._consumed_action_approvals:
+            return False
+        runtime = core_state.ensure_runtime()
+        mem_req = runtime.approvals.get_request(approval_id)
+        if mem_req is not None:
+            if mem_req.status != "pending":
+                return False
+            if datetime.now(timezone.utc) >= datetime.fromisoformat(mem_req.expires_at):
+                return False
+        if core_state.db and hasattr(core_state.db, "list_approvals"):
+            db_item = next((a for a in core_state.db.list_approvals() if a.id == approval_id), None)
+            if db_item is not None:
+                if db_item.status != "pending":
+                    return False
+                if datetime.now(timezone.utc) >= datetime.fromisoformat(db_item.expires_at):
+                    return False
+        return True
 
     @application.get("/actions/{token}", response_class=Response)
     async def confirm_action_token_page(token: str, request: Request) -> Response:
@@ -2637,7 +2815,9 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         if not verified:
             return _action_token_error_response()
 
-        _approval_id, action = verified
+        approval_id, action = verified
+        if not _is_approval_still_actionable(approval_id):
+            return _action_token_error_response()
         approved = action == "approve"
         label = "Approuver l'action" if approved else "Refuser l'action"
         btn_color = "#10b981" if approved else "#f43f5e"
@@ -2650,7 +2830,12 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             f"<form method='post' action='/actions/{safe_token}'><button type='submit'>{label}</button></form>"
             "</div></body></html>"
         )
-        return Response(content=html_confirm, status_code=200, media_type="text/html")
+        return Response(
+            content=html_confirm,
+            status_code=200,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @application.post("/actions/{token}", response_class=Response)
     async def handle_action_token(token: str, request: Request) -> Response:
@@ -2666,19 +2851,28 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         if not verified:
             return _action_token_error_response()
 
+        approval_id, action = verified
+        if not _is_approval_still_actionable(approval_id):
+            return _action_token_error_response()
+
         core_state._consumed_action_tokens[token] = time.time()
         while len(core_state._consumed_action_tokens) > 1000:
             core_state._consumed_action_tokens.popitem(last=False)
+        core_state._consumed_action_approvals[approval_id] = time.time()
+        while len(core_state._consumed_action_approvals) > 1000:
+            core_state._consumed_action_approvals.popitem(last=False)
 
-        approval_id, action = verified
         approved = action == "approve"
         if core_state.runtime and core_state.runtime.approvals:
             try:
-                core_state.runtime.approvals.resolve(
+                resolved_req = core_state.runtime.approvals.resolve(
                     request_id=approval_id,
                     approved=approved,
                     channel="action_link",
                 )
+                if resolved_req.status == "expired":
+                    return _action_token_error_response()
+                approved = resolved_req.status == "approved"
             except KeyError:
                 pass
 
@@ -2699,7 +2893,12 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             f"<style>body{{font-family:-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center;}} .card{{background:#1e293b;padding:30px;border-radius:16px;max-width:400px;border:1px solid #334155;}} h2{{color:{color};margin-top:0;}} p{{color:#94a3b8;font-size:16px;}}</style></head>"
             f"<body><div class='card'><h2>{title}</h2><p>{desc}</p></div></body></html>"
         )
-        return Response(content=html_ok, status_code=200, media_type="text/html")
+        return Response(
+            content=html_ok,
+            status_code=200,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     # === Politique & Ordres de notification ===
 
@@ -2741,14 +2940,44 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.post("/api/webhooks/trading")
     async def receive_trading_webhook(request: Request) -> dict[str, Any]:
+        peer = request.client.host if request.client else "unknown"
+        if not core_state._webhook_rate_limiter.allow(f"webhook:{peer}"):
+            raise HTTPException(status_code=429, detail="Trop de requetes sur le webhook trading.")
+
         expected_token = os.environ.get("TRADER_WEBHOOK_TOKEN", "").strip()
+        fallback_api_token = os.environ.get("JARVIS_API_TOKEN", "").strip()
+        allow_insecure = os.environ.get("JARVIS_ALLOW_INSECURE", "").strip() == "1"
+        auth_header = request.headers.get("authorization", "")
+        bearer_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+
         if expected_token:
-            auth_header = request.headers.get("authorization", "")
-            token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-            if not token or not hmac.compare_digest(token, expected_token):
+            if not bearer_token or not hmac.compare_digest(bearer_token, expected_token):
+                core_state._auth_fail_limiter.allow(f"auth:{peer}")
                 raise HTTPException(status_code=401, detail="Jeton webhook invalide.")
+        elif fallback_api_token:
+            if not bearer_token or not hmac.compare_digest(bearer_token, fallback_api_token):
+                core_state._auth_fail_limiter.allow(f"auth:{peer}")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Jeton Bearer requis (configurez TRADER_WEBHOOK_TOKEN).",
+                )
+        elif allow_insecure:
+            if peer not in _LOOPBACK_PEERS:
+                raise HTTPException(
+                    status_code=403,
+                    detail="TRADER_WEBHOOK_TOKEN requis hors boucle locale.",
+                )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="Webhook trading desactive : configurez TRADER_WEBHOOK_TOKEN.",
+            )
+
+        raw_bytes = await request.body()
+        if len(raw_bytes) > _MAX_WEBHOOK_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Corps du webhook trop volumineux.")
         try:
-            body = await request.json()
+            body = json.loads(raw_bytes.decode("utf-8"))
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Corps JSON invalide.") from exc
         if not isinstance(body, dict):
@@ -2779,16 +3008,16 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     def _persist_env(key: str, value: str) -> None:
         os.environ[key] = value
         if not core_state._is_isolated_test:
-            core_state.env_file.touch(exist_ok=True)
-            set_key(str(core_state.env_file), key, value)
+            write_secret_env_0600(core_state.env_file, key, value)
 
     async def _run_connector_sync(connector: Any) -> dict[str, Any]:
         try:
             res = await connector.sync(core_state.db)
         except Exception as exc:
+            safe_detail = redact_sensitive_text(str(exc))
             raise HTTPException(
                 status_code=502,
-                detail=f"Echec de synchronisation {connector.name} : {exc}",
+                detail=f"Echec de synchronisation {connector.name} : {safe_detail}",
             ) from exc
         if isinstance(res, dict) and res.get("error"):
             raise HTTPException(status_code=400, detail=str(res["error"]))
@@ -2919,9 +3148,19 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         ]
         for key in expired:
             core_state.oauth_states.pop(key, None)
+        while len(core_state.oauth_states) > _MAX_OAUTH_STATES:
+            oldest_key = min(
+                core_state.oauth_states.keys(),
+                key=lambda k: float(core_state.oauth_states[k].get("created_at", 0.0)),
+            )
+            core_state.oauth_states.pop(oldest_key, None)
 
     def _build_oauth_redirect_uri(request: Request, provider: str) -> str:
-        return f"{str(request.base_url).rstrip('/')}/api/oauth/{provider}/callback"
+        req_host = (request.base_url.hostname or "").strip().lower().strip(".")
+        req_scheme = (request.base_url.scheme or "http").lower()
+        if req_scheme in {"http", "https"} and req_host in _TRUSTED_REDIRECT_HOSTS:
+            return f"{str(request.base_url).rstrip('/')}/api/oauth/{provider}/callback"
+        return default_oauth_redirect_uri(provider)
 
     @application.post(
         "/api/integrations/{integration_id}/configure", response_model=IntegrationInfo
@@ -3079,6 +3318,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                         "redirect_uri": redirect_uri,
                         "created_at": time.time(),
                     }
+                    _cleanup_expired_oauth_states()
                     return {
                         "url": url_builder(client_id, redirect_uri, state=state_tok),
                         "mode": "redirect",
@@ -3097,20 +3337,14 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     @application.get("/api/oauth/{provider}/callback")
     async def oauth_callback(
         provider: str,
+        request: Request,
         state: str = "",
         code: str = "",
         error: str = "",
     ) -> RedirectResponse:
-        _cleanup_expired_oauth_states()
-        state_entry = core_state.oauth_states.pop(state, None) if state else None
-        if not state_entry or state_entry.get("provider") != provider:
-            raise HTTPException(status_code=400, detail="Parametre state OAuth invalide ou expire.")
-        if error:
-            return RedirectResponse(
-                f"/config?oauth=error&reason={quote(error, safe='')}", status_code=302
-            )
-        if not code:
-            raise HTTPException(status_code=400, detail="Code d'autorisation OAuth manquant.")
+        peer = request.client.host if request.client else "unknown"
+        if not core_state._oauth_rate_limiter.allow(f"oauth:{peer}"):
+            raise HTTPException(status_code=429, detail="Trop de tentatives OAuth.")
 
         oauth_endpoints = {
             "google": (
@@ -3132,31 +3366,70 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         if provider not in oauth_endpoints:
             raise HTTPException(status_code=404, detail="Fournisseur OAuth inconnu.")
 
+        _cleanup_expired_oauth_states()
+        state_entry = core_state.oauth_states.pop(state, None) if state else None
+        if not state_entry or state_entry.get("provider") != provider:
+            raise HTTPException(status_code=400, detail="Parametre state OAuth invalide ou expire.")
+        if error:
+            clean_err = re.sub(r"[^a-zA-Z0-9_.-]", "_", error)[:64]
+            return RedirectResponse(
+                f"/config?oauth=error&reason={quote(clean_err, safe='')}",
+                status_code=302,
+                headers={"Cache-Control": "no-store"},
+            )
+        clean_code = code.strip()
+        if not clean_code or len(clean_code) > 2048:
+            raise HTTPException(status_code=400, detail="Code d'autorisation OAuth manquant.")
+
+        code_digest = hashlib.sha256(f"{provider}:{clean_code}".encode("utf-8")).hexdigest()
+        if code_digest in core_state._consumed_oauth_codes:
+            raise HTTPException(status_code=400, detail="Code d'autorisation OAuth deja utilise.")
+        core_state._consumed_oauth_codes[code_digest] = time.time()
+        while len(core_state._consumed_oauth_codes) > 512:
+            core_state._consumed_oauth_codes.popitem(last=False)
+
         token_url, id_env, secret_env = oauth_endpoints[provider]
         client_id = os.environ.get(id_env, "").strip()
         client_secret = os.environ.get(secret_env, "").strip()
         if not client_id or not client_secret:
             raise HTTPException(
                 status_code=400,
-                detail=f"{id_env} ou {secret_env} manquant.",
+                detail="Identifiants OAuth client non configures pour ce fournisseur.",
             )
 
         form_data = {
-            "code": code,
+            "code": clean_code,
             "client_id": client_id,
             "client_secret": client_secret,
             "redirect_uri": str(state_entry["redirect_uri"]),
             "grant_type": "authorization_code",
         }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(token_url, data=form_data)
-        if resp.status_code >= 400:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(token_url, data=form_data)
+        except Exception as exc:
+            logger.warning(
+                "Erreur reseau echange OAuth %s: %s", provider, redact_sensitive_text(str(exc))
+            )
             raise HTTPException(
                 status_code=502,
-                detail=f"Echec echange OAuth {provider} ({resp.status_code}) : {resp.text[:240]}",
+                detail=f"Echec de connexion au fournisseur OAuth {provider}.",
+            ) from None
+        if resp.status_code >= 400:
+            logger.warning("Rejet echange OAuth %s (HTTP %s)", provider, resp.status_code)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Echec echange OAuth {provider} ({resp.status_code}).",
             )
 
-        token_data = resp.json()
+        try:
+            token_data = resp.json()
+        except Exception:
+            raise HTTPException(
+                status_code=502, detail=f"Reponse OAuth {provider} invalide."
+            ) from None
+        if not isinstance(token_data, dict):
+            raise HTTPException(status_code=502, detail=f"Reponse OAuth {provider} invalide.")
         access_token = str(token_data.get("access_token", "")).strip()
         refresh_token = str(token_data.get("refresh_token", "")).strip()
         if not access_token:
@@ -3179,7 +3452,11 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                 spot.toggle(True)
                 core_state.save_integrations_state()
 
-        return RedirectResponse(f"/config?oauth=success&provider={provider}", status_code=302)
+        return RedirectResponse(
+            f"/config?oauth=success&provider={provider}",
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @application.get("/api/sensors/blacklist", response_model=BlacklistConfig)
     def get_sensors_blacklist() -> BlacklistConfig:
@@ -3441,11 +3718,25 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        token = websocket.query_params.get("token")
+        peer = websocket.client.host if websocket.client else "unknown"
         expected = os.environ.get("JARVIS_API_TOKEN", "").strip()
-        if expected and (not token or not hmac.compare_digest(token.strip(), expected)):
-            await websocket.close(code=4401)
-            return
+        if expected:
+            if core_state._auth_fail_limiter.is_limited(f"auth:{peer}"):
+                await websocket.close(code=4429)
+                return
+            ws_auth = websocket.headers.get("authorization", "")
+            bearer_tok = ws_auth[7:].strip() if ws_auth.lower().startswith("bearer ") else None
+            query_tok = websocket.query_params.get("token")
+            cookie_val = websocket.cookies.get(_SESSION_COOKIE_NAME)
+            ws_ok = (
+                (bearer_tok and _is_valid_api_token(expected, bearer_tok))
+                or (cookie_val and verify_session_cookie(expected, cookie_val))
+                or (query_tok and _is_valid_api_token(expected, query_tok))
+            )
+            if not ws_ok:
+                core_state._auth_fail_limiter.allow(f"auth:{peer}")
+                await websocket.close(code=4401)
+                return
 
         runtime = core_state.ensure_runtime()
         await websocket.accept()

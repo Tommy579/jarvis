@@ -1,14 +1,28 @@
-"""Gestionnaire d'approbations asynchrones (expiration 2 min, PIN vocal niveau 3)."""
+"""Gestionnaire d'approbations asynchrones (expiration, integrite anti-TOCTOU, PIN vocal niveau 3)."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
+import json
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from jarvis_shared.models import ApprovalRequest, RiskLevel
+
+
+def compute_approval_digest(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Calcule l'empreinte SHA-256 canonique liant l'outil et ses arguments exacts."""
+    canonical = json.dumps(
+        {"tool": tool_name, "args": arguments},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class ApprovalManager:
@@ -26,6 +40,8 @@ class ApprovalManager:
         self._requests: dict[str, ApprovalRequest] = {}
         self._events: dict[str, asyncio.Event] = {}
         self._loops: dict[str, asyncio.AbstractEventLoop] = {}
+        self._digests: dict[str, str] = {}
+        self._consumed: set[str] = set()
 
     def _wake(self, request_id: str) -> None:
         ev = self._events.get(request_id)
@@ -53,6 +69,8 @@ class ApprovalManager:
                 self._requests.pop(req_id, None)
                 self._events.pop(req_id, None)
                 self._loops.pop(req_id, None)
+                self._digests.pop(req_id, None)
+                self._consumed.discard(req_id)
 
     def create_request(
         self,
@@ -61,6 +79,8 @@ class ApprovalManager:
         description: str,
         risk: RiskLevel,
         exact_command: str | None = None,
+        *,
+        raw_arguments: dict[str, Any] | None = None,
     ) -> ApprovalRequest:
         self._prune_old_requests()
         expires = (datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds)).isoformat()
@@ -72,7 +92,9 @@ class ApprovalManager:
             risk=risk,
             expires_at=expires,
         )
+        bound_args = raw_arguments if raw_arguments is not None else arguments
         self._requests[req.id] = req
+        self._digests[req.id] = compute_approval_digest(tool_name, bound_args)
         self._events[req.id] = asyncio.Event()
         try:
             self._loops[req.id] = asyncio.get_running_loop()
@@ -135,6 +157,34 @@ class ApprovalManager:
             if req.status == "pending":
                 req.status = "expired"
         return req.status
+
+    def get_request(self, request_id: str) -> ApprovalRequest | None:
+        return self._requests.get(request_id)
+
+    def consume_approved(
+        self,
+        request_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> bool:
+        """Consomme atomiquement une approbation validee en verifiant l'absence de TOCTOU et d'expiration."""
+        if request_id in self._consumed:
+            return False
+        req = self._requests.get(request_id)
+        expected_digest = self._digests.get(request_id)
+        if not req or not expected_digest or req.status != "approved":
+            return False
+        if req.tool_name != tool_name:
+            return False
+        now = datetime.now(timezone.utc)
+        if now >= datetime.fromisoformat(req.expires_at):
+            req.status = "expired"
+            return False
+        actual_digest = compute_approval_digest(tool_name, arguments)
+        if not hmac.compare_digest(expected_digest, actual_digest):
+            return False
+        self._consumed.add(request_id)
+        return True
 
     def list_pending(self) -> list[ApprovalRequest]:
         now = datetime.now(timezone.utc)
