@@ -43,9 +43,17 @@ ENV/
 
 # API Keys & Personal Data
 .env
+.env.*
+!.env.example
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite3
+*.pem
+*.key
+secrets.enc
 jarvis_profile.json
 jarvis-windows/jarvis_profile.json
 jarvis-windows/*.db
