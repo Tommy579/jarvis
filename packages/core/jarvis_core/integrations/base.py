@@ -53,7 +53,8 @@ MICROSOFT_OAUTH_SCOPES = (
 
 def default_oauth_redirect_uri(provider: str) -> str:
     host = os.environ.get("JARVIS_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    if host == "0.0.0.0":
+    # Valeur comparee, pas un bind : faux positif bandit.
+    if host == "0.0.0.0":  # nosec B104
         host = "127.0.0.1"
     port = os.environ.get("JARVIS_PORT", "8765").strip() or "8765"
     return f"http://{host}:{port}/api/oauth/{provider}/callback"

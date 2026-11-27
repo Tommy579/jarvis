@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import glob
 import os
+import stat
+import tempfile
 import time
 from typing import Any
 
@@ -36,21 +38,29 @@ def get_antigravity_status() -> dict[str, Any]:
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
-    # 2. Trouver le fichier de log le plus récent dans ~/.gemini/antigravity-cli/log/ ou /tmp
+    # 2. Trouver le fichier de log le plus recent dans ~/.gemini/antigravity-cli/log/ ou le
+    # repertoire temporaire du systeme (jamais /tmp en dur : TMPDIR peut etre prive).
     log_dirs = [
         os.path.expanduser("~/.gemini/antigravity-cli/log"),
-        "/tmp",
+        tempfile.gettempdir(),
     ]
     latest_log: str | None = None
     latest_mtime = 0.0
 
     for d in log_dirs:
         if os.path.exists(d) and os.path.isdir(d):
-            # Cherche tous les fichiers .log ou dans /tmp des motifs agy
+            # Cherche tous les fichiers .log ou dans le repertoire temporaire des motifs agy
             pattern = os.path.join(d, "*.log")
             for log_path in glob.glob(pattern):
                 try:
-                    mtime = os.path.getmtime(log_path)
+                    info = os.lstat(log_path)
+                except OSError:
+                    continue
+                # Un autre utilisateur local ne doit pas pouvoir injecter un faux statut via /tmp.
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                    continue
+                try:
+                    mtime = info.st_mtime
                     if mtime > latest_mtime:
                         latest_mtime = mtime
                         latest_log = log_path

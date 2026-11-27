@@ -83,13 +83,13 @@ def log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     real_glob = glob.glob
 
     def fake_glob(pattern: str) -> list[str]:
-        # Le module scanne en dur "/tmp" : on l'isole vers le dossier temporaire du test.
-        # Comparaison sur le dossier parent exact, car tmp_path est lui-meme sous /tmp.
-        if os.path.dirname(pattern) == "/tmp":
-            pattern = os.path.join(str(tmp_logs), os.path.basename(pattern))
+        # Le module scanne le repertoire temporaire du systeme : on l'isole vers le
+        # dossier du test (tmp_path est lui-meme sous TMPDIR).
         return real_glob(pattern)
 
     monkeypatch.setattr(ags.os.path, "expanduser", fake_expanduser)
+    # tempfile.gettempdir() est appele a chaque scan : on le redirige vers le dossier isole.
+    monkeypatch.setattr(ags.tempfile, "gettempdir", lambda: str(tmp_logs))
     monkeypatch.setattr(ags.glob, "glob", fake_glob)
     return fake_log
 
@@ -337,6 +337,8 @@ def test_missing_log_directories_are_tolerated(
         return real_glob(pattern)
 
     monkeypatch.setattr(ags.os.path, "expanduser", fake_expanduser)
+    # Repertoire temporaire inexistant : aucun log ne doit etre trouve.
+    monkeypatch.setattr(ags.tempfile, "gettempdir", lambda: str(tmp_path / "no-tmp-dir"))
     monkeypatch.setattr(ags.glob, "glob", fake_glob)
 
     result = get_antigravity_status()

@@ -85,12 +85,27 @@ PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m 
 env -u PYTHONPATH .venv/bin/python -m ruff check packages tests evals
 env -u PYTHONPATH .venv/bin/python -m ruff format --check packages tests evals
 PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m mypy
+make security   # bandit (moyenne+), pip-audit, npm audit
 cd web && npm run build && npx vitest run && npx playwright test
 ```
 
 La CI ajoute un job d'installation propre : les paquets sont installes dans un venv vierge avec
 leurs seules dependances declarees, puis `jarvis_core.api.server` doit s'importer. Un job
 `docker` construit l'image de production et verifie `/api/health`.
+
+## Sécurité
+
+Les audits par périmètre sont dans `docs/security/` (`carbon-report.md`, `neon-report.md`,
+`opus-report.md`) et les briefs correspondants à la racine (`SECURITY_CARBON.md`,
+`SECURITY_NEON.md`, `SECURITY_OPUS.md`).
+
+```bash
+make security   # bandit (severite moyenne+), pip-audit, npm audit
+```
+
+La CI exécute ces trois contrôles dans le job `security`, en plus des tests de non-régression
+`tests/test_security_*.py`. Signaler une vulnérabilité : voir `docs/security/` pour le format
+attendu (fichier:ligne, scénario, preuve, correctif).
 
 ## Exploitation : version, sauvegardes, diagnostic
 

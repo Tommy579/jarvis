@@ -2,9 +2,14 @@
 
 Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
-## [Non publie]
+## [Non publié]
 
 ### Ajoute
+
+- Audit de sécurité en trois périmètres (API/outils, injection/navigateur, données/infra) avec
+  rapports dans `docs/security/` et 28 constats corrigés, chacun couvert par un test.
+- CI `security` : bandit (sévérité moyenne et plus), `pip-audit`, `npm audit` ; cible `make security`.
+- Parsing RSS via `defusedxml` (XXE / entités) et révision épinglée du modèle WeSpeaker.
 
 - Documentation : captures d'ecran reelles (accueil, conversation, configuration, mobile), FAQ de
   depannage (`docs/FAQ.md`) et script de capture reproductible (`web/scripts/capture-screenshots.mjs`).
