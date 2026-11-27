@@ -12,10 +12,10 @@ DEFAULT_WIKI_PAGES: dict[str, str] = {
     "preferences.md": "# Preferences et gouts\n\n",
     "rules.md": (
         "# Regles procedurales pour Jarvis\n\n"
-        "- Ne jamais appeler entre 23h00 et 08h00 sauf alerte critique (niveau 4) ou panne serveur non acquittee après 20 min.\n"
+        "- Ne jamais interrompre entre 23h00 et 08h00 sauf alerte critique (niveau 4) ou panne serveur non acquittee après 20 min.\n"
         "- Toujours demander confirmation avant toute action de niveau 2 ou 3.\n"
         "- Concision universelle : quel que soit le modèle ou le canal, répondre de façon directe et concise en 1 à 3 phrases maximum. Si la réponse complète est trop longue, donner l'essentiel et terminer impérativement par '... [suite]'.\n"
-        "- Tâches complexes et sous-agents : pour les tâches complexes, le moteur principal (modèle choisi par l'utilisateur) orchestre et subdivise le travail en sous-agents via delegate_subagent et synthétise leurs résultats.\n"
+        "- Tâches complexes et sous-agents : pour les tâches complexes, le moteur principal (modèle choisi par l'utilisateur) orchestre et subdivise le travail en sous-agents via delegate_subagent et synthétise leurs résultats. Lorsqu'on délègue à `agy` ou `hermes` (`run_cli_subagent`), formuler un objectif global orienté résultat sans pré-explorer les fichiers ni imposer de micro-étapes ou commandes shell.\n"
     ),
     "projets/jarvis.md": "# Projet JARVIS 2.0 (Jarvis IRL)\n\n- Stack : Python 3.12 (jarvis-core, jarvis-desktop) + React/Three.js (jarvis-web)\n",
 }

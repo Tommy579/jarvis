@@ -41,7 +41,6 @@ def _parse_desktop_enabled(content: str) -> bool:
 
 def _render_desktop_entry(repo_root: Path, enabled: bool) -> str:
     launch_script = repo_root / "scripts" / "launch_jarvis_v2.sh"
-    icon_path = repo_root / "jarvis_icon.png"
     hidden_str = "false" if enabled else "true"
     gnome_str = "true" if enabled else "false"
     return (
@@ -53,11 +52,11 @@ def _render_desktop_entry(repo_root: Path, enabled: bool) -> str:
         "Comment=Interface web JARVIS 2.0\n"
         f"Exec={launch_script}\n"
         f"Path={repo_root}\n"
-        f"Icon={icon_path}\n"
+        f"Icon=jarvis\n"
         "Terminal=false\n"
         "Categories=Utility;Application;\n"
         "StartupNotify=true\n"
-        "StartupWMClass=chrome-localhost__-Default\n"
+        "StartupWMClass=chrome-localhost__8765-Default\n"
         f"Hidden={hidden_str}\n"
         "NoDisplay=false\n"
         f"X-GNOME-Autostart-enabled={gnome_str}\n"

@@ -17,7 +17,6 @@ const ROLE_LABELS: Record<string, string> = {
   vision: "Vision",
   memory: "Mémoire",
   deep: "Raisonnement profond",
-  voice_realtime: "Voix temps réel",
 };
 
 const THINKING_OPTIONS: { value: ThinkingMode; label: string }[] = [
@@ -1127,7 +1126,7 @@ export function ConfigPage() {
                   </label>
                 </div>
                 <div className="mono muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Plafond : {rulesQuery.data.max_calls_per_day} appels/jour (hors urgence 4) ·
+                  Urgence minimale la nuit : Niveau {policyQuery.data?.quiet_allow_urgency ?? 4} ·
                   Contacts prioritaires :{" "}
                   {rulesQuery.data.vip_contacts.map((v) => v.name).join(", ") || "aucun"}
                 </div>
@@ -1135,75 +1134,72 @@ export function ConfigPage() {
             </section>
           )}
 
-          {/* Téléphonie et ordres de notification */}
+          {/* Notifications, approbations et ordres persistants */}
           {policyQuery.data && (
             <section id="notifications" className="settings__section">
-              <h2>Téléphonie et ordres persistants</h2>
+              <h2>Notifications, approbations et ordres persistants</h2>
               <p>
-                Politique d'intrusion par téléphone, échelle d'escalade et consignes durables de notification.
+                Canaux d'alerte actifs (Interface Web, Voix locale, Telegram), délai d'approbation
+                et consignes durables de notification.
               </p>
 
               <div className="card stack">
                 <div className="cluster" style={{ justifyContent: "space-between" }}>
                   <div>
-                    <strong>Autoriser les appels téléphoniques</strong>
+                    <strong>Notifications proactives</strong>
                     <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
-                      Jarvis peut composer votre numéro pour une approbation ou une alerte critique.
+                      Active ou suspend l'envoi des alertes et rappels proactifs.
                     </div>
                   </div>
-                  <Segmented
-                    label="Politique d'appels"
-                    value={
-                      !policyQuery.data.allow_calls
-                        ? policyQuery.data.allow_emergency_calls
-                          ? "emergency"
-                          : "never"
-                        : "all"
-                    }
+                  <Segmented<"on" | "off">
+                    label="Notifications proactives"
+                    value={policyQuery.data.enabled ? "on" : "off"}
                     options={[
-                      { value: "all", label: "Urgent & Critique" },
-                      { value: "emergency", label: "Urgence extrême (N4)" },
-                      { value: "never", label: "Désactivé" },
+                      { value: "on", label: "Activées" },
+                      { value: "off", label: "En pause" },
                     ]}
                     onChange={(val) => {
                       void runMutation(async () => {
-                        const allow_calls = val === "all";
-                        const allow_emergency_calls = val === "all" || val === "emergency";
                         await apiClient.updateNotificationPolicy({
-                          allow_calls,
-                          allow_emergency_calls,
+                          enabled: val === "on",
                         });
                         qc.invalidateQueries({ queryKey: ["notification_policy"] });
-                        return "Politique d'appel mise à jour.";
+                        return val === "on"
+                          ? "Notifications proactives activées."
+                          : "Notifications proactives en pause.";
+                      });
+                    }}
+                  />
+                </div>
+
+                <div className="cluster" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <strong>Seuil pendant les heures calmes</strong>
+                    <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
+                      Niveau d'urgence minimal autorisé à vous interrompre la nuit.
+                    </div>
+                  </div>
+                  <Segmented<"3" | "4">
+                    label="Seuil pendant les heures calmes"
+                    value={policyQuery.data.quiet_allow_urgency <= 3 ? "3" : "4"}
+                    options={[
+                      { value: "3", label: "Urgent & Critique (N3+)" },
+                      { value: "4", label: "Critique uniquement (N4)" },
+                    ]}
+                    onChange={(val) => {
+                      const urgency = parseInt(val, 10);
+                      void runMutation(async () => {
+                        await apiClient.updateNotificationPolicy({
+                          quiet_allow_urgency: urgency,
+                        });
+                        qc.invalidateQueries({ queryKey: ["notification_policy"] });
+                        return "Seuil nocturne mis à jour.";
                       });
                     }}
                   />
                 </div>
 
                 <div className="grid-2" style={{ marginTop: "var(--sp-2)" }}>
-                  <label className="field">
-                    <span className="field__label">Plafond d'appels quotidiens</span>
-                    <input
-                      key={`mcpd:${policyQuery.data.max_calls_per_day}`}
-                      type="number"
-                      min={1}
-                      max={20}
-                      className="input mono"
-                      defaultValue={policyQuery.data.max_calls_per_day}
-                      onBlur={(e) => {
-                        const num = parseInt(e.target.value, 10);
-                        if (!isNaN(num) && num !== policyQuery.data!.max_calls_per_day) {
-                          void runMutation(async () => {
-                            await apiClient.updateNotificationPolicy({
-                              max_calls_per_day: num,
-                            });
-                            qc.invalidateQueries({ queryKey: ["notification_policy"] });
-                            return "Plafond d'appels mis à jour.";
-                          });
-                        }
-                      }}
-                    />
-                  </label>
                   <label className="field">
                     <span className="field__label">Expiration approbations (secondes)</span>
                     <input
@@ -1230,8 +1226,8 @@ export function ConfigPage() {
                 </div>
 
                 <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Échelle de transmission active :{" "}
-                  <code className="mono">{policyQuery.data.channel_ladder.join(" → ")}</code>
+                  Canaux de transmission actifs :{" "}
+                  <code className="mono">Interface Web & Voix locale → Telegram</code>
                 </div>
               </div>
 

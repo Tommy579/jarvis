@@ -56,7 +56,3 @@ roles:
     fallback:
       - gemini-4-argon
       - deepseek/deepseek-v4.1-flash-1017
-  voice_realtime:
-    model: gemini-live
-    provider: gemini
-    thinking_mode: auto

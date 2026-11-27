@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 from jarvis_core.agent.loop import AgentLoop
 from jarvis_core.attention.engine import AttentionDecision
 from jarvis_core.tools.autonomy import AutonomyPolicy
-from jarvis_core.tools.registry import ToolSpec as RegistryToolSpec, extract_ask_flag
+from jarvis_core.tools.registry import ToolSpec as RegistryToolSpec
+from jarvis_core.tools.registry import extract_ask_flag
 
 AUTONOMOUS_SYSTEM_INSTRUCTION = (
     "[MODE TÂCHE AUTONOME EN ARRIÈRE-PLAN]\n"
@@ -35,7 +36,7 @@ AUTONOMOUS_SYSTEM_INSTRUCTION = (
     "5. Regroupe plusieurs appels `browser_fill` / `browser_select` / `browser_click` / `browser_drag` indépendants dans le MÊME tour "
     "(en parallèle) au lieu d'un seul élément par tour, puis fais un seul `browser_snapshot` après le lot pour économiser du temps et des étapes.\n"
     "6. Si Chrome/Chromium n'est pas joignable sur CDP, tente `browser_launch` ou indique clairement le blocage. "
-    "Pour une application web installée sur le PC (raccourci .desktop comme Apple Music, Marges ou Gemini), appelle `browser_launch(app=\"Apple Music\")` "
+    'Pour une application web installée sur le PC (raccourci .desktop comme Apple Music, Marges ou Gemini), appelle `browser_launch(app="Apple Music")` '
     "pour ouvrir ou activer directement sa fenêtre dédiée (`--app`) au lieu d'un onglet classique.\n"
     "7. `browser_fill` relit la valeur : si `verified` est faux ou nul, ne re-remplis pas à l'aveugle, relis le champ avec `browser_snapshot` (les iframes TinyMCE n'affichent pas toujours `value`). Vérifie chaque soumission via `browser_snapshot`.\n"
     "8. Si une même vidéo/audio apparaît plusieurs fois dans le même QCM, n'appelle `browser_analyze_media` qu'UNE SEULE fois et réutilise l'analyse.\n"

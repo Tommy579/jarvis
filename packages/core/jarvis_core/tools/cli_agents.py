@@ -25,7 +25,11 @@ class RunCliSubagentArgs(BaseModel):
     prompt: str = Field(
         min_length=1,
         max_length=12000,
-        description="Instruction complète et autonome transmise au sous-agent CLI.",
+        description=(
+            "Pour 'agy' et 'hermes' : objectif global ou général orienté résultat (le besoin, le contexte, les contraintes et "
+            "le résultat attendu avec workdir), sans dicter de suite de commandes shell (sed, cat), ni de numéros de lignes, "
+            "ni de pas-à-pas micro-managé — agy et hermes explorent, lisent, modifient et vérifient eux-mêmes en autonomie."
+        ),
     )
     workdir: str | None = Field(
         default=None,
@@ -243,7 +247,10 @@ class CLIAgentToolkit:
                 description=(
                     "Lance un sous-agent CLI externe ('agy' ou 'hermes' avec "
                     "deepseek/deepseek-v4.1-flash-1017 sous OpenRouter par défaut, ou "
-                    "qwen3.5:2b en secours local léger) sur une tâche autonome et renvoie sa sortie."
+                    "qwen3.5:2b en secours local léger) et renvoie sa sortie. "
+                    "'agy' et 'hermes' sont des agents ingénieurs autonomes complets : confie-leur directement un objectif global "
+                    "avec workdir et laisse-les explorer, lire, modifier et vérifier seuls (ne pré-explore pas le code "
+                    "à leur place et ne leur dicte pas de commandes shell ni de micro-étapes)."
                 ),
                 handler=self.run_cli_subagent,
                 args_model=RunCliSubagentArgs,

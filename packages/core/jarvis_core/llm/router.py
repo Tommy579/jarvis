@@ -91,12 +91,6 @@ DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
         provider="gemini",
         fallback=["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3", "gemini-4-hydrogen"],
     ),
-    "voice_realtime": RoleRoute(
-        role_name="voice_realtime",
-        model="gemini-live",
-        provider="gemini",
-        fallback=[],
-    ),
 }
 
 MODEL_ALIASES: dict[str, tuple[str, str]] = {

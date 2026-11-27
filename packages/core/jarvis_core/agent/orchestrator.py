@@ -28,13 +28,12 @@ from pydantic import BaseModel, Field
 
 from jarvis_core.agent.supervisor import SubagentSupervisor, SupervisorEvent
 from jarvis_core.attention.engine import AttentionDecision
-from jarvis_core.tools.registry import extract_ask_flag
 from jarvis_core.llm.base import BudgetExceededError
 from jarvis_core.llm.catalog import ModelSelectionCatalog
 from jarvis_core.llm.router import LLMRouter
 from jarvis_core.tools.autonomy import AutonomyPolicy
 from jarvis_core.tools.cli_agents import CLIAgentToolkit
-from jarvis_core.tools.registry import ToolRegistry
+from jarvis_core.tools.registry import ToolRegistry, extract_ask_flag
 from jarvis_core.tools.registry import ToolSpec as RegistryToolSpec
 
 # === Schemas Pydantic des outils de l'Orchestrateur ===
@@ -965,7 +964,7 @@ class GoalOrchestrator:
             "2. Choisis pour chaque sous-tâche le modèle le MOINS CHER adapté (`gemini-4-carbon`, `deepseek/deepseek-v4.1-flash-1017`, "
             "`minimax/minimax-m3`, `z-ai/glm-5.3`, `moonshotai/kimi-k3`, `gemini-4-argon`, en gardant `gemini-4-hydrogen` pour les déblocages difficiles "
             "et `qwen3.5:2b` uniquement en secours local ultra-léger si vraiment nécessaire).\n"
-            "3. Tu peux aussi déléguer des tâches CLI autonomes via `run_cli_subagent` (`agy` ou `hermes` avec `deepseek/deepseek-v4.1-flash-1017` sous OpenRouter par défaut, ou `qwen3.5:2b` en secours local) soit directement, soit via un sous-agent `cli_agent` / `coder`.\n"
+            "3. Tu peux aussi déléguer des tâches CLI autonomes via `run_cli_subagent` (`agy` ou `hermes` avec `deepseek/deepseek-v4.1-flash-1017` sous OpenRouter par défaut, ou `qwen3.5:2b` en secours local) soit directement, soit via un sous-agent `cli_agent` / `coder`. Pour `agy` et `hermes`, transmets uniquement un objectif global orienté résultat (avec `workdir` et contraintes) et laisse-les explorer, modifier et vérifier eux-mêmes sans liste de micro-étapes ni commandes shell imposées.\n"
             "4. Lance les sous-tâches indépendantes en parallèle avec `spawn_subagent`, puis appelle `await_subagent_events`.\n"
             "5. Si le Watchdog signale un sous-agent lent (`stall_timeout`), en boucle (`loop_detected`) ou en erreur (`error_thrashing`), "
             "analyse la cause et agis immédiatement : `steer_subagent`, `restart_subagent` (avec bascule vers un autre modèle ou instructions clarifiées) ou `split_subtask`.\n"

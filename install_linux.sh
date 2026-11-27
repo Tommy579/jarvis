@@ -102,6 +102,17 @@ step "5/5 · Raccourcis bureau et autostart"
 chmod +x "$LAUNCHER"
 mkdir -p "$HOME/.local/share/applications" "$HOME/.config/autostart"
 
+# Icone : installee dans le theme hicolor pour que "Icon=jarvis" soit resolu
+if [ -f "$ICON_PATH" ]; then
+    ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+    mkdir -p "$ICON_DIR"
+    cp "$ICON_PATH" "$ICON_DIR/jarvis.png"
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    ok "Icone jarvis installee dans le theme hicolor"
+else
+    warn "jarvis_icon.png introuvable : icone du raccourci non installee"
+fi
+
 cat > "$HOME/.local/share/applications/jarvis.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -111,11 +122,11 @@ GenericName=Assistant IA personnel
 Comment=Interface web JARVIS 2.0
 Exec=$LAUNCHER
 Path=$SCRIPT_DIR
-Icon=$ICON_PATH
+Icon=jarvis
 Terminal=false
 Categories=Utility;Application;
 StartupNotify=true
-StartupWMClass=chrome-localhost__-Default
+StartupWMClass=chrome-localhost__8765-Default
 NoDisplay=false
 EOF
 
@@ -128,11 +139,11 @@ GenericName=Assistant IA personnel
 Comment=Interface web JARVIS 2.0
 Exec=$LAUNCHER
 Path=$SCRIPT_DIR
-Icon=$ICON_PATH
+Icon=jarvis
 Terminal=false
 Categories=Utility;Application;
 StartupNotify=true
-StartupWMClass=chrome-localhost__-Default
+StartupWMClass=chrome-localhost__8765-Default
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
