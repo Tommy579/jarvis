@@ -116,6 +116,39 @@ _SENSITIVE_WRITE_USER_FILES = frozenset(
 
 _SENSITIVE_SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".kdbx", ".gpg", ".ovpn"})
 
+
+def _jarvis_private_roots() -> list[Path]:
+    """Dossiers propres a Jarvis interdits aux outils fichiers, quel que soit leur nom.
+
+    - JARVIS_DATA_DIR : base SQLite, wiki, sauvegardes (memoire personnelle complete) ;
+    - etat du lanceur (~/.local/state/jarvis) : journaux contenant le jeton d'API ;
+    - profil Chromium de la fenetre Jarvis : jeton en sessionStorage, cookies.
+    """
+    roots: list[Path] = []
+    raw_data = os.environ.get("JARVIS_DATA_DIR", "").strip()
+    if raw_data:
+        roots.append(Path(raw_data).expanduser())
+    state_home = os.environ.get("XDG_STATE_HOME", "").strip() or str(
+        Path.home() / ".local" / "state"
+    )
+    config_home = os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config")
+    roots.append(Path(state_home).expanduser() / "jarvis")
+    roots.append(Path(config_home).expanduser() / "chromium-jarvis")
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+def _is_jarvis_private_path(resolved: Path) -> bool:
+    return any(
+        resolved == root or resolved.is_relative_to(root) for root in _jarvis_private_roots()
+    )
+
+
 _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\brm\b[^\n;|&]*--no-preserve-root"),
@@ -221,7 +254,9 @@ def _has_sensitive_secret_name(resolved: Path) -> bool:
     if resolved.suffix.lower() in _SENSITIVE_SECRET_SUFFIXES:
         return True
     parts = {p.lower() for p in resolved.parts}
-    return bool(parts & _SENSITIVE_USER_DIR_NAMES)
+    if parts & _SENSITIVE_USER_DIR_NAMES:
+        return True
+    return _is_jarvis_private_path(resolved)
 
 
 def is_sensitive_read_path(path: Path) -> bool:

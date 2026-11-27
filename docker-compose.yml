@@ -18,3 +18,9 @@ services:
       - ${JARVIS_DATA_HOST:-${HOME}/jarvis-data}:/data
     security_opt:
       - no-new-privileges:true
+    # Aucune capacite Linux n'est necessaire a un service HTTP sur un port > 1024.
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    tmpfs:
+      - /tmp:size=256m,mode=1777

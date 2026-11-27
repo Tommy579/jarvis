@@ -32,12 +32,21 @@ echo -e "${BOLD}═════════════════════�
 step "1/5 · Configuration (.env)"
 
 API_KEY="${1:-${GEMINI_API_KEY:-}}"
+if [ -n "${1:-}" ]; then
+    warn "Cle passee en argument : visible dans 'ps' et l'historique du shell. Prefere GEMINI_API_KEY=... bash install_linux.sh"
+fi
+# .env recoit des cles API : cree directement en 600 (pas de fenetre en 644).
+umask 077
 if [ ! -f "$ENV_FILE" ] && [ -f "$SCRIPT_DIR/.env.example" ]; then
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
     ok ".env créé depuis .env.example"
 fi
+umask 022
 
 if [ -n "$API_KEY" ]; then
+    case "$API_KEY" in
+        *[!A-Za-z0-9_.-]*) fail "GEMINI_API_KEY contient des caracteres inattendus : refus d'ecrire dans .env." ;;
+    esac
     if [ -f "$ENV_FILE" ] && grep -q '^GEMINI_API_KEY=' "$ENV_FILE"; then
         sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$API_KEY|" "$ENV_FILE"
     else
@@ -45,7 +54,7 @@ if [ -n "$API_KEY" ]; then
     fi
     ok "GEMINI_API_KEY enregistrée dans .env"
 elif [ ! -f "$ENV_FILE" ]; then
-    touch "$ENV_FILE"
+    (umask 077 && touch "$ENV_FILE")
     warn "Aucun .env existant : pensez à renseigner vos clés API dans $ENV_FILE"
 else
     ok ".env existant conservé"
@@ -76,7 +85,8 @@ step "3/5 · Environnement Python JARVIS 2.0"
 
 cd "$SCRIPT_DIR"
 if command -v uv &>/dev/null; then
-    uv sync || uv sync --python 3.12
+    # --frozen : versions exactes de uv.lock, jamais de resolution silencieuse.
+    uv sync --frozen || uv sync --frozen --python 3.12
     ok "Workspace Python synchronisé via uv (.venv)"
 else
     if [ ! -d "$VENV_DIR" ]; then

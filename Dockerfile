@@ -42,10 +42,11 @@ RUN uv sync --frozen --no-dev
 # Interface web deja compilee par l'etape 1 (le core la sert depuis web/dist).
 COPY --from=web /web/dist ./web/dist
 
-# Utilisateur non-root et repertoire de donnees persistant.
+# Utilisateur non-root et repertoire de donnees persistant (0700 : memoire personnelle).
 RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin jarvis \
     && mkdir -p /data \
-    && chown -R jarvis:jarvis /app /data
+    && chown -R jarvis:jarvis /app /data \
+    && chmod 700 /data
 USER jarvis
 
 EXPOSE 8765
@@ -53,4 +54,7 @@ EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
     CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=3).status == 200 else 1)"
 
-CMD ["uvicorn", "jarvis_core.api.server:app", "--host", "0.0.0.0", "--port", "8765"]
+# 0.0.0.0 est necessaire dans le conteneur (le port est publie sur 127.0.0.1 par compose).
+# umask 077 : la base, le wiki et les sauvegardes du volume /data ne sont pas lisibles
+# par les autres utilisateurs de l'hote (sinon 0644 sur le montage).
+CMD ["sh", "-c", "umask 077 && exec uvicorn jarvis_core.api.server:app --host 0.0.0.0 --port 8765"]

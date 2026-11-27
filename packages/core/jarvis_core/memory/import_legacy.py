@@ -4,53 +4,57 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 from pathlib import Path
+from typing import Any
 
 from jarvis_shared.rest_models import FactCreate
 
 from .schema import MemoryDatabase
 
+logger = logging.getLogger(__name__)
+
+# Bornes appliquees a un profil potentiellement hostile.
+MAX_PROFILE_BYTES = 1_048_576
+MAX_IMPORTED_FACTS = 500
+MAX_KEY_CHARS = 64
+MAX_VALUE_CHARS = 2_000
+
+
+def _clip(value: Any, limit: int = MAX_VALUE_CHARS) -> str:
+    return str(value).strip()[:limit]
+
+
+def _section(profile: dict, key: str) -> dict:
+    """Retourne une section du profil uniquement si c'est un objet JSON."""
+    value = profile.get(key)
+    return value if isinstance(value, dict) else {}
+
 
 def _extract_profile_facts(profile: dict) -> list[FactCreate]:
     facts: list[FactCreate] = []
 
-    identity = profile.get("identity", {})
-    if identity.get("name"):
-        facts.append(
-            FactCreate(
-                subject="Tom",
-                predicate="se_nomme",
-                object=str(identity["name"]),
-                text=f"Nom d'utilisateur : {identity['name']}",
-                category="identite",
-                confidence=0.95,
-                source="legacy_profile",
+    identity = _section(profile, "identity")
+    for field, predicate, label in (
+        ("name", "se_nomme", "Nom d'utilisateur"),
+        ("language", "langue_principale", "Langue principale"),
+        ("timezone", "fuseau_horaire", "Fuseau horaire"),
+    ):
+        raw = identity.get(field)
+        if raw and isinstance(raw, (str, int, float)):
+            value = _clip(raw, 200)
+            facts.append(
+                FactCreate(
+                    subject="Tom",
+                    predicate=predicate,
+                    object=value,
+                    text=f"{label} : {value}",
+                    category="identite",
+                    confidence=0.95,
+                    source="legacy_profile",
+                )
             )
-        )
-    if identity.get("language"):
-        facts.append(
-            FactCreate(
-                subject="Tom",
-                predicate="langue_principale",
-                object=str(identity["language"]),
-                text=f"Langue principale : {identity['language']}",
-                category="identite",
-                confidence=0.95,
-                source="legacy_profile",
-            )
-        )
-    if identity.get("timezone"):
-        facts.append(
-            FactCreate(
-                subject="Tom",
-                predicate="fuseau_horaire",
-                object=str(identity["timezone"]),
-                text=f"Fuseau horaire : {identity['timezone']}",
-                category="identite",
-                confidence=0.95,
-                source="legacy_profile",
-            )
-        )
 
     section_map = {
         "work": "travail",
@@ -59,34 +63,39 @@ def _extract_profile_facts(profile: dict) -> list[FactCreate]:
         "schedule": "rythme",
     }
     for section_key, category in section_map.items():
-        section_data = profile.get(section_key, {})
-        if not isinstance(section_data, dict):
-            continue
-        for key, value in section_data.items():
+        for key, value in _section(profile, section_key).items():
             if value is None or value == [] or value == "":
                 continue
             if isinstance(value, list):
-                rendered = ", ".join(str(v) for v in value if v)
+                rendered = ", ".join(str(v) for v in value[:50] if v)
+            elif isinstance(value, dict):
+                # Objets imbriques : pas de rendu recursif d'une structure arbitraire.
+                continue
             else:
                 rendered = str(value)
-            if not rendered:
+            rendered = _clip(rendered)
+            safe_key = _clip(key, MAX_KEY_CHARS)
+            if not rendered or not safe_key:
                 continue
             facts.append(
                 FactCreate(
                     subject="Tom",
-                    predicate=key,
+                    predicate=safe_key,
                     object=rendered,
-                    text=f"{section_key}.{key} : {rendered}",
+                    text=f"{section_key}.{safe_key} : {rendered}",
                     category=category,
                     confidence=0.85,
                     source="legacy_profile",
                 )
             )
 
-    for idx, note in enumerate(profile.get("notes", [])):
+    notes = profile.get("notes")
+    if not isinstance(notes, list):
+        notes = []
+    for idx, note in enumerate(notes[:MAX_IMPORTED_FACTS]):
         if isinstance(note, dict) and note.get("text"):
-            date_label = note.get("date", "archive")
-            text = str(note["text"]).strip()
+            date_label = _clip(note.get("date", "archive"), 40)
+            text = _clip(note["text"])
             facts.append(
                 FactCreate(
                     subject="Tom",
@@ -101,66 +110,84 @@ def _extract_profile_facts(profile: dict) -> list[FactCreate]:
     return facts
 
 
+def _write_private(path: Path, content: str) -> None:
+    """Ecrit une page du wiki en 0600 (donnees personnelles), sans suivre de lien."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
+def _as_list(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list) and value:
+        return [_clip(v, 200) for v in value[:50]]
+    return default
+
+
 def _bootstrap_wiki(wiki_dir: Path, profile: dict) -> None:
-    wiki_dir.mkdir(parents=True, exist_ok=True)
-    identity = profile.get("identity", {})
-    work = profile.get("work", {})
-    prefs = profile.get("preferences", {})
+    wiki_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    identity = _section(profile, "identity")
+    work = _section(profile, "work")
+    prefs = _section(profile, "preferences")
 
-    moi_file = wiki_dir / "moi.md"
-    if not moi_file.exists():
-        name = identity.get("name") or "Tom"
-        lang = identity.get("language") or "fr"
-        tz = identity.get("timezone") or "Europe/Paris"
-        moi_file.write_text(
-            f"# Profil personnel ({name})\n\n- Langue : {lang}\n- Fuseau horaire : {tz}\n",
-            encoding="utf-8",
-        )
+    name = _clip(identity.get("name") or "Tom", 200)
+    lang = _clip(identity.get("language") or "fr", 40)
+    tz = _clip(identity.get("timezone") or "Europe/Paris", 64)
+    _write_private(
+        wiki_dir / "moi.md",
+        f"# Profil personnel ({name})\n\n- Langue : {lang}\n- Fuseau horaire : {tz}\n",
+    )
 
-    proj_file = wiki_dir / "projets.md"
-    if not proj_file.exists():
-        projects = work.get("current_projects") or ["JARVIS 2.0"]
-        stack = work.get("tech_stack") or ["Python", "TypeScript", "React"]
-        proj_file.write_text(
-            "# Projets en cours\n\n"
-            f"- Projets : {', '.join(map(str, projects))}\n"
-            f"- Stack : {', '.join(map(str, stack))}\n",
-            encoding="utf-8",
-        )
+    projects = _as_list(work.get("current_projects"), ["JARVIS 2.0"])
+    stack = _as_list(work.get("tech_stack"), ["Python", "TypeScript", "React"])
+    _write_private(
+        wiki_dir / "projets.md",
+        f"# Projets en cours\n\n- Projets : {', '.join(projects)}\n- Stack : {', '.join(stack)}\n",
+    )
 
-    pref_file = wiki_dir / "preferences.md"
-    if not pref_file.exists():
-        style = prefs.get("communication_style") or "concis et pince-sans-rire"
-        pref_file.write_text(
-            f"# Preferences\n\n- Ton : {style}\n",
-            encoding="utf-8",
-        )
+    style = _clip(prefs.get("communication_style") or "concis et pince-sans-rire", 500)
+    _write_private(wiki_dir / "preferences.md", f"# Preferences\n\n- Ton : {style}\n")
 
-    rules_file = wiki_dir / "rules.md"
-    if not rules_file.exists():
-        rules_file.write_text(
-            "# Regles pour Jarvis\n\n"
-            "- Toujours demander confirmation pour les actions sensibles de niveau 2 et 3.\n"
-            "- Respecter les heures calmes entre 23:00 et 08:00 sauf alerte critique de niveau 4.\n",
-            encoding="utf-8",
-        )
+    _write_private(
+        wiki_dir / "rules.md",
+        "# Regles pour Jarvis\n\n"
+        "- Toujours demander confirmation pour les actions sensibles de niveau 2 et 3.\n"
+        "- Respecter les heures calmes entre 23:00 et 08:00 sauf alerte critique de niveau 4.\n",
+    )
 
 
 def import_legacy_profile(
     profile_path: Path, db: MemoryDatabase, wiki_dir: Path | None = None
 ) -> int:
-    """Importe les entrees de jarvis_profile.json dans SQLite sans creer de doublons."""
+    """Importe les entrees de jarvis_profile.json dans SQLite sans creer de doublons.
+
+    Le fichier est traite comme non fiable : taille, types, nombre et longueur des
+    entrees sont bornes pour qu'un profil hostile ne bloque pas le demarrage.
+    """
     if not profile_path.exists():
         if wiki_dir:
             _bootstrap_wiki(wiki_dir, {})
         return 0
 
-    data = json.loads(profile_path.read_text(encoding="utf-8"))
+    if profile_path.is_symlink() or not profile_path.is_file():
+        logger.warning("Profil legacy ignore (pas un fichier ordinaire) : %s", profile_path)
+        return 0
+    if profile_path.stat().st_size > MAX_PROFILE_BYTES:
+        logger.warning("Profil legacy ignore (plus de %d octets).", MAX_PROFILE_BYTES)
+        return 0
+    try:
+        data = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        logger.warning("Profil legacy illisible, import ignore : %s", exc)
+        return 0
     if not isinstance(data, dict):
         return 0
 
     existing_texts = {f.text for f in db.list_facts(include_superseded=True, limit=5000)}
-    candidates = _extract_profile_facts(data)
+    candidates = _extract_profile_facts(data)[:MAX_IMPORTED_FACTS]
     inserted = 0
     for fact in candidates:
         if fact.text not in existing_texts:

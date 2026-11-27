@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import struct
 import uuid
@@ -378,12 +379,44 @@ class MemoryDatabase:
 
     def __init__(self, db_path: str | Path, encryption_key: str | None = None) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.db_path.parent.exists():
+            # Dossier de donnees cree par Jarvis : reserve au proprietaire.
+            self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.encryption_key = encryption_key
         self.vec_enabled = False
         self._vec_checked = False
         self._wal_initialized = False
+        self._precreate_private_db()
         self.migrate()
+        self.secure_file_permissions()
+
+    def _precreate_private_db(self) -> None:
+        """Cree la base vide en 0600 : SQLite reprend ces droits pour -wal et -shm."""
+        if self.db_path.exists() or self.db_path.is_symlink():
+            return
+        try:
+            fd = os.open(
+                str(self.db_path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            os.close(fd)
+        except OSError:
+            # Course avec un autre processus ou dossier en lecture seule : SQLite tranchera.
+            pass
+
+    def secure_file_permissions(self) -> None:
+        """Retire les droits groupe/autres sur la base et ses journaux (installations existantes)."""
+        if os.name == "nt":
+            return
+        for suffix in ("", "-wal", "-shm"):
+            path = self.db_path.with_name(self.db_path.name + suffix)
+            try:
+                if path.is_file() and not path.is_symlink():
+                    if path.stat().st_mode & 0o077:
+                        os.chmod(path, 0o600)
+            except OSError:
+                continue
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -391,17 +424,18 @@ class MemoryDatabase:
         if self.encryption_key:
             try:
                 import sqlcipher3  # type: ignore[import-not-found]
-
-                conn = sqlcipher3.connect(str(self.db_path), timeout=10.0)
-                escaped_key = self.encryption_key.replace("'", "''")
-                conn.execute(f"PRAGMA key = '{escaped_key}'")
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA foreign_keys = ON")
-            except ImportError:
-                logger.warning(
-                    "Cle de chiffrement SQLite definie mais sqlcipher3 absent : ouverture en clair."
-                )
-                conn = None
+            except ImportError as exc:
+                # Echec ferme : ouvrir en clair une base censee etre chiffree creerait ou
+                # modifierait une base lisible par quiconque accede au fichier.
+                raise RuntimeError(
+                    "Cle de chiffrement SQLite definie mais sqlcipher3 absent : "
+                    "ouverture refusee (installe sqlcipher3 ou retire la cle)."
+                ) from exc
+            conn = sqlcipher3.connect(str(self.db_path), timeout=10.0)
+            escaped_key = self.encryption_key.replace("'", "''")
+            conn.execute(f"PRAGMA key = '{escaped_key}'")
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
         if conn is None:
             conn = sqlite3.connect(str(self.db_path), timeout=10.0)
             conn.row_factory = sqlite3.Row
@@ -1086,14 +1120,28 @@ class MemoryDatabase:
         ]
 
     def decide_approval(self, approval_id: str, approved: bool) -> ApprovalItem | None:
-        status = "approved" if approved else "denied"
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE approvals SET status = ? WHERE id = ? AND status = 'pending'",
-                (status, approval_id),
-            )
-            conn.commit()
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            if not row:
+                return None
+            if row["status"] == "pending":
+                try:
+                    exp = datetime.fromisoformat(str(row["expires_at"]))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    expired = datetime.now(timezone.utc) >= exp
+                except ValueError:
+                    expired = True
+                # Une demande expiree ne peut plus devenir 'approved' en base.
+                status = "expired" if expired else ("approved" if approved else "denied")
+                conn.execute(
+                    "UPDATE approvals SET status = ? WHERE id = ? AND status = 'pending'",
+                    (status, approval_id),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+                ).fetchone()
         if not row:
             return None
         return ApprovalItem(

@@ -7,7 +7,6 @@ Une simple copie de fichier est incorrecte en mode WAL : la sauvegarde doit pass
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -76,6 +75,32 @@ def check_database_integrity(path: str | Path) -> None:
         raise BackupError(f"Base SQLite corrompue ({candidate}) : {detail}")
 
 
+def _private_dir(path: Path) -> None:
+    """Cree le dossier en 0700 et retire les droits groupe/autres s'il existe deja."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _create_private_file(path: Path) -> None:
+    """Cree (ou tronque) un fichier en 0600 sans suivre de lien symbolique.
+
+    La sauvegarde contient toute la memoire personnelle : elle ne doit jamais
+    heriter de l'umask (0644 par defaut) ni ecrire a travers un lien pose a l'avance.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        raise BackupError(f"Creation du fichier impossible ({path}) : {exc}") from exc
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
 def backup_database(
     db_path: str | Path,
     backup_dir: str | Path,
@@ -87,8 +112,9 @@ def backup_database(
     if not source_path.is_file():
         raise BackupError(f"Base introuvable : {source_path}")
     target_dir = Path(backup_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    _private_dir(target_dir)
     target = target_dir / f"{BACKUP_PREFIX}{_timestamp(now)}{BACKUP_SUFFIX}"
+    _create_private_file(target)
 
     source: sqlite3.Connection | None = None
     destination: sqlite3.Connection | None = None
@@ -158,6 +184,7 @@ def prune_backups(
 
 def _copy_database(source: Path, target: Path) -> None:
     """Copie coherente d'une base, y compris les transactions encore dans le WAL."""
+    _create_private_file(target)
     src: sqlite3.Connection | None = None
     dst: sqlite3.Connection | None = None
     try:
@@ -170,6 +197,20 @@ def _copy_database(source: Path, target: Path) -> None:
             dst.close()
         if src is not None:
             src.close()
+
+
+def _prune_pre_restore(backup_dir: Path, keep: int) -> None:
+    """Retention des copies de securite pre-restauration (sinon elles s'accumulent)."""
+    copies = sorted(
+        (p for p in backup_dir.glob(f"{PRE_RESTORE_PREFIX}*{BACKUP_SUFFIX}") if p.is_file()),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    for old in copies[max(1, keep) :]:
+        try:
+            old.unlink()
+        except OSError:
+            continue
 
 
 def restore_database(
@@ -185,12 +226,17 @@ def restore_database(
     """
     source = Path(backup_path)
     target = Path(db_path)
+    # Un lien symbolique ferait lire ou ecrire hors du dossier de donnees : refus net.
+    if source.is_symlink():
+        raise BackupError(f"Sauvegarde refusee (lien symbolique) : {source}")
+    if target.is_symlink():
+        raise BackupError(f"Base cible refusee (lien symbolique) : {target}")
     if not source.is_file():
         raise BackupError(f"Sauvegarde introuvable : {source}")
     check_database_integrity(source)
 
     safety_dir = Path(backup_dir)
-    safety_dir.mkdir(parents=True, exist_ok=True)
+    _private_dir(safety_dir)
     safety: Path | None = None
     if target.exists():
         safety = safety_dir / f"{PRE_RESTORE_PREFIX}{_timestamp(now)}{BACKUP_SUFFIX}"
@@ -198,10 +244,26 @@ def restore_database(
         _copy_database(target, safety)
         check_database_integrity(safety)
 
+    # Copie dans un fichier temporaire 0600 du meme dossier puis remplacement atomique :
+    # la base n'est jamais a moitie ecrite et ne reprend pas les droits du fichier source.
+    staging = target.with_name(f".{target.name}.restore-tmp")
+    staging.unlink(missing_ok=True)
+    try:
+        _copy_database(source, staging)
+        check_database_integrity(staging)
+    except (sqlite3.Error, BackupError) as exc:
+        staging.unlink(missing_ok=True)
+        if isinstance(exc, BackupError):
+            raise
+        raise BackupError(f"Echec de la restauration : {exc}") from exc
+    for suffix in ("-wal", "-shm"):
+        staging.with_name(staging.name + suffix).unlink(missing_ok=True)
+
     # Les journaux WAL de l'ancienne base ne doivent pas survivre a la restauration.
     for suffix in ("-wal", "-shm"):
         side = target.with_name(target.name + suffix)
-        if side.exists():
+        if side.exists() or side.is_symlink():
             side.unlink()
-    shutil.copy2(source, target)
+    os.replace(staging, target)
+    _prune_pre_restore(safety_dir, backup_keep())
     return safety
