@@ -41,6 +41,12 @@ const MemoryOnboardingPage = lazy(() =>
 const NotFoundPage = lazy(() =>
   import("./pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage }))
 );
+// three.js ne doit pas entrer dans le bundle initial : la fenetre n'est chargee qu'a l'usage.
+const VisualArtifactWindow = lazy(() =>
+  import("./components/VisualArtifactWindow").then((m) => ({
+    default: m.VisualArtifactWindow,
+  }))
+);
 
 type AppRoute = "/" | "/conversation" | "/goals" | "/alerts" | "/memory" | "/config" | "/not-found";
 
@@ -173,9 +179,11 @@ export function App() {
   const wsClientRef = useRef<JarvisWsClient | null>(null);
   const ttsReceivedRef = useRef(false);
   const spokenPrefixRef = useRef("");
+  const artifactEmittedThisTurnRef = useRef(false);
   const { resolved: resolvedScheme, system: systemScheme } = useColorScheme();
 
   const wsConnected = useJarvisStore((s) => s.wsConnected);
+  const activeArtifact = useJarvisStore((s) => s.activeArtifact);
   const sphereState = useJarvisStore((s) => s.sphereState);
   const activeModel = useJarvisStore((s) => s.activeModel);
   const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
@@ -374,20 +382,26 @@ export function App() {
         if (ev.type === "state" && ev.payload.value === "thinking") {
           ttsReceivedRef.current = false;
           spokenPrefixRef.current = "";
+          artifactEmittedThisTurnRef.current = false;
+        }
+        if (ev.type === "visual.artifact") {
+          artifactEmittedThisTurnRef.current = true;
         }
         handleServerEvent(ev);
         if (ev.type === "tool.call" && !ttsReceivedRef.current && !spokenPrefixRef.current) {
           const streamed = useJarvisStore.getState().streamingText.trim();
           if (streamed.length >= 12) {
             spokenPrefixRef.current = streamed;
-            audioEngine.speakText(streamed, apiClient.speakVoice);
+            void audioEngine.speakText(streamed, apiClient.speakVoice);
           }
         }
         if (ev.type === "alert" && ev.payload.message && ev.payload.urgency >= 2) {
-          audioEngine.speakText(ev.payload.message, apiClient.speakVoice);
+          void audioEngine.speakText(ev.payload.message, apiClient.speakVoice);
         }
         if (ev.type === "assistant.done") {
-          if (!ttsReceivedRef.current) {
+          const artifactNarrating =
+            artifactEmittedThisTurnRef.current && useJarvisStore.getState().artifactPlaying;
+          if (!ttsReceivedRef.current && !artifactNarrating) {
             const msgs = useJarvisStore.getState().messages;
             const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
             const fullText = lastAssistant?.content?.trim() ?? "";
@@ -1305,6 +1319,11 @@ export function App() {
           </AnimatePresence>
         </main>
 
+        {activeArtifact && (
+          <Suspense fallback={null}>
+            <VisualArtifactWindow audioEngine={audioEngine} />
+          </Suspense>
+        )}
         <CommandPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}

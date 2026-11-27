@@ -74,4 +74,5 @@ files = [
     "packages/core/jarvis_core/updates.py",
     "packages/core/jarvis_core/scheduler/routines.py",
     "packages/core/jarvis_core/cli.py",
+    "packages/core/jarvis_core/tools/visual_artifact.py",
 ]

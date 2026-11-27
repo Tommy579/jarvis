@@ -270,6 +270,68 @@ class SupervisorInterventionEvent(BaseModel):
     payload: SupervisorInterventionPayload
 
 
+VisualElementKind = Literal[
+    "board",
+    "chip",
+    "led",
+    "resistor",
+    "sensor",
+    "button",
+    "wire",
+    "node",
+    "box",
+    "cylinder",
+    "sphere",
+    "arrow",
+    "label",
+    "svg_path",
+]
+
+
+class VisualElementPayload(BaseModel):
+    id: str
+    kind: VisualElementKind = "node"
+    label: str
+    sublabel: str | None = None
+    color: str = "#38bdf8"
+    x: float = 50.0
+    y: float = 50.0
+    z: float = 0.0
+    width: float = 14.0
+    height: float = 10.0
+    from_id: str | None = None
+    to_id: str | None = None
+    from_pin: str | None = None
+    to_pin: str | None = None
+    svg_path: str | None = None
+
+
+class VisualStepPayload(BaseModel):
+    index: int
+    title: str
+    spoken_text: str
+    annotation: str = ""
+    reveal_elements: list[str] = Field(default_factory=list)
+    highlight_elements: list[str] = Field(default_factory=list)
+    active_connections: list[str] = Field(default_factory=list)
+
+
+class VisualArtifactPayload(BaseModel):
+    id: str
+    title: str
+    subtitle: str = ""
+    mode: Literal["2d", "3d"] = "3d"
+    category: Literal["hardware", "architecture", "algorithm", "physics", "custom"] = "hardware"
+    elements: list[VisualElementPayload] = Field(default_factory=list)
+    steps: list[VisualStepPayload] = Field(default_factory=list)
+    auto_play: bool = True
+
+
+class VisualArtifactEvent(BaseModel):
+    type: Literal["visual.artifact"] = "visual.artifact"
+    payload: VisualArtifactPayload
+
+
 ServerWsEvent = Annotated[
     Union[
         StateEvent,
@@ -286,6 +348,7 @@ ServerWsEvent = Annotated[
         GoalUpdatedEvent,
         SubagentStatusEvent,
         SupervisorInterventionEvent,
+        VisualArtifactEvent,
     ],
     Field(discriminator="type"),
 ]

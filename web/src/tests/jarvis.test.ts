@@ -309,6 +309,78 @@ describe("useJarvisStore", () => {
     expect(state.goals["goal_abc"]?.events).toHaveLength(1);
     expect(state.goals["goal_abc"]?.events[0].message).toContain("gemini-4-argon");
   });
+
+  it("gere la fenetre visual.artifact, le changement d'etape et l'interruption", () => {
+    const store = useJarvisStore.getState();
+    store.handleServerEvent({
+      type: "visual.artifact",
+      payload: {
+        id: "art_1",
+        title: "LED Raspberry Pi",
+        subtitle: "GPIO 17",
+        mode: "3d",
+        category: "hardware",
+        auto_play: true,
+        elements: [
+          {
+            id: "rpi",
+            kind: "board",
+            label: "Raspberry Pi",
+            sublabel: null,
+            color: "#38bdf8",
+            x: 30,
+            y: 50,
+            z: 0,
+            width: 20,
+            height: 20,
+            from_id: null,
+            to_id: null,
+            from_pin: null,
+            to_pin: null,
+            svg_path: null,
+          },
+        ],
+        steps: [
+          {
+            index: 0,
+            title: "Etape 1",
+            spoken_text: "Voici le Raspberry Pi.",
+            annotation: "GPIO",
+            reveal_elements: ["rpi"],
+            highlight_elements: ["rpi"],
+            active_connections: [],
+          },
+          {
+            index: 1,
+            title: "Etape 2",
+            spoken_text: "Branchez la LED.",
+            annotation: "330 ohm",
+            reveal_elements: [],
+            highlight_elements: ["rpi"],
+            active_connections: [],
+          },
+        ],
+      },
+    });
+
+    let st = useJarvisStore.getState();
+    expect(st.activeArtifact?.id).toBe("art_1");
+    expect(st.artifactStepIndex).toBe(0);
+    expect(st.artifactPlaying).toBe(true);
+    expect(st.artifactViewMode).toBe("3d");
+
+    st.setArtifactStepIndex(1);
+    st.setArtifactViewMode("2d");
+    st = useJarvisStore.getState();
+    expect(st.artifactStepIndex).toBe(1);
+    expect(st.artifactViewMode).toBe("2d");
+
+    st.interruptSpeech();
+    expect(useJarvisStore.getState().artifactPlaying).toBe(false);
+
+    useJarvisStore.getState().closeArtifact();
+    expect(useJarvisStore.getState().activeArtifact).toBeNull();
+  });
 });
 
 class MockWebSocket {

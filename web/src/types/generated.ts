@@ -245,6 +245,50 @@ export interface SupervisorInterventionEvent {
   payload: SupervisorInterventionPayload;
 }
 
+export interface VisualElementPayload {
+  id: string;
+  kind: "board" | "chip" | "led" | "resistor" | "sensor" | "button" | "wire" | "node" | "box" | "cylinder" | "sphere" | "arrow" | "label" | "svg_path";
+  label: string;
+  sublabel: string | null;
+  color: string;
+  x: number;
+  y: number;
+  z: number;
+  width: number;
+  height: number;
+  from_id: string | null;
+  to_id: string | null;
+  from_pin: string | null;
+  to_pin: string | null;
+  svg_path: string | null;
+}
+
+export interface VisualStepPayload {
+  index: number;
+  title: string;
+  spoken_text: string;
+  annotation: string;
+  reveal_elements: string[];
+  highlight_elements: string[];
+  active_connections: string[];
+}
+
+export interface VisualArtifactPayload {
+  id: string;
+  title: string;
+  subtitle: string;
+  mode: "2d" | "3d";
+  category: "hardware" | "architecture" | "algorithm" | "physics" | "custom";
+  elements: VisualElementPayload[];
+  steps: VisualStepPayload[];
+  auto_play: boolean;
+}
+
+export interface VisualArtifactEvent {
+  type: "visual.artifact";
+  payload: VisualArtifactPayload;
+}
+
 export interface ToolCallRecord {
   id: string;
   name: string;
@@ -705,4 +749,4 @@ export interface BackupConfig {
 }
 
 export type ClientWsEvent = UserTextEvent | UserAudioEvent | ActionApproveEvent | AlertAckEvent | SettingsModelEvent | SensorsToggleEvent | UserInterruptEvent;
-export type ServerWsEvent = StateEvent | TranscriptPartialEvent | TranscriptFinalEvent | AssistantDeltaEvent | AssistantDoneEvent | ToolCallEvent | ToolResultEvent | TtsChunkEvent | MicLevelEvent | ApprovalRequestEvent | AlertEvent | GoalUpdatedEvent | SubagentStatusEvent | SupervisorInterventionEvent;
+export type ServerWsEvent = StateEvent | TranscriptPartialEvent | TranscriptFinalEvent | AssistantDeltaEvent | AssistantDoneEvent | ToolCallEvent | ToolResultEvent | TtsChunkEvent | MicLevelEvent | ApprovalRequestEvent | AlertEvent | GoalUpdatedEvent | SubagentStatusEvent | SupervisorInterventionEvent | VisualArtifactEvent;

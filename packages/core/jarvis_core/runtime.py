@@ -57,6 +57,7 @@ from jarvis_core.tools.integrations import IntegrationToolkit
 from jarvis_core.tools.notifications import NotificationToolkit
 from jarvis_core.tools.registry import ToolRegistry, detect_platform
 from jarvis_core.tools.standard import StandardToolkit
+from jarvis_core.tools.visual_artifact import VisualArtifactToolkit
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,7 @@ def build_runtime(
     IntegrationToolkit().register_all(registry)
     DesktopA11yToolkit().register_all(registry)
     CLIAgentToolkit().register_all(registry)
+    VisualArtifactToolkit(on_ws_event=on_ws_event).register_all(registry)
 
     mcp_manager = MCPClientManager(registry)
     mcp_manager.load_from_yaml(config_dir / "mcp.yaml")

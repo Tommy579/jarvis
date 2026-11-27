@@ -14,6 +14,7 @@ import type {
   ToolCallRecord,
   ToolResultPayload,
   UsageStats,
+  VisualArtifactPayload,
 } from "../types/generated";
 
 export type JarvisTheme = "amber" | "jarvis-blue";
@@ -59,6 +60,11 @@ export interface JarvisStoreState {
   lastError: string | null;
   lastInterruptedAt: number | null;
   sessionStartedAt: string;
+  activeArtifact: VisualArtifactPayload | null;
+  artifactStepIndex: number;
+  artifactPlaying: boolean;
+  artifactMinimized: boolean;
+  artifactViewMode: "2d" | "3d";
 
   setTheme: (theme: JarvisTheme) => void;
   setActiveModel: (model: string) => void;
@@ -92,6 +98,12 @@ export interface JarvisStoreState {
   clearTranscripts: () => void;
   handleServerEvent: (event: ServerWsEvent) => void;
   setError: (err: string | null) => void;
+  setActiveArtifact: (artifact: VisualArtifactPayload | null) => void;
+  setArtifactStepIndex: (index: number) => void;
+  setArtifactPlaying: (playing: boolean) => void;
+  setArtifactMinimized: (minimized: boolean) => void;
+  setArtifactViewMode: (mode: "2d" | "3d") => void;
+  closeArtifact: () => void;
 }
 
 const DEFAULT_SENSORS: SensorState[] = [
@@ -197,6 +209,11 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
   lastError: null,
   lastInterruptedAt: null,
   sessionStartedAt: new Date().toISOString(),
+  activeArtifact: null,
+  artifactStepIndex: 0,
+  artifactPlaying: false,
+  artifactMinimized: false,
+  artifactViewMode: "3d",
 
   setTheme: (theme) => {
     if (typeof document !== "undefined") {
@@ -407,6 +424,7 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
       finalTranscript: "",
       lastInterruptedAt: Date.now(),
       audio: { amplitude: 0, low: 0, mid: 0, high: 0 },
+      artifactPlaying: false,
     })),
 
   clearTranscripts: () =>
@@ -416,6 +434,33 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
     }),
 
   setError: (lastError) => set({ lastError }),
+
+  setActiveArtifact: (artifact) =>
+    set({
+      activeArtifact: artifact,
+      artifactStepIndex: 0,
+      artifactPlaying: Boolean(artifact?.auto_play),
+      artifactMinimized: false,
+      artifactViewMode: artifact?.mode ?? "3d",
+    }),
+
+  setArtifactStepIndex: (index) =>
+    set((prev) => {
+      const total = prev.activeArtifact?.steps.length ?? 0;
+      const clamped = total > 0 ? Math.max(0, Math.min(total - 1, index)) : 0;
+      return { artifactStepIndex: clamped };
+    }),
+
+  setArtifactPlaying: (artifactPlaying) => set({ artifactPlaying }),
+  setArtifactMinimized: (artifactMinimized) => set({ artifactMinimized }),
+  setArtifactViewMode: (artifactViewMode) => set({ artifactViewMode }),
+  closeArtifact: () =>
+    set({
+      activeArtifact: null,
+      artifactStepIndex: 0,
+      artifactPlaying: false,
+      artifactMinimized: false,
+    }),
 
   handleServerEvent: (event) => {
     switch (event.type) {
@@ -653,6 +698,17 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
               },
             },
           };
+        });
+        break;
+      }
+      case "visual.artifact": {
+        const p = event.payload as VisualArtifactPayload;
+        set({
+          activeArtifact: p,
+          artifactStepIndex: 0,
+          artifactPlaying: Boolean(p.auto_play),
+          artifactMinimized: false,
+          artifactViewMode: p.mode ?? "3d",
         });
         break;
       }
