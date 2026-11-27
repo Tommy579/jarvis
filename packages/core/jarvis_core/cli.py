@@ -248,6 +248,14 @@ def _run_backup_cmd(args: argparse.Namespace) -> int:
         if not target.is_file():
             print(f"Erreur : sauvegarde introuvable ({args.file}).")
             return 1
+        from jarvis_core.doctor import is_service_running
+
+        if is_service_running() and not args.force:
+            print(
+                "Erreur : jarvis-core repond sur 127.0.0.1:8765. "
+                "Arrete le service avant de restaurer (ou --force)."
+            )
+            return 1
         if not args.yes:
             answer = input(
                 f"Restaurer {target.name} ? La base actuelle sera copiee de cote puis remplacee. [oui/N] "
@@ -356,6 +364,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     restore_p.add_argument("file", help="Nom ou chemin de la sauvegarde")
     restore_p.add_argument("--yes", action="store_true", help="Ne pas demander confirmation")
+    restore_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Restaurer meme si jarvis-core repond encore (deconseille)",
+    )
 
     # Diagnostic
     doctor_p = sub.add_parser("doctor", help="Diagnostic de l'environnement et des donnees")

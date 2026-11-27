@@ -2,7 +2,7 @@
 
 Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
-## [Non publie]
+## [2.0.1] - 2026-11-27
 
 ### Ajoute
 
@@ -22,6 +22,10 @@ Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 - Licence MIT.
 - `.dockerignore` et image Docker de production multi-etapes (Python 3.12, front compile,
   utilisateur non-root, healthcheck), verifiee par un job CI.
+- Archive de distribution Linux autonome (`packaging/build_release.sh`, `make release`) avec
+  interface precompilee, et workflow de release qui l'attache aux tags `v*`.
+- `jarvis backup restore` refuse de s'executer si jarvis-core repond encore (`--force` pour
+  outrepasser).
 
 ### Modifie
 

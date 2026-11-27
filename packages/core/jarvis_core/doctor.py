@@ -37,6 +37,11 @@ def _port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+def is_service_running(port: int = DEFAULT_PORT) -> bool:
+    """Vrai si jarvis-core accepte une connexion sur 127.0.0.1:<port>."""
+    return _port_in_use(port)
+
+
 def _database_check(db_path: Path) -> CheckResult:
     if not db_path.is_file():
         return CheckResult(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-desktop"
-version = "2.0.0"
+version = "2.0.1"
 description = "Agent de bureau JARVIS 2.0 (plateformes Linux/Windows, icone KDE StatusNotifierItem)"
 requires-python = ">=3.12"
 dependencies = [
