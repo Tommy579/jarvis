@@ -10,7 +10,7 @@ from typing import Any, Literal
 import httpx
 
 from ..memory.schema import MemoryDatabase
-from ..security import validate_http_target_host
+from ..security import redact_sensitive_text, validate_http_target_host
 from .base import BaseIntegration
 
 
@@ -91,8 +91,11 @@ class AppleCalendarIntegration(BaseIntegration):
         if not ok_host:
             raise ValueError(reason or "URL .ics interdite.")
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise RuntimeError(redact_sensitive_text(str(exc))) from None
             return parse_ics_events(resp.text, max_results=max_results)
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:

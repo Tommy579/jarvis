@@ -8,7 +8,7 @@ from typing import Any, Literal
 import httpx
 
 from ..memory.schema import MemoryDatabase
-from ..security import validate_http_target_host
+from ..security import redact_sensitive_text, validate_http_target_host
 from .base import BaseIntegration
 
 
@@ -31,18 +31,23 @@ class GitHubProbesIntegration(BaseIntegration):
         results: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
             for url in self.probe_urls:
+                safe_url = redact_sensitive_text(url)
                 ok_host, reason = await asyncio.to_thread(
                     validate_http_target_host, url, allow_private=True
                 )
                 if not ok_host:
-                    results.append({"url": url, "ok": False, "error": reason or "URL interdite."})
+                    results.append(
+                        {"url": safe_url, "ok": False, "error": reason or "URL interdite."}
+                    )
                     continue
                 try:
                     resp = await client.get(url)
                     ok = 200 <= resp.status_code < 400
-                    results.append({"url": url, "ok": ok, "status_code": resp.status_code})
+                    results.append({"url": safe_url, "ok": ok, "status_code": resp.status_code})
                 except Exception as exc:
-                    results.append({"url": url, "ok": False, "error": str(exc)})
+                    results.append(
+                        {"url": safe_url, "ok": False, "error": redact_sensitive_text(str(exc))}
+                    )
         return results
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
