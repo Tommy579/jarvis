@@ -13,6 +13,8 @@ Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
   `/api/updates/check` et `/api/system/autostart` pour des captures et tests fideles.
 - Typage progressif : `mypy` en CI sur `jarvis_shared` et les modules d'exploitation
   (`backup`, `doctor`, `updates`, `scheduler/routines`, `cli`), cible `make typecheck`.
+- Artefacts visuels 2D/3D synchronises a la voix (`present_visual_artifact`) : fenetre dediee,
+  rendu SVG/Motion ou react-three-fiber, narration etape par etape, chargement paresseux.
 
 ## [2.0.1] - 2026-11-27
 
