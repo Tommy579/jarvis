@@ -2,14 +2,30 @@
 
 Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
-## [Non publié]
+## [2.0.2] - 2026-11-27
+
+### Corrige (sécurité)
+
+- Autorisation API : cookie de session `HttpOnly` signé, `?token=` refusé sur les méthodes
+  mutantes, verrouillage anti-force-brute, `Cache-Control: no-store` sur le bootstrap.
+- Exécution : `run_command` n'hérite plus de l'environnement complet, refuse `sudo`,
+  `rm -rf`, `eval`, `curl | sh` et tient compte du `cwd` ; approbations liées à une empreinte
+  SHA-256 des arguments, à usage unique, avec expiration.
+- Contenu non fiable : encadrement `<untrusted>` non contournable (espaces, caractères de largeur
+  nulle, balise non fermée), outils MCP interactifs soumis à approbation, filtrage
+  `LD_PRELOAD`/`NODE_OPTIONS`/`PYTHONPATH`.
+- Données locales : base, WAL, wiki, sauvegardes et journaux en 0700/0600, `O_NOFOLLOW`,
+  restauration atomique, refus des sauvegardes non appartenant à l'utilisateur.
+- Infrastructure : unités systemd durcies (`systemd-analyze security` 9.0 -> 3.5), conteneur
+  `cap_drop: ALL`, `umask 077`, lanceur avec verrou d'instance et jeton masqué.
+- Chaîne d'approvisionnement : parsing RSS via `defusedxml`, révision du modèle WeSpeaker
+  épinglée, `huggingface-hub` borné à `< 2.0` (contrainte `fastembed`).
 
 ### Ajoute
 
 - Audit de sécurité en trois périmètres (API/outils, injection/navigateur, données/infra) avec
   rapports dans `docs/security/` et 28 constats corrigés, chacun couvert par un test.
 - CI `security` : bandit (sévérité moyenne et plus), `pip-audit`, `npm audit` ; cible `make security`.
-- Parsing RSS via `defusedxml` (XXE / entités) et révision épinglée du modèle WeSpeaker.
 - Empreinte `SHA256SUMS` jointe aux releases Linux et Windows, vérifiée à l'installation.
 - Gouvernance du dépôt : `SECURITY.md`, `CONTRIBUTING.md`, modèles d'issue et de PR, Dependabot.
 
