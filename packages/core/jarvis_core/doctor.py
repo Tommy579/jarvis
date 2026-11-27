@@ -105,6 +105,28 @@ def _disk_check(data_dir: Path) -> CheckResult:
     return CheckResult("espace disque", "ok", f"{free_gb:.1f} Go libres.")
 
 
+def _data_permissions_check(data_dir: Path) -> CheckResult:
+    """Signale une memoire personnelle lisible par les autres utilisateurs locaux."""
+    if os.name == "nt" or not data_dir.exists():
+        return CheckResult("permissions donnees", "ok", "non applicable.")
+    exposed: list[str] = []
+    candidates = [data_dir, data_dir / "backups", data_dir / "wiki"]
+    candidates += [data_dir / f"jarvis.db{suffix}" for suffix in ("", "-wal", "-shm")]
+    for path in candidates:
+        try:
+            if path.exists() and not _permissions_are_private(path):
+                exposed.append(f"{path.name} ({stat.S_IMODE(path.stat().st_mode):o})")
+        except OSError:
+            continue
+    if exposed:
+        return CheckResult(
+            "permissions donnees",
+            "warn",
+            "lisibles par d'autres : " + ", ".join(exposed) + f" (chmod 700 {data_dir}).",
+        )
+    return CheckResult("permissions donnees", "ok", "reservees au proprietaire.")
+
+
 def collect_checks(
     data_dir: str | Path,
     base_root: str | Path,
@@ -173,6 +195,7 @@ def collect_checks(
         checks.append(CheckResult("donnees", "fail", f"{data_path} non accessible : {exc}"))
 
     checks.append(_database_check(data_path / "jarvis.db"))
+    checks.append(_data_permissions_check(data_path))
     checks.append(_backup_check(data_path))
 
     ui_index = root / "web" / "dist" / "index.html"
