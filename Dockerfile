@@ -12,7 +12,7 @@ RUN npm run build
 
 
 # ── Etape 2 : runtime Python ───────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
