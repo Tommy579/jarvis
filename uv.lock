@@ -1309,7 +1309,7 @@ requires-dist = [
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = ">=1.0.0" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.0" },
-    { name = "huggingface-hub", marker = "extra == 'voice'", specifier = ">=0.26.0" },
+    { name = "huggingface-hub", marker = "extra == 'voice'", specifier = ">=0.26.0,<2.0" },
     { name = "jarvis-shared", editable = "packages/shared" },
     { name = "keyring", specifier = ">=25.0.0" },
     { name = "numpy", specifier = ">=1.26.0" },

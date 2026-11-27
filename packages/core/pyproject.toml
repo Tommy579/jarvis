@@ -37,7 +37,9 @@ voice = [
     "av>=13.0.0",
     "faster-whisper>=1.0.0",
     "onnxruntime>=1.19.0",
-    "huggingface-hub>=0.26.0",
+    # fastembed (extra memory) exige huggingface-hub < 2.0 : borne explicite pour que la
+    # resolution echoue tot cote outillage plutot qu'a l'installation.
+    "huggingface-hub>=0.26.0,<2.0",
 ]
 # Recherche semantique reelle (embeddings denses + sqlite-vec).
 memory = [
