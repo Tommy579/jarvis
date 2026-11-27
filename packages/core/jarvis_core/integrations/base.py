@@ -15,6 +15,7 @@ from dotenv import set_key
 from jarvis_shared.rest_models import IntegrationInfo
 
 from ..memory.schema import MemoryDatabase
+from ..security import redact_sensitive_text
 
 _OAUTH_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -143,6 +144,26 @@ _OAUTH_REFRESH_CONFIG: dict[str, tuple[str, str, str, str, str]] = {
 }
 
 
+def write_secret_env_0600(env_path: Path, key: str, value: str) -> None:
+    """Ecrit une cle dans .env en garantissant des permissions strictes 0600 avant et apres ecriture."""
+    if not key or any(ch in key for ch in ("\x00", "\n", "\r", "=")):
+        raise ValueError("Cle d'environnement invalide.")
+    if any(ch in value for ch in ("\x00", "\n", "\r")):
+        raise ValueError("Valeur d'environnement invalide (retour chariot ou octet nul interdit).")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        fd = os.open(str(env_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    else:
+        env_path.touch(exist_ok=True)
+    set_key(str(env_path), key, value)
+    if os.name != "nt":
+        os.chmod(env_path, 0o600)
+
+
 def _persist_refreshed_env(key: str, value: str) -> None:
     os.environ[key] = value
     env_raw = (
@@ -151,10 +172,8 @@ def _persist_refreshed_env(key: str, value: str) -> None:
     env_path = Path(env_raw) if env_raw else (Path.cwd() / ".env")
     if env_path.exists():
         try:
-            set_key(str(env_path), key, value)
-            if os.name != "nt":
-                os.chmod(env_path, 0o600)
-        except OSError:
+            write_secret_env_0600(env_path, key, value)
+        except (OSError, ValueError):
             pass
 
 
@@ -283,7 +302,13 @@ class BaseIntegration(ABC):
                     self.access_token = new_token
                     headers["Authorization"] = f"Bearer {new_token}"
                     resp = await client.request(method, url, headers=headers, **kwargs)
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                safe_msg = redact_sensitive_text(str(exc))
+                raise httpx.HTTPStatusError(
+                    safe_msg, request=exc.request, response=exc.response
+                ) from None
             return resp
 
 

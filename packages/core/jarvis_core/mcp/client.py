@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,26 @@ _MCP_SAFE_ENV_KEYS: tuple[str, ...] = (
 )
 
 _MAX_MCP_MESSAGE_BYTES = 16 * 1024 * 1024
+_MAX_SKIPPED_MCP_MESSAGES = 256
+_MAX_MCP_DESCRIPTION_CHARS = 600
+_MCP_IDENT_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_MCP_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
+_MCP_UNTRUSTED_TAG_RE = re.compile(r"<\s*/?\s*untrusted\b[^>]*>?", re.IGNORECASE)
+
+_FORBIDDEN_MCP_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "BASH_ENV",
+        "ENV",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "NODE_OPTIONS",
+    }
+)
 
 _DANGEROUS_PLAYWRIGHT_FRAGMENTS: tuple[str, ...] = (
     "eval",
@@ -51,7 +72,22 @@ _DANGEROUS_PLAYWRIGHT_FRAGMENTS: tuple[str, ...] = (
     "download",
     "shell",
     "command",
+    "cookie",
+    "storage",
+    "write",
+    "delete",
+    "remove",
 )
+
+
+def _sanitize_mcp_description(raw: Any, fallback: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return fallback
+    text = _MCP_UNTRUSTED_TAG_RE.sub("", text)
+    text = _MCP_CTRL_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:_MAX_MCP_DESCRIPTION_CHARS] or fallback
 
 
 def _is_safe_playwright_ui_tool(raw_name: str) -> bool:
@@ -120,7 +156,17 @@ class MCPStdioConnection:
         # N'expose jamais les secrets JARVIS de os.environ aux sous-processus MCP
         proc_env = {k: os.environ[k] for k in _MCP_SAFE_ENV_KEYS if k in os.environ}
         for k, v in self.config.env.items():
-            proc_env[str(k)] = str(v)
+            key_str = str(k).strip()
+            if not key_str or key_str.upper() in _FORBIDDEN_MCP_ENV_KEYS or "\x00" in key_str:
+                raise RuntimeError(
+                    f"Variable d'environnement interdite '{key_str}' pour le serveur MCP '{self.config.name}'."
+                )
+            val_str = str(v)
+            if "\x00" in val_str:
+                raise RuntimeError(
+                    f"Caractere nul interdit dans l'environnement du serveur MCP '{self.config.name}'."
+                )
+            proc_env[key_str] = val_str
 
         self._stderr_ring.clear()
         self._proc = await asyncio.create_subprocess_exec(
@@ -253,12 +299,17 @@ class MCPStdioConnection:
             await self._proc.stdin.drain()
 
             deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+            skipped = 0
             while True:
                 msg = await self._read_message(deadline)
-                # Ignorer les notifications intercalees du serveur
-                if "id" not in msg:
-                    continue
-                if msg.get("id") != req_id:
+                # Ignorer un nombre borne de notifications intercalees du serveur
+                if "id" not in msg or msg.get("id") != req_id:
+                    skipped += 1
+                    if skipped > _MAX_SKIPPED_MCP_MESSAGES:
+                        self.connected = False
+                        raise RuntimeError(
+                            f"Trop de messages MCP sans correspondance pour '{self.config.name}'."
+                        )
                     continue
                 if "error" in msg and msg["error"] is not None:
                     err = msg["error"]
@@ -415,10 +466,19 @@ class MCPClientManager:
 
             return _invoke
 
+        clean_srv = re.sub(r"[^a-zA-Z0-9_-]", "_", server_name or "").strip("_")
+        if not clean_srv or not _MCP_IDENT_RE.match(clean_srv):
+            raise ValueError(f"Nom de serveur MCP invalide : {server_name!r}")
+
         for tdef in tool_definitions:
-            raw_name = str(tdef.get("name") or "tool")
-            fq_name = f"mcp_{server_name}_{raw_name}"
-            desc = tdef.get("description") or f"Outil MCP {raw_name} ({server_name})"
+            raw_name = str(tdef.get("name") or "").strip()
+            if not raw_name or not _MCP_IDENT_RE.match(raw_name):
+                continue
+            fq_name = f"mcp_{clean_srv}_{raw_name}"
+            desc = _sanitize_mcp_description(
+                tdef.get("description"),
+                fallback=f"Outil MCP {raw_name} ({clean_srv})",
+            )
             risk = overrides.get(raw_name, server_cfg.default_risk)
 
             raw_schema = (

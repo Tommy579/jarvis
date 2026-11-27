@@ -24,6 +24,26 @@ interface VisualArtifactWindowProps {
   audioEngine: AudioEngine;
 }
 
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const SVG_PATH_RE = /^[Mm][MmLlHhVvCcSsQqTtAaZz0-9.,+\-\s]*$/;
+const DEFAULT_SAFE_COLOR = "#38bdf8";
+
+export function sanitizeHexColor(value: string | null | undefined): string {
+  const candidate = (value ?? "").trim();
+  return HEX_COLOR_RE.test(candidate) ? candidate : DEFAULT_SAFE_COLOR;
+}
+
+export function sanitizeSvgPath(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const candidate = value.trim();
+  if (!candidate || candidate.length > 2000) return null;
+  return SVG_PATH_RE.test(candidate) ? candidate : null;
+}
+
+function safeFinite(value: number | null | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 const CATEGORY_LABELS: Record<VisualArtifactPayload["category"], string> = {
   hardware: "Hardware & Circuits",
   architecture: "Architecture",
@@ -146,8 +166,8 @@ function Scene2DMotion({
 
   const W = 1000;
   const H = 620;
-  const px = (x: number) => (x / 100) * W;
-  const py = (y: number) => (y / 100) * H;
+  const px = (x: number) => (safeFinite(x, 50) / 100) * W;
+  const py = (y: number) => (safeFinite(y, 50) / 100) * H;
 
   return (
     <div className="artifact-canvas artifact-canvas--2d" data-testid="artifact-2d-view">
@@ -209,7 +229,7 @@ function Scene2DMotion({
             const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
             const isHighlighted = highlightedIds.has(conn.id);
             const isActive = activeConnIds.has(conn.id);
-            const strokeColor = conn.color || "#38bdf8";
+            const strokeColor = sanitizeHexColor(conn.color);
 
             return (
               <g key={conn.id} data-element-id={conn.id}>
@@ -274,8 +294,8 @@ function Scene2DMotion({
           {components.map((el) => {
             const cx = px(el.x);
             const cy = py(el.y);
-            const w = Math.max(48, (el.width / 100) * W);
-            const h = Math.max(36, (el.height / 100) * H);
+            const w = Math.max(48, (safeFinite(el.width, 14) / 100) * W);
+            const h = Math.max(36, (safeFinite(el.height, 10) / 100) * H);
             const isHighlighted = highlightedIds.has(el.id);
             const isPowered =
               el.kind === "led" &&
@@ -284,7 +304,8 @@ function Scene2DMotion({
                   (c) =>
                     activeConnIds.has(c.id) && (c.to_id === el.id || c.from_id === el.id)
                 ));
-            const color = el.color || "#38bdf8";
+            const color = sanitizeHexColor(el.color);
+            const safePath = el.kind === "svg_path" ? sanitizeSvgPath(el.svg_path) : null;
 
             return (
               <motion.g
@@ -397,9 +418,9 @@ function Scene2DMotion({
                   </g>
                 )}
 
-                {el.kind === "svg_path" && el.svg_path && (
+                {el.kind === "svg_path" && safePath && (
                   <g transform={`translate(${cx - 24}, ${cy - 24})`}>
-                    <path d={el.svg_path} fill="none" stroke={color} strokeWidth={2.5} />
+                    <path d={safePath} fill="none" stroke={color} strokeWidth={2.5} />
                   </g>
                 )}
 
@@ -562,7 +583,7 @@ function ComponentMesh3D({
   const pos = toWorldPos(el);
   const w = Math.max(0.7, el.width * 0.12);
   const d = Math.max(0.5, el.height * 0.08);
-  const color = el.color || "#38bdf8";
+  const color = sanitizeHexColor(el.color);
   const ringRef = useRef<THREE.Mesh | null>(null);
 
   useFrame(({ clock }) => {
@@ -798,7 +819,7 @@ function Scene3DInteractive({
               key={conn.id}
               from={from}
               to={to}
-              color={conn.color || "#38bdf8"}
+              color={sanitizeHexColor(conn.color)}
               isActive={activeConnIds.has(conn.id)}
             />
           );

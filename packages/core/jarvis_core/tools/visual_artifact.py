@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from collections.abc import Callable
@@ -24,10 +25,23 @@ def _clamp_pct(val: float, default: float = 50.0) -> float:
         num = float(val)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(num):
+        return default
     return round(max(4.0, min(96.0, num)), 2)
 
 
+def _clamp_finite(val: float, low: float, high: float, default: float) -> float:
+    try:
+        num = float(val)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(num):
+        return default
+    return max(low, min(high, num))
+
+
 _HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+_SVG_PATH_RE = re.compile(r"^[Mm][MmLlHhVvCcSsQqTtAaZz0-9.,+\-\s]*$")
 DEFAULT_ELEMENT_COLOR = "#38bdf8"
 
 
@@ -39,6 +53,16 @@ def _safe_color(value: str | None, default: str = DEFAULT_ELEMENT_COLOR) -> str:
     """
     candidate = (value or "").strip()
     return candidate if _HEX_COLOR_RE.match(candidate) else default
+
+
+def _safe_svg_path(value: str | None) -> str | None:
+    """N'accepte qu'une chaine de commandes de chemin SVG `d` valide (sans URL, balise ni entite)."""
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 2000:
+        return None
+    return candidate if _SVG_PATH_RE.match(candidate) else None
 
 
 class VisualElementInput(BaseModel):
@@ -181,14 +205,14 @@ class VisualArtifactToolkit:
                 color=_safe_color(el.color),
                 x=_clamp_pct(el.x),
                 y=_clamp_pct(el.y),
-                z=max(-25.0, min(25.0, float(el.z))),
-                width=max(4.0, min(50.0, float(el.width))),
-                height=max(4.0, min(50.0, float(el.height))),
+                z=_clamp_finite(el.z, -25.0, 25.0, 0.0),
+                width=_clamp_finite(el.width, 4.0, 50.0, 14.0),
+                height=_clamp_finite(el.height, 4.0, 50.0, 10.0),
                 from_id=el.from_id,
                 to_id=el.to_id,
                 from_pin=el.from_pin,
                 to_pin=el.to_pin,
-                svg_path=el.svg_path,
+                svg_path=_safe_svg_path(el.svg_path),
             )
             for el in args.elements
         ]

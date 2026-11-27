@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import re
 import sys
@@ -18,7 +19,7 @@ from ..security import wrap_untrusted_content
 from .approvals import ApprovalManager
 from .autonomy import AutonomyPolicy
 
-_UNTRUSTED_PATTERN = re.compile(r"<untrusted\b[^>]*>.*?</untrusted>", re.DOTALL | re.IGNORECASE)
+_UNTRUSTED_PATTERN = re.compile(r"<\s*untrusted\b[^>]*>?", re.IGNORECASE)
 
 _SENSITIVE_ARG_FRAGMENTS: tuple[str, ...] = (
     "password",
@@ -367,12 +368,16 @@ class ToolRegistry:
         if spec.name == "run_command" and ask_terminal_approval:
             from .standard import is_dangerous_command
 
-            if is_dangerous_command(str(args_dict.get("command") or "")):
+            cmd_cwd = str(args_dict.get("cwd") or "").strip() or None
+            if is_dangerous_command(str(args_dict.get("command") or ""), cwd=cmd_cwd):
                 effective_risk = RiskLevel.DANGEROUS
 
         skip_run_command_approval = spec.name == "run_command" and (
             not ask_terminal_approval or effective_risk < RiskLevel.DANGEROUS
         )
+
+        # Snapshot immuable des arguments valides avant toute attente d'approbation (anti-TOCTOU)
+        frozen_args = copy.deepcopy(args_dict)
 
         auto_approved = False
         if (
@@ -381,11 +386,14 @@ class ToolRegistry:
             and not skip_run_command_approval
         ):
             if self.autonomy_policy.should_auto_approve(
-                spec.name, effective_risk, autonomous_run=autonomous_run
+                spec.name,
+                effective_risk,
+                autonomous_run=autonomous_run,
+                is_interactive_ui=spec.is_interactive_ui,
             ):
                 auto_approved = True
             else:
-                safe_args = _redact_sensitive_args(args_dict)
+                safe_args = _redact_sensitive_args(frozen_args)
                 exact_cmd = safe_args.get("command") or str(safe_args)
                 req = self.approval_manager.create_request(
                     tool_name=spec.name,
@@ -393,6 +401,7 @@ class ToolRegistry:
                     description=format_approval_description(spec.name, safe_args),
                     risk=effective_risk,
                     exact_command=exact_cmd if effective_risk == RiskLevel.DANGEROUS else None,
+                    raw_arguments=frozen_args,
                 )
                 decision = await self.approval_manager.wait_for_decision(
                     req.id, timeout=approval_timeout
@@ -415,19 +424,38 @@ class ToolRegistry:
                         },
                         is_error=True,
                     )
+                if not self.approval_manager.consume_approved(req.id, spec.name, frozen_args):
+                    self._record_audit(
+                        tool_call=tool_call,
+                        risk=effective_risk,
+                        status="approval_integrity_failed",
+                        has_untrusted_context=has_untrusted_context,
+                        task_id=task_id,
+                    )
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                        output={
+                            "error": f"Approbation invalide, expiree ou deja consommee pour '{spec.name}'.",
+                            "approval_request_id": req.id,
+                            "status": "denied",
+                        },
+                        is_error=True,
+                    )
 
-        # Execution effective de l'outil
+        # Execution effective de l'outil sur la copie figee des arguments
         try:
             if spec.pass_model:
+                frozen_model = spec.args_model.model_validate(frozen_args)
                 if inspect.iscoroutinefunction(spec.handler):
-                    raw_out = await spec.handler(validated_args)
+                    raw_out = await spec.handler(frozen_model)
                 else:
-                    raw_out = await asyncio.to_thread(spec.handler, validated_args)
+                    raw_out = await asyncio.to_thread(spec.handler, frozen_model)
             else:
                 if inspect.iscoroutinefunction(spec.handler):
-                    raw_out = await spec.handler(**args_dict)
+                    raw_out = await spec.handler(**frozen_args)
                 else:
-                    raw_out = await asyncio.to_thread(spec.handler, **args_dict)
+                    raw_out = await asyncio.to_thread(spec.handler, **frozen_args)
         except Exception as e:
             self._record_audit(
                 tool_call=tool_call,
@@ -459,11 +487,16 @@ class ToolRegistry:
                     tool_usage = None
 
         # Si l'outil lit une source externe, encapsuler la sortie dans <untrusted>
+        # (sauf refus/erreur local ok=False qui ne contient aucune donnee externe).
         output_val = raw_out
-        if spec.returns_untrusted:
+        is_untrusted_out = False
+        if spec.returns_untrusted and not (
+            isinstance(raw_out, dict) and raw_out.get("ok") is False
+        ):
             source_label = spec.untrusted_source or spec.name
             text_repr = raw_out if isinstance(raw_out, str) else str(raw_out)
             output_val = wrap_untrusted_content(source_label, text_repr)
+            is_untrusted_out = True
 
         self._record_audit(
             tool_call=tool_call,
@@ -477,7 +510,7 @@ class ToolRegistry:
             name=tool_call.name,
             output=output_val,
             is_error=False,
-            is_untrusted=spec.returns_untrusted,
+            is_untrusted=is_untrusted_out,
             source=spec.untrusted_source or spec.name,
             usage=tool_usage,
         )

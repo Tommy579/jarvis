@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import wave
@@ -13,6 +14,16 @@ import wave
 import httpx
 
 logger = logging.getLogger("jarvis.tts")
+
+_URL_SECRET_RE = re.compile(r"([?&](?:key|api_key|token|access_token)=)[^&\s]+", re.IGNORECASE)
+
+
+def _sanitize_tts_log(text: str, secret: str = "") -> str:
+    cleaned = _URL_SECRET_RE.sub(r"\1***", str(text or ""))
+    if secret:
+        cleaned = cleaned.replace(secret, "***")
+    return cleaned
+
 
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.8-flash-lite-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Charon"
@@ -82,7 +93,7 @@ def synthesize_gemini_tts_wav(
     try:
         resp = httpx.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{tts_model}:generateContent",
-            params={"key": key},
+            headers={"x-goog-api-key": key},
             json={
                 "contents": [{"parts": [{"text": cleaned}]}],
                 "generationConfig": {
@@ -96,7 +107,11 @@ def synthesize_gemini_tts_wav(
             timeout=timeout,
         )
         if resp.status_code != 200:
-            logger.debug("Gemini TTS HTTP %s: %s", resp.status_code, resp.text[:200])
+            logger.debug(
+                "Gemini TTS HTTP %s: %s",
+                resp.status_code,
+                _sanitize_tts_log(resp.text[:200], key),
+            )
             return None
         payload = resp.json()
         part = payload["candidates"][0]["content"]["parts"][0]["inlineData"]
@@ -106,7 +121,9 @@ def synthesize_gemini_tts_wav(
             return raw_bytes
         return _wrap_pcm16_as_wav(raw_bytes, sample_rate=24000)
     except Exception as exc:
-        logger.debug("Erreur Gemini TTS: %s", exc)
+        logger.debug(
+            "Erreur Gemini TTS (%s): %s", type(exc).__name__, _sanitize_tts_log(str(exc), key)
+        )
         return None
 
 

@@ -193,11 +193,58 @@ _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"\b(?:chmod|chown)\b[^\n;|&]*(?:\s-[a-zA-Z]*R|\s--recursive)[^\n;|&]*\s+/(?:\s|$)"
+            r"\b(?:chmod|chown)\b[^\n;|&]*(?:\s-[a-zA-Z]*R|\s--recursive)[^\n;|&]*\s+(?:/|/home\b|/etc\b|/usr\b|/var\b)(?:\s|$)"
         ),
-        "modification recursive des permissions sur /",
+        "modification recursive des permissions sur un dossier critique",
+    ),
+    (
+        re.compile(
+            r"(?:^|[;&|(\s])(?:sudo|pkexec|doas)\b|(?:^|[;&|(\s])su(?:\s+-|\s+root\b|\s+-c\b|\s*$)"
+        ),
+        "elevation de privileges (sudo/pkexec/doas/su)",
+    ),
+    (
+        re.compile(r"\|\s*(?:/usr/bin/|/bin/)?(?:ba|z|da|k)?sh\b"),
+        "execution directe d'un flux dans un shell (pipe vers sh/bash)",
+    ),
+    (
+        re.compile(r"(?:^|[;&|(\s])eval\s+"),
+        "evaluation dynamique shell (eval)",
+    ),
+    (
+        re.compile(
+            r"\b(?:python3?|perl|ruby|node)\b[^\n]*-(?:c|e)\b[^\n]*(?:rmtree|unlink|remove|mkfs|shutdown|reboot|killpg|/etc/|/home/)"
+        ),
+        "commande destructive encapsulee dans un interpreteur (-c/-e)",
     ),
 ]
+
+_SHELL_META_RE = re.compile(r"[|&;<>()$`\"'*?\n\r~#={}\[\]!\\]")
+_SENSITIVE_ENV_SUBSTRINGS: tuple[str, ...] = (
+    "API_KEY",
+    "APIKEY",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PRIVATE_KEY",
+    "VOICE_PIN",
+    "WEBHOOK",
+    "CREDENTIAL",
+)
+
+
+def _build_sanitized_command_env() -> dict[str, str]:
+    """Construit un environnement epure sans exposer les jetons ou cles API de Jarvis aux sous-processus."""
+    clean: dict[str, str] = {}
+    for k, v in os.environ.items():
+        up = k.upper()
+        if up.startswith("JARVIS_") and up != "JARVIS_WORKDIR":
+            continue
+        if any(frag in up for frag in _SENSITIVE_ENV_SUBSTRINGS):
+            continue
+        clean[k] = v
+    return clean
 
 
 def _has_sensitive_secret_name(resolved: Path) -> bool:
@@ -258,11 +305,44 @@ def is_sensitive_system_path(path: Path) -> bool:
     return False
 
 
-def is_dangerous_command(command: str) -> str | None:
+def _is_critical_rm_cwd(cwd: str | None) -> bool:
+    raw = (cwd or "").strip()
+    target = resolve_workdir_path(raw) if raw else default_workdir()
+    if str(target) == "/":
+        return True
+    home = Path.home().resolve()
+    if target == home or target == home.parent:
+        return True
+    if os.name != "nt":
+        for prefix in _SENSITIVE_LINUX_PREFIXES:
+            p = Path(prefix)
+            if target == p or target.is_relative_to(p):
+                return True
+    return False
+
+
+def is_dangerous_command(command: str, cwd: str | None = None) -> str | None:
     """Retourne la raison du blocage si la commande est trop dangereuse, sinon None."""
+    text = (command or "").strip()
+    if not text:
+        return None
     for pattern, reason in _DANGEROUS_COMMAND_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(text):
             return reason
+    # Detection de rm recursif avec drapeaux separes (ex: rm -r -f /) ou cible relative depuis un cwd critique
+    if re.search(r"\brm\b", text) and re.search(
+        r"(?:\s-(?:[a-zA-Z]*[rR][a-zA-Z]*)|\s--recursive)\b", text
+    ):
+        if re.search(
+            r"\s+(?:/\*?|/etc\b|/usr\b|/boot\b|/bin\b|/sbin\b|/lib\d*\b|/sys\b|/proc\b|/dev\b|/root\b|/home(?:/[^/\s;|&]+)?/?|~/?)(?:\s|$|;|&|\|)",
+            text,
+        ):
+            return "suppression recursive sur un dossier systeme, racine ou home"
+        if _is_critical_rm_cwd(cwd) and re.search(
+            r"\s+(?:\.|\.\.|\*|\./\*?|etc\b|usr\b|boot\b|bin\b|sbin\b|home\b|root\b|var\b)(?:\s|$|;|&|\|)",
+            text,
+        ):
+            return "suppression recursive relative depuis un repertoire critique"
     return None
 
 
@@ -381,7 +461,7 @@ class StandardToolkit:
             self.autonomy_policy = registry.autonomy_policy
 
         for spec in self.specs().values():
-            is_external = spec.name in {"web_search", "web_fetch"}
+            is_external = spec.name in {"web_search", "web_fetch", "read_file", "get_clipboard"}
             registry.register(
                 RegistryToolSpec(
                     name=spec.name,
@@ -662,15 +742,41 @@ class StandardToolkit:
                     ),
                 }
 
+        clean_env = _build_sanitized_command_env()
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd_to_run,
-                cwd=str(work_dir),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name != "nt"),
-            )
+            import shlex
+
+            use_exec = not _SHELL_META_RE.search(cmd_to_run)
+            argv: list[str] = []
+            if use_exec:
+                try:
+                    argv = shlex.split(cmd_to_run)
+                except ValueError:
+                    use_exec = False
+                if not argv:
+                    use_exec = False
+
+            if use_exec:
+                proc = await asyncio.create_subprocess_exec(
+                    argv[0],
+                    *argv[1:],
+                    cwd=str(work_dir),
+                    env=clean_env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name != "nt"),
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd_to_run,
+                    cwd=str(work_dir),
+                    env=clean_env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=(os.name != "nt"),
+                )
             try:
                 stdout_b, stderr_b, _ = await asyncio.wait_for(
                     asyncio.gather(

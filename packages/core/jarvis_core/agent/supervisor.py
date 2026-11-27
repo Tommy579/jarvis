@@ -16,7 +16,7 @@ from jarvis_core.agent.loop import AgentLoop, SubagentStuckError
 from jarvis_core.llm.base import BudgetExceededError
 from jarvis_core.llm.catalog import ModelSelectionCatalog
 from jarvis_core.llm.router import LLMRouter
-from jarvis_core.tools.registry import ToolRegistry
+from jarvis_core.tools.registry import ToolRegistry, wrap_untrusted_content
 
 ORCHESTRATOR_ONLY_TOOLS: frozenset[str] = frozenset(
     {
@@ -132,6 +132,7 @@ class SupervisorEvent:
     recent_tools: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     tokens_used: int = 0
+    had_untrusted_context: bool = False
 
 
 @dataclass
@@ -423,7 +424,12 @@ class SubagentSupervisor:
                 run.tokens_out = sum(int(u.tokens_out) for u in res.usages)
                 run.cost_usd = round(sum(float(u.cost_usd) for u in res.usages), 6)
                 _sync_cost(run.tokens_in + run.tokens_out, run.cost_usd)
-                run.result_summary = res.text.strip()
+                raw_summary = res.text.strip()
+                run.result_summary = (
+                    wrap_untrusted_content(f"subagent:{role_profile}", raw_summary)
+                    if res.had_untrusted_context and raw_summary
+                    else raw_summary
+                )
                 run.finished_at = utc_now_iso()
 
                 if handle.stall_reported:
@@ -443,6 +449,7 @@ class SubagentSupervisor:
                             detail="Sous-agent arrêté par le superviseur.",
                             cost_usd=run.cost_usd,
                             tokens_used=run.tokens_in + run.tokens_out,
+                            had_untrusted_context=res.had_untrusted_context,
                         )
                     )
                     return
@@ -459,6 +466,7 @@ class SubagentSupervisor:
                         result_summary=run.result_summary,
                         cost_usd=run.cost_usd,
                         tokens_used=run.tokens_in + run.tokens_out,
+                        had_untrusted_context=res.had_untrusted_context,
                     )
                 )
             except BudgetExceededError as exc:

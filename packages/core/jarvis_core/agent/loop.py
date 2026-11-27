@@ -285,6 +285,8 @@ class AgentLoop:
     @staticmethod
     def _scan_untrusted(messages: list[Message]) -> bool:
         for msg in messages:
+            if msg.role == Role.SYSTEM:
+                continue
             if msg.contains_untrusted or contains_untrusted_tags(msg.content):
                 return True
             for tr in msg.tool_results:

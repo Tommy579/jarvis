@@ -41,6 +41,30 @@ NEVER_AUTO_APPROVE_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+_DANGEROUS_MCP_TOOL_FRAGMENTS: tuple[str, ...] = (
+    "eval",
+    "run_code",
+    "exec",
+    "script",
+    "upload",
+    "file",
+    "install",
+    "download",
+    "shell",
+    "command",
+    "write",
+    "delete",
+    "remove",
+)
+
+
+def _is_dangerous_mcp_tool_name(tool_name: str) -> bool:
+    low = (tool_name or "").strip().lower()
+    if not low.startswith("mcp_"):
+        return False
+    return any(frag in low for frag in _DANGEROUS_MCP_TOOL_FRAGMENTS)
+
+
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -180,11 +204,13 @@ class AutonomyPolicy:
         return True, None
 
     def is_ui_tool(self, tool_name: str, is_interactive_ui: bool = False) -> bool:
-        if tool_name in self.never_auto_approve:
+        if tool_name in self.never_auto_approve or _is_dangerous_mcp_tool_name(tool_name):
             return False
+        if tool_name.startswith("mcp_"):
+            return bool(is_interactive_ui)
         if is_interactive_ui:
             return True
-        return tool_name.startswith(("browser_", "desktop_", "mcp_playwright_"))
+        return tool_name.startswith(("browser_", "desktop_"))
 
     def can_bypass_untrusted_guard(
         self,
@@ -197,7 +223,7 @@ class AutonomyPolicy:
         """Autorise les interactions UI (niveaux <= 2) sur contexte <untrusted> uniquement en mode autonome."""
         if risk >= RiskLevel.DANGEROUS:
             return False
-        if tool_name in self.never_auto_approve:
+        if tool_name in self.never_auto_approve or _is_dangerous_mcp_tool_name(tool_name):
             return False
         effective_auto = self.mode == "autonomous" or autonomous_run
         if not effective_auto or not self.allow_browser_in_untrusted:
@@ -230,13 +256,15 @@ class AutonomyPolicy:
         risk: RiskLevel,
         *,
         autonomous_run: bool = False,
+        is_interactive_ui: bool = False,
     ) -> bool:
         """Determine si un outil niveau 2 peut s'executer sans validation humaine."""
+        _ = is_interactive_ui
         if self.emergency_stop:
             return False
         if risk >= RiskLevel.DANGEROUS:
             return False
-        if tool_name in self.never_auto_approve:
+        if tool_name in self.never_auto_approve or _is_dangerous_mcp_tool_name(tool_name):
             return False
         effective_auto = self.mode == "autonomous" or autonomous_run
         if not effective_auto:
