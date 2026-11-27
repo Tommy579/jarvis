@@ -672,3 +672,54 @@ def test_tts_sends_api_key_in_header_and_never_logs_secrets(
     assert "params" not in captured_calls[0] or "key" not in (captured_calls[0].get("params") or {})
     assert (captured_calls[0].get("headers") or {}).get("x-goog-api-key") == secret_key
     assert secret_key not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_visual_artifact_sanitizes_svg_path_and_non_finite_coords() -> None:
+    from jarvis_core.tools.visual_artifact import VisualArtifactToolkit
+
+    emitted: list[dict] = []
+    tk = VisualArtifactToolkit(on_ws_event=lambda _ev, payload: emitted.append(payload))
+
+    await tk.present_visual_artifact(
+        title="Test SVG",
+        elements=[
+            {
+                "id": "bad_url",
+                "kind": "svg_path",
+                "label": "Malveillant",
+                "color": "url(https://evil.tld/x.svg#p)",
+                "svg_path": 'M 0 0 L 10 10" onload="alert(1)',
+                "x": float("nan"),
+                "y": float("inf"),
+                "z": float("-inf"),
+                "width": float("nan"),
+                "height": float("inf"),
+            },
+            {
+                "id": "bad_entity",
+                "kind": "svg_path",
+                "label": "Entite",
+                "svg_path": "<image href='https://evil.tld/track.png'/>",
+            },
+            {
+                "id": "good_path",
+                "kind": "svg_path",
+                "label": "Valide",
+                "color": "#22c55e",
+                "svg_path": "M 0 0 L 24 12 C 30 12, 36 24, 48 24 Z",
+            },
+        ],
+        steps=[{"title": "Etape 1", "spoken_text": "Test."}],
+    )
+
+    elems = {e["id"]: e for e in emitted[0]["elements"]}
+    assert elems["bad_url"]["svg_path"] is None
+    assert elems["bad_url"]["color"] == "#38bdf8"
+    assert elems["bad_url"]["x"] == 50.0
+    assert elems["bad_url"]["y"] == 50.0
+    assert elems["bad_url"]["z"] == 0.0
+    assert elems["bad_url"]["width"] == 14.0
+    assert elems["bad_url"]["height"] == 10.0
+    assert elems["bad_entity"]["svg_path"] is None
+    assert elems["good_path"]["svg_path"] == "M 0 0 L 24 12 C 30 12, 36 24, 48 24 Z"
