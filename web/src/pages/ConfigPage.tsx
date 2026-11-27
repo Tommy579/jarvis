@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiClient } from "../api/client";
+import { apiClient, type DoctorReport } from "../api/client";
 import { Icon } from "../components/Icon";
 import { VoiceProfilesCard } from "../components/VoiceProfilesCard";
 import { QueryErrorBanner } from "../components/QueryErrorBanner";
@@ -124,6 +124,7 @@ export function ConfigPage() {
     enabled: activeTab === "models",
   });
   const [dailyBudgetDraft, setDailyBudgetDraft] = useState("5.00");
+  const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
 
   useEffect(() => {
     if (budgetQuery.data) {
@@ -403,6 +404,66 @@ export function ConfigPage() {
                   </button>
                 </div>
               </div>
+            </div>
+
+            <div className="card card--flush" style={{ marginTop: 12 }}>
+              <div className="setting">
+                <div className="setting__text">
+                  <div className="setting__label">Diagnostic de l'installation</div>
+                  <div className="setting__desc">
+                    Vérifie Python, le venv, les permissions du .env, les clés LLM, la base SQLite,
+                    le disque, le port et l'interface compilée.
+                  </div>
+                </div>
+                <div className="setting__control">
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    onClick={() =>
+                      void runMutation(async () => {
+                        const report = await apiClient.getDoctor();
+                        setDoctorReport(report);
+                        if (report.status === "fail") {
+                          return "Diagnostic : des erreurs bloquent le démarrage.";
+                        }
+                        if (report.status === "warn") {
+                          return "Diagnostic terminé avec des avertissements.";
+                        }
+                        return "Diagnostic complet : aucun problème.";
+                      })
+                    }
+                  >
+                    Lancer le diagnostic
+                  </button>
+                </div>
+              </div>
+              {doctorReport && (
+                <div style={{ padding: "0 16px 16px" }}>
+                  <ul
+                    aria-label="Résultats du diagnostic"
+                    style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 6 }}
+                  >
+                    {doctorReport.checks.map((check) => (
+                      <li key={check.name}>
+                        <strong
+                          style={{
+                            color:
+                              check.status === "fail"
+                                ? "var(--danger)"
+                                : check.status === "warn"
+                                  ? "#f5a524"
+                                  : "var(--ok)",
+                          }}
+                        >
+                          {check.name}
+                        </strong>
+                        {" — "}
+                        {check.detail}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
             </section>
           </>
