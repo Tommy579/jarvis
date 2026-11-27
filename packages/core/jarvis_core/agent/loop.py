@@ -439,7 +439,7 @@ class AgentLoop:
                 *self.history,
             ]
 
-        has_untrusted = user_msg.contains_untrusted
+        has_untrusted = user_msg.contains_untrusted or self._scan_untrusted(context_messages)
         depth_token = _CURRENT_SUBAGENT_DEPTH.set(
             max(self.subagent_depth, _CURRENT_SUBAGENT_DEPTH.get())
         )

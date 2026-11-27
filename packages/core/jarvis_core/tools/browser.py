@@ -2651,7 +2651,7 @@ class BrowserToolkit:
                 BrowserLaunchArgs,
                 self.browser_launch,
                 RiskLevel.REVERSIBLE_WRITE,
-                False,
+                True,
                 True,
             ),
             (
@@ -2669,7 +2669,7 @@ class BrowserToolkit:
                 BrowserOpenTabArgs,
                 self.browser_open_tab,
                 RiskLevel.REVERSIBLE_WRITE,
-                False,
+                True,
                 True,
             ),
             (
@@ -2714,7 +2714,7 @@ class BrowserToolkit:
                 BrowserFillArgs,
                 self.browser_fill,
                 RiskLevel.SENSITIVE,
-                False,
+                True,
                 True,
             ),
             (
@@ -2723,7 +2723,7 @@ class BrowserToolkit:
                 BrowserSelectArgs,
                 self.browser_select,
                 RiskLevel.SENSITIVE,
-                False,
+                True,
                 True,
             ),
             (
@@ -2732,7 +2732,7 @@ class BrowserToolkit:
                 BrowserUploadFileArgs,
                 self.browser_upload_file,
                 RiskLevel.SENSITIVE,
-                False,
+                True,
                 False,
             ),
             (
@@ -2777,7 +2777,7 @@ class BrowserToolkit:
                 BrowserDragArgs,
                 self.browser_drag,
                 RiskLevel.SENSITIVE,
-                False,
+                True,
                 True,
             ),
             (

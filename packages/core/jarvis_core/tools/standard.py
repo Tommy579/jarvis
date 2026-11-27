@@ -346,7 +346,7 @@ class StandardToolkit:
             self.autonomy_policy = registry.autonomy_policy
 
         for spec in self.specs().values():
-            is_external = spec.name in {"web_search", "web_fetch"}
+            is_external = spec.name in {"web_search", "web_fetch", "read_file", "get_clipboard"}
             registry.register(
                 RegistryToolSpec(
                     name=spec.name,
