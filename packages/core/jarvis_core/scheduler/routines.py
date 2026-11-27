@@ -22,6 +22,7 @@ class RoutineScheduler:
         evening_review: Callable[[], Awaitable[None]],
         nightly_consolidation: Callable[[], Awaitable[None]],
         enable_midday: bool = False,
+        daily_backup: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.scheduler.add_job(
             morning_briefing,
@@ -54,6 +55,14 @@ class RoutineScheduler:
             id="nightly_consolidation",
             replace_existing=True,
         )
+        if daily_backup is not None:
+            # 03:20 : apres la consolidation nocturne, avant le briefing du matin.
+            self.scheduler.add_job(
+                daily_backup,
+                CronTrigger(hour=3, minute=20, timezone=self.timezone),
+                id="daily_backup",
+                replace_existing=True,
+            )
         self.registered_jobs = [job.id for job in self.scheduler.get_jobs()]
 
     def start(self) -> None:

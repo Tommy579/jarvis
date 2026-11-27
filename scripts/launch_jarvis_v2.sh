@@ -15,6 +15,18 @@ ENV_FILE="$ROOT_DIR/.env"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/jarvis"
 LOG_FILE="$STATE_DIR/launch.log"
 mkdir -p "$STATE_DIR"
+
+# Rotation simple : au-dela de 5 Mo, le journal courant devient .1 (un seul archive).
+rotate_log() {
+    local file="$1" max="${2:-5242880}" size
+    [ -f "$file" ] || return 0
+    size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+    if [ "$size" -gt "$max" ]; then
+        mv -f "$file" "$file.1"
+    fi
+}
+rotate_log "$LOG_FILE"
+
 if [ ! -t 1 ]; then
     # Lancement par raccourci : tout va dans le journal.
     exec >>"$LOG_FILE" 2>&1
@@ -69,6 +81,7 @@ if ! curl -fsS "${JARVIS_WEB_URL}/api/health" >/dev/null 2>&1; then
     if [ ! -f "$ROOT_DIR/web/dist/index.html" ]; then
         echo "ATTENTION: web/dist absent, l'interface sera vide. Compile avec 'make install'."
     fi
+    rotate_log "$STATE_DIR/jarvis-core.log"
     nohup "$PYTHON_BIN" -m uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765 \
         >"$STATE_DIR/jarvis-core.log" 2>&1 &
     for _ in {1..60}; do

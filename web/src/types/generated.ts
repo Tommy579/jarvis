@@ -671,5 +671,38 @@ export interface VoiceVerifyResult {
   reason: string;
 }
 
+export interface VersionInfo {
+  version: string;
+  schema_version: number;
+  python: string;
+  platform: string;
+  data_dir: string;
+  started_at: string;
+  uptime_seconds: number;
+}
+
+export interface UpdateStatus {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  checked_at: string;
+  detail: string;
+}
+
+export interface BackupRecord {
+  name: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface BackupConfig {
+  directory: string;
+  keep: number;
+  last_backup_at: string | null;
+  backups: BackupRecord[];
+}
+
 export type ClientWsEvent = UserTextEvent | UserAudioEvent | ActionApproveEvent | AlertAckEvent | SettingsModelEvent | SensorsToggleEvent | UserInterruptEvent;
 export type ServerWsEvent = StateEvent | TranscriptPartialEvent | TranscriptFinalEvent | AssistantDeltaEvent | AssistantDoneEvent | ToolCallEvent | ToolResultEvent | TtsChunkEvent | MicLevelEvent | ApprovalRequestEvent | AlertEvent | GoalUpdatedEvent | SubagentStatusEvent | SupervisorInterventionEvent;

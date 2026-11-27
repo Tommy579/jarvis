@@ -166,6 +166,17 @@ export function ConfigPage() {
     queryFn: apiClient.getAutostart,
     enabled: activeTab === "appearance",
   });
+  const versionQuery = useQuery({
+    queryKey: ["version"],
+    queryFn: apiClient.getVersion,
+    enabled: activeTab === "appearance",
+    staleTime: 60_000,
+  });
+  const backupsQuery = useQuery({
+    queryKey: ["backups"],
+    queryFn: apiClient.getBackups,
+    enabled: activeTab === "appearance",
+  });
   const autonomyQuery = useQuery({
     queryKey: ["autonomy_policy"],
     queryFn: apiClient.getAutonomyPolicy,
@@ -331,6 +342,65 @@ export function ConfigPage() {
                       ]}
                     />
                   )}
+                </div>
+              </div>
+            </div>
+
+            <div className="card card--flush" style={{ marginTop: 12 }}>
+              <div className="setting">
+                <div className="setting__text">
+                  <div className="setting__label">Version et sauvegardes</div>
+                  <div className="setting__desc">
+                    {versionQuery.data
+                      ? `JARVIS ${versionQuery.data.version} · base v${versionQuery.data.schema_version} · ${
+                          backupsQuery.data?.backups.length ?? 0
+                        } sauvegarde(s)` +
+                        (backupsQuery.data?.last_backup_at
+                          ? ` · dernière : ${new Date(
+                              backupsQuery.data.last_backup_at
+                            ).toLocaleString()}`
+                          : " · aucune sauvegarde")
+                      : versionQuery.isError
+                        ? "Informations de version indisponibles."
+                        : "Chargement de la version…"}
+                  </div>
+                </div>
+                <div
+                  className="setting__control"
+                  style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+                >
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    disabled={backupsQuery.isFetching}
+                    onClick={() =>
+                      void runMutation(async () => {
+                        const result = await apiClient.createBackup();
+                        qc.setQueryData(["backups"], result);
+                        return "Sauvegarde créée.";
+                      })
+                    }
+                  >
+                    Sauvegarder maintenant
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    onClick={() =>
+                      void runMutation(async () => {
+                        const update = await apiClient.checkUpdates();
+                        if (update.update_available && update.latest_version) {
+                          return `Version ${update.latest_version} disponible.`;
+                        }
+                        if (update.latest_version) {
+                          return `À jour (${update.current_version}).`;
+                        }
+                        return update.detail || "Vérification impossible.";
+                      })
+                    }
+                  >
+                    Vérifier les mises à jour
+                  </button>
                 </div>
               </div>
             </div>
