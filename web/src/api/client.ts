@@ -45,6 +45,18 @@ export class HttpError extends Error {
   }
 }
 
+export interface DoctorCheck {
+  name: string;
+  status: "ok" | "warn" | "fail";
+  detail: string;
+}
+
+export interface DoctorReport {
+  status: "ok" | "warn" | "fail";
+  report: string;
+  checks: DoctorCheck[];
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
@@ -77,6 +89,7 @@ export const apiClient = {
   checkUpdates: () => requestJson<UpdateStatus>("/api/updates/check"),
   getBackups: () => requestJson<BackupConfig>("/api/backups"),
   createBackup: () => requestJson<BackupConfig>("/api/backups", { method: "POST" }),
+  getDoctor: () => requestJson<DoctorReport>("/api/doctor"),
   resolveWorkspace: (path: string) =>
     requestJson<{ found: boolean; path: string | null; display: string | null }>(
       "/api/workspace/resolve",

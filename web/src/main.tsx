@@ -2,7 +2,9 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AuthGate } from "./components/AuthGate";
+import { installGlobalErrorHandlers } from "./lib/globalErrors";
 import "./styles/theme.css";
 
 const queryClient = new QueryClient({
@@ -21,13 +23,17 @@ if (import.meta.env.PROD && typeof navigator !== "undefined" && "serviceWorker" 
   });
 }
 
+installGlobalErrorHandlers();
+
 const rootEl = document.getElementById("root");
 if (rootEl) {
   createRoot(rootEl).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <AuthGate>
-          <App />
+          <AppErrorBoundary>
+            <App />
+          </AppErrorBoundary>
         </AuthGate>
       </QueryClientProvider>
     </StrictMode>
