@@ -5,6 +5,7 @@ import { apiClient } from "./api/client";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { Icon, type IconName } from "./components/Icon";
 import { JarvisLogo } from "./components/JarvisLogo";
+import { VisualArtifactWindow } from "./components/VisualArtifactWindow";
 import { ErrorBanner, Skeleton, Toaster } from "./components/ui";
 import { describeApiError } from "./lib/apiErrors";
 import { setSchemePreference, useColorScheme } from "./lib/colorScheme";
@@ -173,6 +174,7 @@ export function App() {
   const wsClientRef = useRef<JarvisWsClient | null>(null);
   const ttsReceivedRef = useRef(false);
   const spokenPrefixRef = useRef("");
+  const artifactEmittedThisTurnRef = useRef(false);
   const { resolved: resolvedScheme, system: systemScheme } = useColorScheme();
 
   const wsConnected = useJarvisStore((s) => s.wsConnected);
@@ -374,20 +376,26 @@ export function App() {
         if (ev.type === "state" && ev.payload.value === "thinking") {
           ttsReceivedRef.current = false;
           spokenPrefixRef.current = "";
+          artifactEmittedThisTurnRef.current = false;
+        }
+        if (ev.type === "visual.artifact") {
+          artifactEmittedThisTurnRef.current = true;
         }
         handleServerEvent(ev);
         if (ev.type === "tool.call" && !ttsReceivedRef.current && !spokenPrefixRef.current) {
           const streamed = useJarvisStore.getState().streamingText.trim();
           if (streamed.length >= 12) {
             spokenPrefixRef.current = streamed;
-            audioEngine.speakText(streamed, apiClient.speakVoice);
+            void audioEngine.speakText(streamed, apiClient.speakVoice);
           }
         }
         if (ev.type === "alert" && ev.payload.message && ev.payload.urgency >= 2) {
-          audioEngine.speakText(ev.payload.message, apiClient.speakVoice);
+          void audioEngine.speakText(ev.payload.message, apiClient.speakVoice);
         }
         if (ev.type === "assistant.done") {
-          if (!ttsReceivedRef.current) {
+          const artifactNarrating =
+            artifactEmittedThisTurnRef.current && useJarvisStore.getState().artifactPlaying;
+          if (!ttsReceivedRef.current && !artifactNarrating) {
             const msgs = useJarvisStore.getState().messages;
             const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
             const fullText = lastAssistant?.content?.trim() ?? "";
@@ -1305,6 +1313,7 @@ export function App() {
           </AnimatePresence>
         </main>
 
+        <VisualArtifactWindow audioEngine={audioEngine} />
         <CommandPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}

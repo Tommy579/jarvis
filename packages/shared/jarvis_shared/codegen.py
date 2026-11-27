@@ -146,6 +146,7 @@ def generate_typescript() -> str:
         "GoalUpdatedEvent",
         "SubagentStatusEvent",
         "SupervisorInterventionEvent",
+        "VisualArtifactEvent",
     ]
     lines.append(f"export type ClientWsEvent = {' | '.join(client_events)};")
     lines.append(f"export type ServerWsEvent = {' | '.join(server_events)};")

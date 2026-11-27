@@ -221,8 +221,18 @@ export class AudioEngine {
   private standbyMode = false;
   private standbySpeechThreshold = SPEECH_STANDBY_THRESHOLD;
   private wasPlaying = false;
+  private playbackWaiters: Set<(completed: boolean) => void> = new Set();
   public onPlaybackEnded?: () => void;
   public onPlaybackStateChange?: (playing: boolean) => void;
+
+  private flushPlaybackWaiters(completed: boolean): void {
+    if (this.playbackWaiters.size === 0) return;
+    const waiters = Array.from(this.playbackWaiters);
+    this.playbackWaiters.clear();
+    for (const resolve of waiters) {
+      resolve(completed);
+    }
+  }
 
   private emitPlaybackState(): void {
     const playing = this.isPlaying();
@@ -345,6 +355,7 @@ export class AudioEngine {
         this.activeSources.delete(src);
         if (this.activeSources.size === 0) {
           this.emitPlaybackState();
+          this.flushPlaybackWaiters(true);
           this.onPlaybackEnded?.();
         }
       };
@@ -358,15 +369,18 @@ export class AudioEngine {
     fetchTts?: (
       text: string,
       signal?: AbortSignal
-    ) => Promise<{ audio_base64: string; sample_rate?: number }>
-  ): void {
+    ) => Promise<{ audio_base64: string; sample_rate?: number }>,
+    options?: { fallbackSilentWait?: boolean }
+  ): Promise<boolean> {
     const cleaned = text
       .replace(/<untrusted[^>]*>[\s\S]*?<\/untrusted>/g, "")
       .replace(/```[\s\S]*?```/g, "")
       .replace(/[*_#~>`|]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    if (!cleaned || !fetchTts) return;
+    if (!cleaned || !fetchTts) {
+      return Promise.resolve(false);
+    }
 
     this.stopPlayback();
     this.ensureContext();
@@ -374,16 +388,54 @@ export class AudioEngine {
 
     const controller = new AbortController();
     this.speakAbort = controller;
-    const req =
-      fetchTts.length >= 2 ? fetchTts(cleaned, controller.signal) : fetchTts(cleaned);
-    req
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        if (res?.audio_base64) {
-          this.playTtsChunk(res.audio_base64, res.sample_rate ?? 16000);
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (completed: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (fallbackTimer !== null) {
+          clearTimeout(fallbackTimer);
+          fallbackTimer = null;
         }
-      })
-      .catch(() => undefined);
+        this.playbackWaiters.delete(onPlaybackDone);
+        resolve(completed);
+      };
+      const onPlaybackDone = (completed: boolean) => {
+        finish(completed);
+      };
+      this.playbackWaiters.add(onPlaybackDone);
+
+      const req =
+        fetchTts.length >= 2 ? fetchTts(cleaned, controller.signal) : fetchTts(cleaned);
+      req
+        .then((res) => {
+          if (controller.signal.aborted) {
+            finish(false);
+            return;
+          }
+          if (res?.audio_base64) {
+            this.playTtsChunk(res.audio_base64, res.sample_rate ?? 16000);
+          }
+          if (this.activeSources.size === 0) {
+            if (options?.fallbackSilentWait) {
+              const estMs = Math.max(1800, Math.min(8000, cleaned.length * 48));
+              fallbackTimer = setTimeout(() => finish(true), estMs);
+            } else {
+              finish(Boolean(res?.audio_base64));
+            }
+          }
+        })
+        .catch(() => {
+          if (controller.signal.aborted || !options?.fallbackSilentWait) {
+            finish(false);
+            return;
+          }
+          const estMs = Math.max(1800, Math.min(8000, cleaned.length * 48));
+          fallbackTimer = setTimeout(() => finish(true), estMs);
+        });
+    });
   }
 
   async startMicrophone(callbacks?: MicrophoneCallbacks): Promise<boolean> {
@@ -744,6 +796,7 @@ export class AudioEngine {
     }
     this.smoothed = { amplitude: 0, low: 0, mid: 0, high: 0 };
     this.emitPlaybackState();
+    this.flushPlaybackWaiters(false);
   }
 
   sample(dtMs: number, externalMicLevel = 0): AudioMetrics {
