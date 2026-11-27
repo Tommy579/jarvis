@@ -7,6 +7,7 @@ import type {
   AutonomousTaskRecord,
   AutonomyPolicyConfig,
   AutonomyPolicyUpdate,
+  BackupConfig,
   BlacklistConfig,
   ChatMessage,
   DailyUsageItem,
@@ -24,6 +25,8 @@ import type {
   PersonRecord,
   RoleModelConfig,
   SystemAutostartConfig,
+  UpdateStatus,
+  VersionInfo,
   VoiceProfilesConfig,
   VoiceVerifyResult,
   WikiPage,
@@ -69,7 +72,11 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const apiClient = {
-  getHealth: () => requestJson<{ status: string; service: string }>("/api/health"),
+  getHealth: () => requestJson<{ status: string; service: string; version?: string }>("/api/health"),
+  getVersion: () => requestJson<VersionInfo>("/api/version"),
+  checkUpdates: () => requestJson<UpdateStatus>("/api/updates/check"),
+  getBackups: () => requestJson<BackupConfig>("/api/backups"),
+  createBackup: () => requestJson<BackupConfig>("/api/backups", { method: "POST" }),
   resolveWorkspace: (path: string) =>
     requestJson<{ found: boolean; path: string | null; display: string | null }>(
       "/api/workspace/resolve",

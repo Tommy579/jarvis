@@ -97,6 +97,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $(grep ^JARVI
 
 # la suite de tests (doit être verte)
 make test
+
+# diagnostic complet : python, venv, .env, cles, base SQLite, disque, port, interface
+.venv/bin/jarvis doctor
 ```
 
 ### Installation manuelle (sans script)

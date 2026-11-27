@@ -74,4 +74,23 @@ cd web && npm run build && npx vitest run && npx playwright test
 ```
 
 La CI ajoute un job d'installation propre : les paquets sont installes dans un venv vierge avec
-leurs seules dependances declarees, puis `jarvis_core.api.server` doit s'importer.
+leurs seules dependances declarees, puis `jarvis_core.api.server` doit s'importer. Un job
+`docker` construit l'image de production et verifie `/api/health`.
+
+## Exploitation : version, sauvegardes, diagnostic
+
+- `GET /api/version` expose la version installee, la version du schema SQLite et l'uptime.
+  L'ecran Config > Apparence affiche cette version et permet de verifier les mises a jour
+  (`GET /api/updates/check`, derniere release GitHub, cache de 6 h).
+- Sauvegardes : instantane SQLite coherent (API `backup`, compatible WAL) chaque nuit a 03:20,
+  au demarrage si la derniere date de plus de 24 h, et a la demande.
+
+```bash
+jarvis backup now            # sauvegarde immediate
+jarvis backup list           # 7 dernieres par defaut (JARVIS_BACKUP_KEEP)
+jarvis backup restore <nom>  # service jarvis-core arrete ; l'ancienne base est copiee de cote
+jarvis doctor                # python, venv, .env, cles, base, disque, port, interface
+```
+
+Les journaux vivent dans `~/.local/state/jarvis/` (`launch.log`, `jarvis-core.log`) et sont
+rotationnes a 5 Mo par le lanceur, pour ne pas grossir indefiniment.

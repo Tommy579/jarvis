@@ -513,3 +513,39 @@ class VoiceVerifyResult(BaseModel):
     score: float = 0.0
     threshold: float = 0.48
     reason: str = ""
+
+
+# === Systeme, version et sauvegardes ===
+
+
+class VersionInfo(BaseModel):
+    version: str
+    schema_version: int
+    python: str
+    platform: str
+    data_dir: str
+    started_at: str
+    uptime_seconds: int
+
+
+class UpdateStatus(BaseModel):
+    current_version: str
+    latest_version: str | None = None
+    update_available: bool = False
+    release_url: str | None = None
+    published_at: str | None = None
+    checked_at: str
+    detail: str = ""
+
+
+class BackupRecord(BaseModel):
+    name: str
+    size_bytes: int
+    created_at: str
+
+
+class BackupConfig(BaseModel):
+    directory: str
+    keep: int
+    last_backup_at: str | None = None
+    backups: list[BackupRecord] = Field(default_factory=list)

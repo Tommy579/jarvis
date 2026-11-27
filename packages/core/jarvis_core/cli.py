@@ -203,9 +203,97 @@ async def _run_notify_test_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _data_dir() -> Path:
+    return Path(os.environ.get("JARVIS_DATA_DIR", str(ROOT_DIR / "jarvis-data"))).expanduser()
+
+
+def _run_backup_cmd(args: argparse.Namespace) -> int:
+    from jarvis_core.backup import (
+        BackupError,
+        backup_database,
+        backup_dir_for,
+        backup_keep,
+        list_backups,
+        restore_database,
+    )
+
+    data_dir = _data_dir()
+    directory = backup_dir_for(data_dir)
+    db_path = data_dir / "jarvis.db"
+
+    if args.action == "now":
+        try:
+            target = backup_database(db_path, directory)
+        except BackupError as exc:
+            print(f"Erreur : {exc}")
+            return 1
+        print(f"Sauvegarde creee : {target} ({target.stat().st_size / 1024:.1f} Ko)")
+        return 0
+
+    if args.action == "list":
+        items = list_backups(directory)
+        if not items:
+            print(f"Aucune sauvegarde dans {directory}.")
+            return 0
+        print(f"{'Nom':<32} {'Taille':>10}  Creee le")
+        for info in items:
+            print(f"{info.path.name:<32} {info.size_bytes / 1024:>7.1f} Ko  {info.created_at}")
+        print(f"\nConservees : {backup_keep()} (JARVIS_BACKUP_KEEP)")
+        return 0
+
+    if args.action == "restore":
+        target = Path(args.file).expanduser()
+        if not target.is_file():
+            target = directory / args.file
+        if not target.is_file():
+            print(f"Erreur : sauvegarde introuvable ({args.file}).")
+            return 1
+        if not args.yes:
+            answer = input(
+                f"Restaurer {target.name} ? La base actuelle sera copiee de cote puis remplacee. [oui/N] "
+            )
+            if answer.strip().lower() not in ("oui", "o", "yes", "y"):
+                print("Restauration annulee.")
+                return 1
+        try:
+            safety = restore_database(target, db_path, directory)
+        except BackupError as exc:
+            print(f"Erreur : {exc}")
+            return 1
+        print(f"Base restauree depuis {target.name}.")
+        if safety is not None:
+            print(f"Ancienne base conservee : {safety}")
+        print("Redemarre jarvis-core pour recharger la base.")
+        return 0
+
+    return 0
+
+
+def _run_doctor_cmd(args: argparse.Namespace) -> int:
+    import json
+
+    from jarvis_core.doctor import collect_checks, format_report, worst_status
+
+    checks = collect_checks(_data_dir(), ROOT_DIR, ROOT_DIR / ".env")
+    status = worst_status(checks)
+    if args.json:
+        payload = {
+            "status": status,
+            "checks": [
+                {"name": check.name, "status": check.status, "detail": check.detail}
+                for check in checks
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(format_report(checks))
+    return 0 if status != "fail" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="jarvis", description="JARVIS 2.0 CLI (chat, eval, orders, policy, notify)"
+        prog="jarvis",
+        description="JARVIS 2.0 CLI (chat, eval, orders, policy, notify, backup, doctor)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -258,6 +346,21 @@ def main(argv: list[str] | None = None) -> int:
     test_p.add_argument("--channel", default="telegram", help="Canal à tester (telegram)")
     test_p.add_argument("--message", default="Test de notification Jarvis", help="Message du test")
 
+    # Backups
+    backup_p = sub.add_parser("backup", help="Sauvegarde et restaure la base memoire")
+    backup_sub = backup_p.add_subparsers(dest="action", required=True)
+    backup_sub.add_parser("now", help="Cree une sauvegarde immediatement")
+    backup_sub.add_parser("list", help="Liste les sauvegardes existantes")
+    restore_p = backup_sub.add_parser(
+        "restore", help="Restaure une sauvegarde (service jarvis-core arrete)"
+    )
+    restore_p.add_argument("file", help="Nom ou chemin de la sauvegarde")
+    restore_p.add_argument("--yes", action="store_true", help="Ne pas demander confirmation")
+
+    # Diagnostic
+    doctor_p = sub.add_parser("doctor", help="Diagnostic de l'environnement et des donnees")
+    doctor_p.add_argument("--json", action="store_true", help="Sortie JSON")
+
     args = parser.parse_args(argv)
     if args.command == "eval":
         return asyncio.run(_run_eval_cmd(save=bool(args.save)))
@@ -269,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_policy_cmd(args)
     if args.command == "notify" and args.action == "test":
         return asyncio.run(_run_notify_test_cmd(args))
+    if args.command == "backup":
+        return _run_backup_cmd(args)
+    if args.command == "doctor":
+        return _run_doctor_cmd(args)
     return 0
 
 

@@ -10,6 +10,7 @@ import html
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -43,6 +44,8 @@ from jarvis_shared.rest_models import (
     AutonomyAuditEntry,
     AutonomyPolicyConfig,
     AutonomyPolicyUpdate,
+    BackupConfig,
+    BackupRecord,
     BlacklistConfig,
     ChatMessage,
     DailyUsageItem,
@@ -67,17 +70,29 @@ from jarvis_shared.rest_models import (
     SystemAutostartUpdate,
     ToolCallRecord,
     UpdateRoleModelRequest,
+    UpdateStatus,
+    VersionInfo,
     VipContact,
     VoiceProfilesConfig,
     VoiceVerifyResult,
     WikiPage,
     WikiUpdate,
 )
+from jarvis_shared.version import app_version
 from jarvis_shared.ws_protocol import ClientWsEvent, SensorName
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from ..audio_ducking import SystemAudioDucker
 from ..autostart import get_autostart_status, set_autostart_enabled
+from ..backup import (
+    BackupError,
+    backup_database,
+    backup_dir_for,
+    backup_keep,
+    latest_backup,
+    list_backups,
+)
+from ..doctor import collect_checks, format_report, worst_status
 from ..integrations import (
     AppleCalendarIntegration,
     FinanceIntegration,
@@ -113,6 +128,7 @@ from ..runtime import JarvisRuntime, build_runtime
 from ..scheduler.briefings import agenda_from_events, build_evening_review, build_morning_briefing
 from ..scheduler.routines import RoutineScheduler
 from ..security import SecretStore, SlidingWindowRateLimiter, verify_action_token
+from ..updates import check_for_update
 from ..voice_profiles import VoiceProfileStore, decode_audio_to_16k
 
 logger = logging.getLogger(__name__)
@@ -322,6 +338,8 @@ class JarvisCoreState:
 
         self.storage = MemoryStorage(self.data_dir / "jarvis.db", database=self.db)
         self.onboarding = OnboardingService(self.db, self.wiki_dir)
+        self.started_at = datetime.now(timezone.utc)
+        self.backup_dir = backup_dir_for(self.data_dir)
         self.ws_broadcast_queues: set[asyncio.Queue[tuple[str, dict[str, Any]]]] = set()
         self._ws_fanout_tasks: list[asyncio.Task[Any]] = []
         self._last_proactive_alert_ts: float = 0.0
@@ -1345,12 +1363,20 @@ def _build_routine_scheduler(state: "JarvisCoreState") -> "RoutineScheduler":
         except Exception:
             logger.exception("Echec de la consolidation nocturne")
 
+    async def _daily_backup() -> None:
+        try:
+            target = await asyncio.to_thread(backup_database, state.db.db_path, state.backup_dir)
+            logger.info("Sauvegarde quotidienne : %s", target)
+        except Exception:
+            logger.exception("Echec de la sauvegarde quotidienne")
+
     scheduler.configure_defaults(
         morning_briefing=_morning_briefing,
         pre_meeting_check=_pre_meeting_check,
         midday_check=None,
         evening_review=_evening_review,
         nightly_consolidation=_nightly_consolidation,
+        daily_backup=_daily_backup,
     )
     return scheduler
 
@@ -1361,6 +1387,37 @@ def _check_token(request_token: str | None) -> None:
         return
     if not request_token or not hmac.compare_digest(request_token.strip(), expected):
         raise HTTPException(status_code=401, detail="Jeton d'acces invalide ou manquant.")
+
+
+def _backup_config(state: "JarvisCoreState") -> BackupConfig:
+    """Etat des sauvegardes pour l'API et le CLI."""
+    infos = list_backups(state.backup_dir)
+    return BackupConfig(
+        directory=str(state.backup_dir),
+        keep=backup_keep(),
+        last_backup_at=infos[0].created_at if infos else None,
+        backups=[
+            BackupRecord(
+                name=info.path.name, size_bytes=info.size_bytes, created_at=info.created_at
+            )
+            for info in infos
+        ],
+    )
+
+
+def _backup_is_stale(backup_dir: Path, max_age_hours: float = 24.0) -> bool:
+    """Vrai si aucune sauvegarde recente n'existe (rattrapage au demarrage)."""
+    latest = latest_backup(backup_dir)
+    if latest is None:
+        return True
+    try:
+        created = datetime.fromisoformat(latest.created_at)
+    except ValueError:
+        return True
+    age_hours = (
+        datetime.now(timezone.utc) - created.astimezone(timezone.utc)
+    ).total_seconds() / 3600
+    return age_hours >= max_age_hours
 
 
 class DailyBudgetUpdate(BaseModel):
@@ -1997,6 +2054,17 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             core_state.scheduler.start()
             logger.info("Routines planifiees demarrees : %s", core_state.scheduler.registered_jobs)
 
+        # Rattrapage : si la derniere sauvegarde date de plus de 24 h (service arrete la
+        # nuit, machine eteinte), on en cree une avant de servir des requetes.
+        if not core_state._is_isolated_test and _backup_is_stale(core_state.backup_dir):
+            try:
+                target = await asyncio.to_thread(
+                    backup_database, core_state.db.db_path, core_state.backup_dir
+                )
+                logger.info("Sauvegarde de demarrage : %s", target)
+            except Exception:
+                logger.exception("Sauvegarde de demarrage impossible")
+
         try:
             yield
         finally:
@@ -2082,7 +2150,48 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "jarvis-core"}
+        return {"status": "ok", "service": "jarvis-core", "version": app_version()}
+
+    @application.get("/api/version", response_model=VersionInfo)
+    def get_version() -> VersionInfo:
+        now = datetime.now(timezone.utc)
+        return VersionInfo(
+            version=app_version(),
+            schema_version=core_state.db.schema_version,
+            python=platform.python_version(),
+            platform=platform.platform(),
+            data_dir=str(core_state.data_dir),
+            started_at=core_state.started_at.isoformat(),
+            uptime_seconds=int((now - core_state.started_at).total_seconds()),
+        )
+
+    @application.get("/api/updates/check", response_model=UpdateStatus)
+    async def get_update_status() -> UpdateStatus:
+        return await check_for_update(app_version())
+
+    @application.get("/api/backups", response_model=BackupConfig)
+    def get_backups() -> BackupConfig:
+        return _backup_config(core_state)
+
+    @application.post("/api/backups", response_model=BackupConfig)
+    def create_backup() -> BackupConfig:
+        try:
+            backup_database(core_state.db.db_path, core_state.backup_dir)
+        except BackupError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return _backup_config(core_state)
+
+    @application.get("/api/doctor")
+    def run_doctor() -> dict[str, Any]:
+        checks = collect_checks(core_state.data_dir, core_state.base_root, core_state.env_file)
+        return {
+            "status": worst_status(checks),
+            "report": format_report(checks),
+            "checks": [
+                {"name": check.name, "status": check.status, "detail": check.detail}
+                for check in checks
+            ],
+        }
 
     @application.post("/api/workspace/resolve")
     def resolve_workspace_endpoint(payload: WorkspaceResolveRequest) -> dict[str, Any]:
