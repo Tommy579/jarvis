@@ -3,16 +3,58 @@ Description=JARVIS 2.0 Core Service (FastAPI, Agent, Memoire, Attention)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
+# Prerequis (une fois) : utilisateur systeme dedie, jamais root. Sans User=, l'agent et
+# son outil run_command tourneraient avec tous les droits de la machine.
+#   sudo useradd --system --home-dir /var/lib/jarvis --shell /usr/sbin/nologin jarvis
+#   sudo usermod -aG audio,video jarvis
+#   sudo chown -R jarvis:jarvis /opt/jarvis/jarvis-data /opt/jarvis/.env
+#   sudo chmod 700 /opt/jarvis/jarvis-data && sudo chmod 600 /opt/jarvis/.env
+# Verification : systemd-analyze security jarvis-core.service
+
 [Service]
 Type=simple
+User=jarvis
+Group=jarvis
+SupplementaryGroups=audio video
 WorkingDirectory=/opt/jarvis
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/jarvis/packages/shared:/opt/jarvis/packages/core:/opt/jarvis/packages/desktop
+# Caches des modeles (fastembed, whisper) hors de /opt et hors de /home.
+Environment=HOME=/var/lib/jarvis
+Environment=XDG_CACHE_HOME=/var/cache/jarvis
+Environment=XDG_STATE_HOME=/var/lib/jarvis/state
+StateDirectory=jarvis
+StateDirectoryMode=0700
+CacheDirectory=jarvis
+CacheDirectoryMode=0700
 ExecStart=/opt/jarvis/.venv/bin/uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=5
+
+# --- Durcissement -------------------------------------------------------------
+# Fichiers crees (base, -wal/-shm, wiki, sauvegardes, .env) : proprietaire seul.
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+# Systeme en lecture seule ; seules les donnees et .env (reecrit via un fichier
+# temporaire du meme dossier par python-dotenv) restent modifiables.
+ProtectSystem=strict
+ReadWritePaths=/opt/jarvis
+ProtectHome=true
+# Pas de PrivateDevices : la voix (micro) et la camera passent par /dev/snd et /dev/video*.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

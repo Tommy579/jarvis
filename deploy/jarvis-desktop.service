@@ -12,5 +12,14 @@ ExecStart=%h/Documents/jarvis/.venv/bin/python -m jarvis_desktop.tray_sni
 Restart=on-failure
 RestartSec=3
 
+# --- Durcissement compatible unite utilisateur -------------------------------
+# ProtectSystem/ProtectHome sont volontairement absents : l'agent bureau lit la
+# session (D-Bus, Wayland, ~/.local/state) et pilote les applications de l'utilisateur.
+UMask=0077
+NoNewPrivileges=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
 [Install]
 WantedBy=graphical-session.target
