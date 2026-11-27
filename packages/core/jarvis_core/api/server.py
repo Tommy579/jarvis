@@ -2142,7 +2142,8 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; "
+            "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; "
+            "frame-ancestors 'none'; worker-src 'self' blob:; "
             "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; connect-src 'self' ws: wss:;"
         )

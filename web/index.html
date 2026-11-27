@@ -4,18 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <script>
-      // Applique la preference d'apparence avant le premier rendu (evite le flash).
-      try {
-        var s = localStorage.getItem("jarvis_color_scheme");
-        if (s === "light" || s === "dark") {
-          document.querySelector('meta[name="color-scheme"]').content = s;
-        }
-        if (localStorage.getItem("jarvis_accent") === "amber") {
-          document.documentElement.setAttribute("data-theme", "amber");
-        }
-      } catch (e) {}
-    </script>
+    <script src="/theme-init.js"></script>
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f7fa" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111418" />
     <title>JARVIS 2.0 | Assistant personnel</title>

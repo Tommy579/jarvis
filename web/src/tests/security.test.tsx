@@ -6,6 +6,7 @@ import {
   sanitizeSvgPath,
   VisualArtifactWindow,
 } from "../components/VisualArtifactWindow";
+import { clearAuthToken, getAuthToken } from "../lib/authToken";
 import type { AudioEngine } from "../sphere/AudioEngine";
 import { useJarvisStore } from "../store/useJarvisStore";
 
@@ -115,5 +116,14 @@ describe("securite du rendu Markdown et des artefacts SVG", () => {
     expect(customPaths?.length ?? 0).toBe(0);
 
     useJarvisStore.getState().closeArtifact();
+  });
+
+  it("migre automatiquement un jeton legacy localStorage vers sessionStorage des la lecture", () => {
+    clearAuthToken();
+    window.localStorage.setItem("jarvis_api_token", "legacy-secret-token");
+    expect(getAuthToken()).toBe("legacy-secret-token");
+    expect(window.sessionStorage.getItem("jarvis_api_token")).toBe("legacy-secret-token");
+    expect(window.localStorage.getItem("jarvis_api_token")).toBeNull();
+    clearAuthToken();
   });
 });

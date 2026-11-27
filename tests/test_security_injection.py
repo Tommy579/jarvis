@@ -723,3 +723,38 @@ async def test_visual_artifact_sanitizes_svg_path_and_non_finite_coords() -> Non
     assert elems["bad_url"]["height"] == 10.0
     assert elems["bad_entity"]["svg_path"] is None
     assert elems["good_path"]["svg_path"] == "M 0 0 L 24 12 C 30 12, 36 24, 48 24 Z"
+
+
+def test_csp_forbids_unsafe_inline_scripts_and_index_html_has_no_inline_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import re
+
+    from fastapi.testclient import TestClient
+    from jarvis_core.api.server import JarvisCoreState, create_app
+
+    monkeypatch.setenv("JARVIS_API_TOKEN", "csp-test-token")
+    state = JarvisCoreState(
+        data_dir=tmp_path / "data",
+        config_dir=Path(__file__).resolve().parents[1] / "config",
+        legacy_profile_path=tmp_path / "missing.json",
+    )
+    app = create_app(state)
+    with TestClient(app) as client:
+        resp = client.get("/api/health")
+    csp = resp.headers.get("content-security-policy", "")
+    script_src = next(
+        (d.strip() for d in csp.split(";") if d.strip().startswith("script-src ")), ""
+    )
+    assert script_src == "script-src 'self'"
+    assert "object-src 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+    index_html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    inline_scripts = re.findall(
+        r"<script(?![^>]*\bsrc=)[^>]*>.*?</script>", index_html, re.DOTALL | re.IGNORECASE
+    )
+    assert inline_scripts == []

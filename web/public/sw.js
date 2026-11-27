@@ -1,5 +1,5 @@
-const CACHE_NAME = "jarvis-web-v13";
-const ASSETS = ["/manifest.webmanifest", "/favicon.svg?v=5"];
+const CACHE_NAME = "jarvis-web-v14";
+const ASSETS = ["/manifest.webmanifest", "/favicon.svg?v=5", "/theme-init.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

@@ -33,7 +33,18 @@ function readLocal(): string {
 }
 
 export function getAuthToken(): string {
-  return readSession() || readLocal();
+  const sessionToken = readSession();
+  if (sessionToken) return sessionToken;
+  const legacyToken = readLocal();
+  if (legacyToken && hasWindow()) {
+    try {
+      window.sessionStorage.setItem(STORAGE_KEY, legacyToken);
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // sessionStorage indisponible : on conserve le repli localStorage
+    }
+  }
+  return legacyToken;
 }
 
 export function setAuthToken(token: string, persist = false): void {
