@@ -88,13 +88,18 @@ else
 fi
 
 # ── Step 4: Interface Web React (web/dist) ──────────────
-step "4/5 · Compilation de l'interface Web 2.0"
+step "4/5 · Interface Web 2.0"
 
-if [ -d "$SCRIPT_DIR/web" ] && [ -f "$SCRIPT_DIR/web/package.json" ]; then
+if [ -f "$SCRIPT_DIR/web/dist/index.html" ] && [ "${JARVIS_FORCE_WEB_BUILD:-0}" != "1" ]; then
+    ok "Interface deja compilee (web/dist) : compilation ignoree"
+elif [ -d "$SCRIPT_DIR/web" ] && [ -f "$SCRIPT_DIR/web/package.json" ]; then
+    if ! command -v npm >/dev/null 2>&1; then
+        fail "Node/npm requis pour compiler l'interface (absente de cette archive)."
+    fi
     cd "$SCRIPT_DIR/web"
     npm ci --no-audit --no-fund
     npm run build
-    ok "Frontend compilé dans web/dist"
+    ok "Frontend compile dans web/dist"
 else
     fail "Dossier web/ introuvable dans $SCRIPT_DIR"
 fi
