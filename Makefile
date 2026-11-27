@@ -1,6 +1,6 @@
 # Makefile pour JARVIS 2.0 (Open Mind Interface)
 
-.PHONY: install install-full run dev-core dev-web test test-cov test-e2e test-browser lint format codegen-types release clean
+.PHONY: install install-full run dev-core dev-web test test-cov test-e2e test-browser lint typecheck format codegen-types release clean
 
 ifeq ($(OS),Windows_NT)
 VENV_BIN := .venv\Scripts
@@ -70,6 +70,10 @@ lint:
 	@echo "Verification ruff sur packages/, tests/ et evals/..."
 	$(PYTHON) -m ruff check packages tests evals packaging
 	$(PYTHON) -m ruff format --check packages tests evals packaging
+
+typecheck:
+	@echo "Verification mypy (perimetre progressif)..."
+	PYTHONPATH=packages/shared:packages/core:packages/desktop:. $(PYTHON) -m mypy
 
 format:
 	@echo "Formate le code Python (et applique les corrections sures de ruff)..."

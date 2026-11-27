@@ -11,6 +11,8 @@ Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 - Accessibilite : lien d'evitement « Aller au contenu principal » et cible `#main-content`.
 - Serveur de simulation : endpoints `/api/version`, `/api/backups`, `/api/doctor`,
   `/api/updates/check` et `/api/system/autostart` pour des captures et tests fideles.
+- Typage progressif : `mypy` en CI sur `jarvis_shared` et les modules d'exploitation
+  (`backup`, `doctor`, `updates`, `scheduler/routines`, `cli`), cible `make typecheck`.
 
 ## [2.0.1] - 2026-11-27
 
