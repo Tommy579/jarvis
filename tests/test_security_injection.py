@@ -364,3 +364,180 @@ async def test_tool_results_and_multiturn_untrusted_guard_and_subagent_propagati
     assert ev.had_untrusted_context is True
     assert ev.result_summary.startswith('<untrusted source="subagent:general">')
     assert "&lt;/untrusted&gt;" in ev.result_summary
+
+
+@pytest.mark.asyncio
+async def test_browser_cdp_loopback_url_controls_and_download_confinement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from jarvis_core.tools.browser import (
+        BrowserLaunchArgs,
+        BrowserNavigateArgs,
+        BrowserOpenTabArgs,
+        BrowserScreenshotArgs,
+        BrowserToolkit,
+        _CDPSession,
+    )
+
+    apps_dir = tmp_path / "apps"
+    apps_dir.mkdir()
+    # Un raccourci .desktop tentant d'exposer CDP sur 0.0.0.0 et --remote-allow-origins=*
+    (apps_dir / "chrome-example.com__app.desktop").write_text(
+        "[Desktop Entry]\n"
+        "Name=ExampleApp\n"
+        "Exec=/usr/bin/chromium --remote-debugging-address=0.0.0.0 "
+        "--remote-allow-origins=* --app=https://example.com\n",
+        encoding="utf-8",
+    )
+
+    tk = BrowserToolkit(cdp_url="http://127.0.0.1:9222", apps_dir=apps_dir)
+
+    # 1. Navigation vers schemes interdits, caracteres de controle ou port CDP local bloquee
+    for bad_url in (
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "chrome://settings",
+        "http://example.com\r\n/evil",
+        "http://127.0.0.1:9222/json/list",
+        "http://localhost:9222/json/version",
+        "http://[::1]:9222/json",
+    ):
+        res_open = await tk.browser_open_tab(BrowserOpenTabArgs(url=bad_url))
+        assert res_open["ok"] is False, f"browser_open_tab aurait du refuser {bad_url}"
+        res_nav = await tk.browser_navigate(BrowserNavigateArgs(url=bad_url))
+        assert res_nav["ok"] is False, f"browser_navigate aurait du refuser {bad_url}"
+
+    # 2. browser_launch (raccourci .desktop et lancement standard) force --remote-debugging-address=127.0.0.1
+    #    et supprime --remote-allow-origins=* et 0.0.0.0
+    launched_cmds: list[list[str]] = []
+
+    def _fake_popen(cmd, **kwargs):
+        launched_cmds.append(list(cmd))
+        return type(
+            "Proc",
+            (),
+            {
+                "poll": lambda self: None,
+                "terminate": lambda self: None,
+                "wait": lambda self, timeout=None: 0,
+            },
+        )()
+
+    fake_tab = {
+        "id": "t1",
+        "type": "page",
+        "title": "Example",
+        "url": "https://example.com",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/t1",
+    }
+    with (
+        patch.object(tk, "_fetch_tabs", AsyncMock(side_effect=[RuntimeError("down"), [fake_tab]])),
+        patch.object(tk, "_wait_tab_stable", AsyncMock(return_value=True)),
+        patch("jarvis_core.tools.browser.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        res_app = await tk.browser_launch(BrowserLaunchArgs(app="ExampleApp"))
+    assert res_app["ok"] is True
+    assert "--remote-debugging-address=127.0.0.1" in launched_cmds[0]
+    assert not any("0.0.0.0" in tok for tok in launched_cmds[0])
+    assert not any(tok.startswith("--remote-allow-origins") for tok in launched_cmds[0])
+
+    # Lancement standard sans raccourci
+    launched_cmds.clear()
+    with (
+        patch.object(tk, "_fetch_tabs", AsyncMock(side_effect=[RuntimeError("down"), [fake_tab]])),
+        patch.object(tk, "_find_browser_binary", return_value="/usr/bin/chromium"),
+        patch("jarvis_core.tools.browser.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        res_std = await tk.browser_launch(BrowserLaunchArgs(headless=True))
+    assert res_std["ok"] is True
+    assert "--remote-debugging-address=127.0.0.1" in launched_cmds[0]
+
+    # 3. _fetch_tabs doit filtrer les webSocketDebuggerUrl non-loopback
+    class _FakeHttpResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {
+                    "id": "evil",
+                    "type": "page",
+                    "url": "https://example.com",
+                    "webSocketDebuggerUrl": "ws://attacker.tld:9222/devtools/page/evil",
+                },
+                fake_tab,
+            ]
+
+    class _FakeHttpClient:
+        def __init__(self, *a, **kw) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url: str):
+            return _FakeHttpResp()
+
+    with patch("jarvis_core.tools.browser.httpx.AsyncClient", _FakeHttpClient):
+        tabs = await tk._fetch_tabs()
+    assert [t["id"] for t in tabs] == ["t1"]
+
+    # 4. _CDPSession desactive les telechargements automatiques (Browser.setDownloadBehavior deny)
+    sent_methods: list[tuple[str, dict]] = []
+
+    class _FakeWS:
+        async def send(self, raw: str) -> None:
+            import json
+
+            payload = json.loads(raw)
+            sent_methods.append((payload["method"], payload.get("params") or {}))
+            self._last_id = payload["id"]
+
+        async def recv(self) -> str:
+            import json
+
+            return json.dumps({"id": self._last_id, "result": {}})
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(*a, **kw):
+        return _FakeWS()
+
+    with patch("jarvis_core.tools.browser.websockets.connect", side_effect=_fake_connect):
+        async with _CDPSession("ws://127.0.0.1:9222/devtools/page/t1"):
+            pass
+    assert ("Browser.setDownloadBehavior", {"behavior": "deny"}) in sent_methods
+
+    # 5. browser_screenshot refuse traversal ../ et octet nul
+    class _FakeShotCDP:
+        def __init__(self, *a, **kw) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def call(self, method: str, params=None, **kw):
+            if method == "Page.captureScreenshot":
+                import base64
+
+                return {"data": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")}
+            return {}
+
+    with (
+        patch.object(tk, "_resolve_tab", AsyncMock(return_value=fake_tab)),
+        patch("jarvis_core.tools.browser._CDPSession", _FakeShotCDP),
+    ):
+        res_trav = await tk.browser_screenshot(BrowserScreenshotArgs(save_path="../../evil.png"))
+        assert res_trav["ok"] is False
+        res_nul = await tk.browser_screenshot(BrowserScreenshotArgs(save_path="shot\x00.png"))
+        assert res_nul["ok"] is False

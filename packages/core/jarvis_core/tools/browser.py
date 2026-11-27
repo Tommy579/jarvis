@@ -398,6 +398,14 @@ class _CDPSession:
                     self._page_enabled = True
                 except Exception:
                     pass
+            try:
+                await self._send_raw(
+                    "Browser.setDownloadBehavior",
+                    {"behavior": "deny"},
+                    wait_timeout=2.0,
+                )
+            except Exception:
+                pass
         except BaseException:
             try:
                 await self._ws.close()
@@ -746,6 +754,20 @@ class BrowserToolkit:
     def _clean_ref(ref: str) -> str:
         return ref.strip().lstrip("[@").rstrip("]")
 
+    @staticmethod
+    def _is_loopback_ws_url(ws_url: str) -> bool:
+        parsed = urlparse(str(ws_url or "").strip())
+        if parsed.scheme.lower() not in {"ws", "wss"}:
+            return False
+        host = (parsed.hostname or "").lower().strip(".")
+        return host in {"127.0.0.1", "localhost", "::1"}
+
+    def _cdp_port(self) -> int | None:
+        try:
+            return urlparse(self.cdp_url).port
+        except ValueError:
+            return None
+
     async def _fetch_tabs(self) -> list[dict[str, Any]]:
         candidate_urls = [self.cdp_url]
         if self.cdp_url in {"http://127.0.0.1:9222", "http://localhost:9222"}:
@@ -768,6 +790,7 @@ class BrowserToolkit:
                     if isinstance(t, dict)
                     and t.get("type") == "page"
                     and t.get("webSocketDebuggerUrl")
+                    and self._is_loopback_ws_url(str(t.get("webSocketDebuggerUrl", "")))
                     and not str(t.get("url", "")).startswith("devtools://")
                 ]
             except Exception as exc:
@@ -849,11 +872,20 @@ class BrowserToolkit:
         return None if ok else (reason or "Domaine bloque.")
 
     @staticmethod
-    def _validate_http_url(url: str) -> str | None:
-        cleaned = (url or "").strip()
+    def _validate_http_url(url: str, *, cdp_port: int | None = None) -> str | None:
+        raw = url or ""
+        if re.search(r"[\x00-\x1f\x7f]", raw):
+            return "Caracteres de controle interdits dans l'URL."
+        cleaned = raw.strip()
         parsed = urlparse(cleaned)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             return "Seules les URLs http:// ou https:// valides sont autorisees."
+        host = parsed.hostname.lower().strip(".")
+        cdp_ports = {9222, 9223, 9224}
+        if cdp_port is not None:
+            cdp_ports.add(cdp_port)
+        if host in {"127.0.0.1", "localhost", "::1"} and parsed.port in cdp_ports:
+            return "Navigation vers le port de debogage CDP local interdite."
         return None
 
     def close(self) -> None:
@@ -1040,7 +1072,7 @@ class BrowserToolkit:
     ) -> dict[str, Any]:
         target_url = (requested_url or shortcut.app_url or "").strip()
         if target_url:
-            scheme_err = self._validate_http_url(target_url)
+            scheme_err = self._validate_http_url(target_url, cdp_port=self._cdp_port())
             if scheme_err:
                 return {"ok": False, "error": scheme_err}
             if self.autonomy_policy:
@@ -1073,10 +1105,22 @@ class BrowserToolkit:
         except Exception:
             existing_tabs = []
 
-        # Lancer d'abord via la commande du raccourci .desktop
-        cmd = list(shortcut.exec_cmd)
+        # Lancer d'abord via la commande du raccourci .desktop en forcant la liaison loopback CDP
+        cmd: list[str] = []
+        skip_next = False
+        for tok in shortcut.exec_cmd:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok in {"--remote-debugging-address", "--remote-allow-origins"}:
+                skip_next = True
+                continue
+            if tok.startswith(("--remote-debugging-address=", "--remote-allow-origins=")):
+                continue
+            cmd.append(tok)
         if not any(tok.startswith("--remote-debugging-port") for tok in cmd):
             cmd.insert(1, f"--remote-debugging-port={port}")
+        cmd.insert(1, "--remote-debugging-address=127.0.0.1")
         if not any(tok.startswith("--window-size") for tok in cmd):
             cmd.append("--window-size=1280,820")
 
@@ -1119,6 +1163,7 @@ class BrowserToolkit:
                 fallback_port = port if not before_ids else (port + 1 if port < 65535 else port - 1)
                 fallback_cmd = [
                     browser_bin,
+                    "--remote-debugging-address=127.0.0.1",
                     f"--remote-debugging-port={fallback_port}",
                     f"--user-data-dir={profile_dir}",
                     "--profile-directory=Default",
@@ -1194,7 +1239,7 @@ class BrowserToolkit:
             pass
 
         if args.url:
-            scheme_err = self._validate_http_url(args.url)
+            scheme_err = self._validate_http_url(args.url, cdp_port=self._cdp_port())
             if scheme_err:
                 return {"ok": False, "error": scheme_err}
             if self.autonomy_policy:
@@ -1213,6 +1258,7 @@ class BrowserToolkit:
             await asyncio.to_thread(_sync_default_profile_session, profile_dir)
         cmd = [
             browser_bin,
+            "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={args.port}",
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
@@ -1270,7 +1316,7 @@ class BrowserToolkit:
         return {"ok": True, "count": len(items), "tabs": items}
 
     async def browser_open_tab(self, args: BrowserOpenTabArgs) -> dict[str, Any]:
-        scheme_err = self._validate_http_url(args.url)
+        scheme_err = self._validate_http_url(args.url, cdp_port=self._cdp_port())
         if scheme_err:
             return {"ok": False, "error": scheme_err}
         if self.autonomy_policy:
@@ -1388,7 +1434,7 @@ class BrowserToolkit:
         }
 
     async def browser_navigate(self, args: BrowserNavigateArgs) -> dict[str, Any]:
-        scheme_err = self._validate_http_url(args.url)
+        scheme_err = self._validate_http_url(args.url, cdp_port=self._cdp_port())
         if scheme_err:
             return {"ok": False, "error": scheme_err}
         if self.autonomy_policy:
@@ -2587,15 +2633,26 @@ class BrowserToolkit:
                 raw_bytes = base64.b64decode(b64_data)
                 shots_dir = (Path(tempfile.gettempdir()) / "jarvis_screenshots").resolve()
                 shots_dir.mkdir(parents=True, exist_ok=True)
+                if os.name != "nt":
+                    try:
+                        os.chmod(shots_dir, 0o700)
+                    except OSError:
+                        pass
                 # Confinement strict : un outil READ_ONLY ne peut jamais ecraser un fichier arbitraire
                 if args.save_path:
+                    if re.search(r"[\x00-\x1f\x7f]", args.save_path):
+                        return {
+                            "ok": False,
+                            "tab_id": tid,
+                            "error": "Caracteres de controle interdits dans save_path.",
+                        }
                     candidate = Path(args.save_path).expanduser()
                     dest = (
                         candidate.resolve()
                         if candidate.is_absolute()
                         else (shots_dir / candidate).resolve()
                     )
-                    if not dest.is_relative_to(shots_dir):
+                    if not dest.is_relative_to(shots_dir) or dest == shots_dir or dest.is_dir():
                         return {
                             "ok": False,
                             "tab_id": tid,
