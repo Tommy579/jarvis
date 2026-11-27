@@ -15,6 +15,7 @@ dependencies = [
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.0",
 ]
 
@@ -47,3 +48,12 @@ testpaths = ["tests"]
 markers = [
     "integration: test d'integration touchant le vrai systeme (processus, fichiers reels)",
 ]
+
+[tool.coverage.run]
+source = ["jarvis_core", "jarvis_shared", "jarvis_desktop"]
+
+[tool.coverage.report]
+# Plancher de non-regression (mesure initiale : 67 %). Remonter au fil des ajouts.
+fail_under = 65
+skip_covered = true
+show_missing = false

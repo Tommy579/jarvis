@@ -68,6 +68,8 @@ jarvis chat --model deepseek/deepseek-v4.1-flash-1017
 
 ```bash
 PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m pytest tests -q
+PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m pytest tests -q \
+    --cov=jarvis_core --cov=jarvis_shared --cov=jarvis_desktop --cov-report=term --cov-fail-under=65
 env -u PYTHONPATH .venv/bin/python -m ruff check packages tests evals
 env -u PYTHONPATH .venv/bin/python -m ruff format --check packages tests evals
 cd web && npm run build && npx vitest run && npx playwright test

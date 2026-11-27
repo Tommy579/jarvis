@@ -39,13 +39,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e packages/shared -e packages/core -e packages/desktop pytest pytest-asyncio ruff
+          pip install -e packages/shared -e packages/core -e packages/desktop pytest pytest-asyncio ruff pytest-cov
       - name: Lint and format check
         run: |
           ruff check packages tests packaging evals
           ruff format --check packages tests packaging evals
       - name: Run pytest
-        run: pytest tests -q
+        run: |
+          pytest tests -q \
+            --cov=jarvis_core --cov=jarvis_shared --cov=jarvis_desktop \
+            --cov-report=term --cov-fail-under=65
       - name: Run eval harness
         run: jarvis eval
 

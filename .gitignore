@@ -52,6 +52,9 @@ jarvis-windows/*.db
 jarvis-data/
 
 # Local artifacts
+.coverage
+coverage.xml
+htmlcov/
 src-rust/target/
 node_modules/
 .hermes/
