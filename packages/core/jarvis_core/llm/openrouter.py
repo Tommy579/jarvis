@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from jarvis_shared.models import (
@@ -93,7 +95,11 @@ class OpenRouterProvider(LLMProvider):
         timeout: float = 30.0,
     ):
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        cleaned_url = base_url.rstrip("/")
+        parsed_url = urlparse(cleaned_url)
+        if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.hostname:
+            raise ValueError(f"URL fournisseur invalide : {base_url}")
+        self.base_url = cleaned_url
         self.app_name = app_name
         self.data_collection = data_collection
         self.trusted_for_highly_private = trusted_for_highly_private
@@ -243,19 +249,26 @@ class OpenRouterProvider(LLMProvider):
         parsed: list[ToolCall] = []
         for tc in raw_tool_calls:
             fn = tc.get("function") or {}
-            raw_args = fn.get("arguments") or "{}"
-            if isinstance(raw_args, dict):
+            raw_args = fn.get("arguments")
+            if raw_args is None or raw_args == "":
+                args: dict[str, Any] = {}
+            elif isinstance(raw_args, dict):
                 args = raw_args
             else:
                 try:
-                    args = json.loads(raw_args)
+                    decoded = json.loads(raw_args)
                 except json.JSONDecodeError as e:
                     raise ProviderError(
                         f"JSON d'outil invalide retourne par le modele : {e}"
                     ) from e
+                if not isinstance(decoded, dict):
+                    raise ProviderError(
+                        f"Arguments d'outil JSON non objet ({type(decoded).__name__}) retournes par le modele."
+                    )
+                args = decoded
             parsed.append(
                 ToolCall(
-                    id=tc.get("id") or f"call_{len(parsed)}",
+                    id=tc.get("id") or f"call_{uuid.uuid4().hex[:10]}",
                     name=fn.get("name") or "",
                     arguments=args,
                 )
@@ -346,43 +359,13 @@ class OpenRouterProvider(LLMProvider):
         temperature: float = 0.2,
         thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
-        """Streaming compatible SSE avec assemblage des fragments de tool_calls."""
-        delta = await self.complete(
+        """Streaming compatible SSE avec decoupage par phrase pour le TTS."""
+        async for chunk in self._stream_via_complete(
             model=model,
             messages=messages,
             tools=tools,
             fallback_models=fallback_models,
             temperature=temperature,
             thinking_mode=thinking_mode,
-        )
-        # Decoupage phrase par phrase pour alimenter le TTS en streaming immediat
-        if delta.text:
-            sentences = self.split_into_sentences(delta.text)
-            for idx, sentence in enumerate(sentences):
-                is_last = idx == len(sentences) - 1 and not delta.tool_calls
-                yield StreamDelta(
-                    text=sentence,
-                    usage=delta.usage if is_last else None,
-                    finish_reason=delta.finish_reason if is_last else None,
-                )
-        if delta.tool_calls or not delta.text:
-            yield StreamDelta(
-                text="",
-                tool_calls=delta.tool_calls,
-                usage=delta.usage,
-                finish_reason=delta.finish_reason,
-            )
-
-    @staticmethod
-    def split_into_sentences(text: str) -> list[str]:
-        """Decoupe un texte en phrases completes pour la synthese vocale basse latence."""
-        chunks: list[str] = []
-        buf = ""
-        for ch in text:
-            buf += ch
-            if ch in ".!?\n" and len(buf.strip()) >= 12:
-                chunks.append(buf)
-                buf = ""
-        if buf:
-            chunks.append(buf)
-        return chunks
+        ):
+            yield chunk

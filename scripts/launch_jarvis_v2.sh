@@ -91,7 +91,10 @@ if [[ "${1:-}" == "--backend-only" ]]; then
     exit 0
 fi
 
-if command -v chromium >/dev/null 2>&1; then
+if [ -x /usr/lib/chromium/chromium ]; then
+    exec /usr/lib/chromium/chromium --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/chromium-jarvis" \
+        --app="$APP_URL" --window-size="$JARVIS_WINDOW_SIZE"
+elif command -v chromium >/dev/null 2>&1; then
     exec chromium --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/chromium-jarvis" \
         --app="$APP_URL" --window-size="$JARVIS_WINDOW_SIZE"
 elif command -v google-chrome-stable >/dev/null 2>&1; then

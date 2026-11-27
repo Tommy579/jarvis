@@ -295,8 +295,8 @@ class AutonomyPolicyConfig(BaseModel):
     )
     allow_browser_in_untrusted: bool = True
     block_shell_in_untrusted: bool = True
-    max_steps: int = Field(default=150, ge=1, le=200)
-    max_cost_usd: float = Field(default=1.0, ge=0.01, le=50.0)
+    max_steps: int = Field(default=0, ge=0, le=1000)
+    max_cost_usd: float = Field(default=10.0, ge=0.01, le=100.0)
     emergency_stop: bool = False
 
 
@@ -307,15 +307,15 @@ class AutonomyPolicyUpdate(BaseModel):
     blocked_domains: list[str] | None = None
     allow_browser_in_untrusted: bool | None = None
     block_shell_in_untrusted: bool | None = None
-    max_steps: int | None = Field(default=None, ge=1, le=200)
-    max_cost_usd: float | None = Field(default=None, ge=0.01, le=50.0)
+    max_steps: int | None = Field(default=None, ge=0, le=1000)
+    max_cost_usd: float | None = Field(default=None, ge=0.01, le=100.0)
     emergency_stop: bool | None = None
 
 
 class AutonomousTaskCreate(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
-    max_steps: int | None = Field(default=None, ge=1, le=200)
-    max_cost_usd: float | None = Field(default=None, ge=0.01, le=50.0)
+    max_steps: int | None = Field(default=None, ge=1, le=1000)
+    max_cost_usd: float | None = Field(default=None, ge=0.01, le=100.0)
     notify_on_finish: bool = True
     role: str = "agent"
 
@@ -325,7 +325,7 @@ class AutonomousTaskRecord(BaseModel):
     goal: str
     status: AutonomousTaskStatus = "queued"
     iterations: int = 0
-    max_iterations: int = 30
+    max_iterations: int = 0
     tokens_used: int = 0
     cost_usd: float = 0.0
     current_step: str = ""
@@ -400,7 +400,7 @@ GoalEventKind = Literal[
 
 class GoalCreate(BaseModel):
     goal: str = Field(min_length=1, max_length=8000)
-    max_cost_usd: float = Field(default=1.5, ge=0.05, le=50.0)
+    max_cost_usd: float = Field(default=0.0, ge=0.0, le=100.0)
     orchestrator_model: str | None = None
     allowed_models: list[str] | None = None
     notify_on_finish: bool = True
@@ -409,7 +409,7 @@ class GoalCreate(BaseModel):
 class GoalSteerRequest(BaseModel):
     message: str = Field(default="", max_length=4000)
     resume: bool = True
-    extra_budget_usd: float | None = Field(default=None, ge=0.05, le=50.0)
+    extra_budget_usd: float | None = Field(default=None, ge=0.05, le=100.0)
 
 
 class SubagentRunRecord(BaseModel):
@@ -421,7 +421,7 @@ class SubagentRunRecord(BaseModel):
     role_profile: str = "general"
     status: SubtaskStatus = "running"
     iterations: int = 0
-    max_iterations: int = 20
+    max_iterations: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0

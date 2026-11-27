@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from typing import Any
 
 from jarvis_shared.models import ApprovalRequest, RiskLevel
@@ -29,9 +30,15 @@ class ChannelDispatcher:
         self.secret_store = secret_store or SecretStore()
         self.public_base_url = public_base_url.rstrip("/")
         self.telegram_sender = telegram_sender
-        self.action_token_secret = action_token_secret or self.secret_store.get_secret(
-            "ACTION_TOKEN_SECRET", "default-action-token-secret-for-signing"
-        )
+        configured_secret = (
+            action_token_secret or self.secret_store.get_secret("ACTION_TOKEN_SECRET", "")
+        ).strip()
+        if not configured_secret:
+            configured_secret = secrets.token_urlsafe(32)
+            logger.warning(
+                "ACTION_TOKEN_SECRET non configure : generation d'un secret ephemere pour cette session."
+            )
+        self.action_token_secret = configured_secret
 
     def _ladder(self, policy: NotificationPolicy, risk: RiskLevel) -> list[tuple[str, int]]:
         ladder: list[tuple[str, int]] = []
@@ -85,16 +92,16 @@ class ChannelDispatcher:
             if not self.telegram_sender:
                 logger.debug("Telegram ignoré : expéditeur non configuré.")
                 return None
+            cmd_line = f"\n`{req.exact_command}`" if req.exact_command else ""
             text = (
-                f"🚨 *Demande d'approbation*\n\n"
-                f"{req.description}\n"
-                f"Outil: `{req.tool_name}` (risque {req.risk})\n\n"
+                f"*Approbation requise* (niveau {int(req.risk)})\n"
+                f"{req.description}{cmd_line}\n"
                 f"[Accepter]({url_approve}) | [Refuser]({url_deny})"
             )
             keyboard = [
                 [
-                    {"text": "✅ Accepter", "callback_data": f"approve:{req.id}:yes"},
-                    {"text": "❌ Refuser", "callback_data": f"approve:{req.id}:no"},
+                    {"text": "Accepter", "callback_data": f"approve:{req.id}:yes"},
+                    {"text": "Refuser", "callback_data": f"approve:{req.id}:no"},
                 ]
             ]
             await self.telegram_sender.send(text, urgency=2, inline_keyboard=keyboard)

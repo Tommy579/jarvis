@@ -14,26 +14,67 @@ from typing import Any
 from jarvis_shared.models import RiskLevel, ToolCall, ToolResult, Usage
 from pydantic import BaseModel
 
+from ..security import wrap_untrusted_content
 from .approvals import ApprovalManager
 from .autonomy import AutonomyPolicy
 
 _UNTRUSTED_PATTERN = re.compile(r"<untrusted\b[^>]*>.*?</untrusted>", re.DOTALL | re.IGNORECASE)
+
+_SENSITIVE_ARG_FRAGMENTS: tuple[str, ...] = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "voice_pin",
+)
+
+
+def _redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Masque les arguments sensibles (mots de passe, jetons, secrets) avant journalisation ou approbation."""
+    redacted: dict[str, Any] = {}
+    for k, v in args.items():
+        low = str(k).lower()
+        if any(frag in low for frag in _SENSITIVE_ARG_FRAGMENTS) and v is not None:
+            redacted[k] = "***"
+        elif isinstance(v, dict):
+            redacted[k] = _redact_sensitive_args(v)
+        else:
+            redacted[k] = v
+    return redacted
+
 
 # Cle reservee qu'un handler place dans son dict de sortie pour declarer les tokens
 # consommes hors flux LLM : elle est retiree de la sortie avant de la donner au modele.
 TOOL_USAGE_KEY = "__tool_usage__"
 
 
-def wrap_untrusted_content(source: str, content: str) -> str:
-    """Encadre tout contenu externe (mail, web, OCR ecran, audio) dans une balise <untrusted>."""
-    safe_source = re.sub(r"[^a-zA-Z0-9_.\-:]", "_", source or "external")
-    # Neutraliser toute tentative de fermeture prematuree de la balise </untrusted>
-    sanitized = str(content).replace("</untrusted>", "&lt;/untrusted&gt;")
-    return f'<untrusted source="{safe_source}">\n{sanitized}\n</untrusted>'
-
-
 def contains_untrusted_tags(text: str) -> bool:
     return bool(_UNTRUSTED_PATTERN.search(text or ""))
+
+
+_WORKSPACE_PREFIX_RE = re.compile(r"^(\[Workspace actif\s*:[^\]]*\]\s*\n)(.*)$", re.DOTALL)
+_ASK_CMD_RE = re.compile(r"^/ask(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+def extract_ask_flag(text: str) -> tuple[bool, str]:
+    """Detecte la commande /ask au debut du prompt et retourne (actif, prompt_nettoye)."""
+    raw = text or ""
+    ws_match = _WORKSPACE_PREFIX_RE.match(raw)
+    if ws_match:
+        prefix, body = ws_match.group(1), ws_match.group(2).strip()
+        ask_match = _ASK_CMD_RE.match(body)
+        if ask_match:
+            rest = (ask_match.group(1) or "").strip()
+            return True, f"{prefix}{rest}" if rest else prefix.rstrip()
+        return False, raw
+    ask_match = _ASK_CMD_RE.match(raw.strip())
+    if ask_match:
+        return True, (ask_match.group(1) or "").strip()
+    return False, raw
 
 
 def format_approval_description(tool_name: str, args_dict: dict[str, Any]) -> str:
@@ -49,12 +90,9 @@ def format_approval_description(tool_name: str, args_dict: dict[str, Any]) -> st
         cmd = str(args_dict.get("command", "")).strip()
         cwd = str(args_dict.get("cwd") or "/").strip()
         return f"Commande terminal : {cmd}\nDossier : {cwd}"
-    summary = ", ".join(f"{k} : {v}" for k, v in args_dict.items() if v not in (None, ""))
+    safe_args = _redact_sensitive_args(args_dict)
+    summary = ", ".join(f"{k} : {v}" for k, v in safe_args.items() if v not in (None, ""))
     return f"{tool_name}\n{summary}" if summary else tool_name
-
-
-class ToolPermissionError(PermissionError):
-    """Levee lorsqu'un outil est bloque par la politique de risque ou par un contexte non fiable."""
 
 
 @dataclass
@@ -69,12 +107,17 @@ class ToolSpec:
     untrusted_source: str | None = None
     enabled_by_default: bool = True
     is_interactive_ui: bool = False
+    pass_model: bool = False
+    raw_input_schema: dict[str, Any] | None = None
 
     def is_supported_on(self, current_platform: str) -> bool:
         return current_platform in self.platforms
 
     def to_openai_schema(self) -> dict[str, Any]:
-        schema = self.args_model.model_json_schema()
+        if self.raw_input_schema is not None:
+            schema = dict(self.raw_input_schema)
+        else:
+            schema = self.args_model.model_json_schema()
         schema.pop("title", None)
         return {
             "type": "function",
@@ -114,6 +157,9 @@ class ToolRegistry:
     def register(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
 
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> ToolSpec | None:
         spec = self._tools.get(name)
         if not spec or not spec.enabled_by_default:
@@ -152,6 +198,7 @@ class ToolRegistry:
         task_id: str | None = None,
         allowed_tools: set[str] | None = None,
         excluded_tools: set[str] | None = None,
+        ask_terminal_approval: bool = False,
     ) -> ToolResult:
         if excluded_tools and tool_call.name in excluded_tools:
             return ToolResult(
@@ -242,16 +289,18 @@ class ToolRegistry:
 
         # Defense anti-injection :
         # - Niveau 3 (DANGEROUS) toujours bloque sur contexte <untrusted>
-        # - En execution autonome sur contexte <untrusted>, shell/write_file bloques si block_shell_in_untrusted=True
-        # - Niveau 2 (SENSITIVE) bloque sur contexte <untrusted>, sauf outil UI (browser_/desktop_/
-        #   mcp_playwright_) qui passe par l'approbation humaine en mode supervise, ou qui est
-        #   auto-approuve en mode autonome
+        # - Shell / ecriture fichier / CLI subagent / open_url bloques dans TOUS les modes
+        #   si block_shell_in_untrusted=True
+        # - Tout outil d'ecriture non-UI (risk >= 1) bloque sur contexte <untrusted>
+        # - Les outils UI interactifs (niveaux <= 2, hors never_auto_approve) passent par
+        #   l'approbation humaine en mode supervise ou l'auto-approbation en mode autonome
         if has_untrusted_context and not pre_approved:
-            if (
-                (autonomous_run or self.autonomy_policy.mode == "autonomous")
-                and self.autonomy_policy.block_shell_in_untrusted
-                and spec.name in {"run_command", "write_file"}
-            ):
+            if self.autonomy_policy.block_shell_in_untrusted and spec.name in {
+                "run_command",
+                "write_file",
+                "run_cli_subagent",
+                "open_url",
+            }:
                 self._record_audit(
                     tool_call=tool_call,
                     risk=spec.risk,
@@ -277,16 +326,12 @@ class ToolRegistry:
                 is_interactive_ui=spec.is_interactive_ui,
                 autonomous_run=autonomous_run,
             )
-            # Un outil UI (clic, saisie, glisser, dialogue) sur une page qu'on vient de lire
-            # n'est pas une injection : on le laisse descendre vers la matrice d'approbation
-            # au lieu de le refuser sechement, sinon la boucle lire->agir est morte en mode
-            # supervise (le mode par defaut).
             ui_needs_approval = self.autonomy_policy.ui_tool_needs_approval_in_untrusted(
                 spec.name,
                 spec.risk,
                 is_interactive_ui=spec.is_interactive_ui,
             )
-            if spec.risk >= RiskLevel.SENSITIVE and not ui_bypass and not ui_needs_approval:
+            if spec.risk >= RiskLevel.REVERSIBLE_WRITE and not ui_bypass and not ui_needs_approval:
                 self._record_audit(
                     tool_call=tool_call,
                     risk=spec.risk,
@@ -315,21 +360,35 @@ class ToolRegistry:
                     task_id=task_id,
                 )
 
-        # Verification de la matrice de permissions pour les niveaux 2 et 3
+        # Verification de la matrice de permissions pour les niveaux 2 et 3.
+        # Pour run_command : sans /ask, toutes les commandes sont autorisees quel que soit leur risque ;
+        # avec /ask, une approbation est demandee uniquement a partir du niveau 3 (DANGEROUS).
+        effective_risk = spec.risk
+        if spec.name == "run_command" and ask_terminal_approval:
+            from .standard import is_dangerous_command
+
+            if is_dangerous_command(str(args_dict.get("command") or "")):
+                effective_risk = RiskLevel.DANGEROUS
+
+        skip_run_command_approval = spec.name == "run_command" and (
+            not ask_terminal_approval or effective_risk < RiskLevel.DANGEROUS
+        )
+
         auto_approved = False
-        if spec.risk >= RiskLevel.SENSITIVE and not pre_approved:
+        if effective_risk >= RiskLevel.SENSITIVE and not pre_approved and not skip_run_command_approval:
             if self.autonomy_policy.should_auto_approve(
-                spec.name, spec.risk, autonomous_run=autonomous_run
+                spec.name, effective_risk, autonomous_run=autonomous_run
             ):
                 auto_approved = True
             else:
-                exact_cmd = args_dict.get("command") or str(args_dict)
+                safe_args = _redact_sensitive_args(args_dict)
+                exact_cmd = safe_args.get("command") or str(safe_args)
                 req = self.approval_manager.create_request(
                     tool_name=spec.name,
-                    arguments=args_dict,
-                    description=format_approval_description(spec.name, args_dict),
-                    risk=spec.risk,
-                    exact_command=exact_cmd if spec.risk == RiskLevel.DANGEROUS else None,
+                    arguments=safe_args,
+                    description=format_approval_description(spec.name, safe_args),
+                    risk=effective_risk,
+                    exact_command=exact_cmd if effective_risk == RiskLevel.DANGEROUS else None,
                 )
                 decision = await self.approval_manager.wait_for_decision(
                     req.id, timeout=approval_timeout
@@ -337,7 +396,7 @@ class ToolRegistry:
                 if decision != "approved":
                     self._record_audit(
                         tool_call=tool_call,
-                        risk=spec.risk,
+                        risk=effective_risk,
                         status=f"approval_{decision}",
                         has_untrusted_context=has_untrusted_context,
                         task_id=task_id,
@@ -355,10 +414,16 @@ class ToolRegistry:
 
         # Execution effective de l'outil
         try:
-            if inspect.iscoroutinefunction(spec.handler):
-                raw_out = await spec.handler(**args_dict)
+            if spec.pass_model:
+                if inspect.iscoroutinefunction(spec.handler):
+                    raw_out = await spec.handler(validated_args)
+                else:
+                    raw_out = await asyncio.to_thread(spec.handler, validated_args)
             else:
-                raw_out = await asyncio.to_thread(spec.handler, **args_dict)
+                if inspect.iscoroutinefunction(spec.handler):
+                    raw_out = await spec.handler(**args_dict)
+                else:
+                    raw_out = await asyncio.to_thread(spec.handler, **args_dict)
         except Exception as e:
             self._record_audit(
                 tool_call=tool_call,
@@ -422,10 +487,7 @@ class ToolRegistry:
         task_id: str | None = None,
         error: str | None = None,
     ) -> None:
-        safe_args = {
-            k: ("***" if k == "sudo_password" and v is not None else v)
-            for k, v in tool_call.arguments.items()
-        }
+        safe_args = _redact_sensitive_args(tool_call.arguments)
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "task_id": task_id,
@@ -438,6 +500,8 @@ class ToolRegistry:
             "error": error,
         }
         self.audit_log.append(entry)
+        if len(self.audit_log) > 2000:
+            del self.audit_log[:-2000]
         if self.audit_recorder is not None:
             try:
                 self.audit_recorder(entry)

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { apiClient, HttpError } from "../api/client";
-import { captureTokenFromUrl, getAuthToken, setAuthToken } from "../lib/authToken";
+import { captureTokenFromUrl, clearAuthToken, getAuthToken, setAuthToken } from "../lib/authToken";
 
 /**
  * Porte d'authentification de l'interface.
@@ -104,6 +104,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 type="button"
                 className="btn btn--ghost"
                 onClick={() => {
+                  clearAuthToken();
                   setValue("");
                   setError(null);
                 }}

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
 import struct
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,10 @@ from jarvis_shared.rest_models import (
     ToolCallRecord,
     WikiPage,
 )
+
+from .embeddings import EmbeddingEngine
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -57,13 +64,9 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def _deterministic_text_embedding(text: str, dims: int = 16) -> list[float]:
-    """Produit un vecteur normalise local leger pour les tests et la recherche fallback."""
-    vec = [0.0] * dims
-    for idx, ch in enumerate(text.lower().encode("utf-8")):
-        vec[(idx + ch) % dims] += 1.0
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+def _deterministic_text_embedding(text: str, dims: int = 128) -> list[float]:
+    """Produit un vecteur normalise local (128 dims, aligne avec EmbeddingEngine)."""
+    return EmbeddingEngine._deterministic_ngram_embed(text, dim=dims)
 
 
 MIGRATIONS: list[tuple[int, str]] = [
@@ -378,25 +381,47 @@ class MemoryDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.encryption_key = encryption_key
         self.vec_enabled = False
+        self._vec_checked = False
+        self._wal_initialized = False
         self.migrate()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn: sqlite3.Connection | None = None
         if self.encryption_key:
             try:
                 import sqlcipher3  # type: ignore[import-not-found]
 
-                conn = sqlcipher3.connect(str(self.db_path))
-                conn.execute("PRAGMA key = ?", (self.encryption_key,))
+                conn = sqlcipher3.connect(str(self.db_path), timeout=10.0)
+                escaped_key = self.encryption_key.replace("'", "''")
+                conn.execute(f"PRAGMA key = '{escaped_key}'")
                 conn.row_factory = sqlite3.Row
-                return conn
+                conn.execute("PRAGMA foreign_keys = ON")
             except ImportError:
+                logger.warning(
+                    "Cle de chiffrement SQLite definie mais sqlcipher3 absent : ouverture en clair."
+                )
+                conn = None
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            if not self._wal_initialized:
+                conn.execute("PRAGMA journal_mode = WAL")
+                self._wal_initialized = True
+            conn.execute("PRAGMA foreign_keys = ON")
+            if not self._vec_checked or self.vec_enabled:
+                self._try_load_sqlite_vec(conn)
+                self._vec_checked = True
+        try:
+            yield conn
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
                 pass
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA foreign_keys = ON")
-        self._try_load_sqlite_vec(conn)
-        return conn
+            raise
+        finally:
+            conn.close()
 
     def _try_load_sqlite_vec(self, conn: sqlite3.Connection) -> None:
         try:
@@ -408,6 +433,25 @@ class MemoryDatabase:
             self.vec_enabled = True
         except Exception:
             self.vec_enabled = False
+
+    @staticmethod
+    def _split_sql_statements(sql_script: str) -> list[str]:
+        statements: list[str] = []
+        buf: list[str] = []
+        for line in sql_script.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                continue
+            buf.append(line)
+            if stripped.endswith(";"):
+                stmt = "\n".join(buf).strip()
+                if stmt:
+                    statements.append(stmt)
+                buf = []
+        tail = "\n".join(buf).strip()
+        if tail:
+            statements.append(tail)
+        return statements
 
     def migrate(self) -> None:
         with self._connect() as conn:
@@ -423,19 +467,27 @@ class MemoryDatabase:
             applied = {int(r["version"]) for r in rows}
             for version, sql_script in MIGRATIONS:
                 if version not in applied:
-                    conn.executescript(sql_script)
+                    for stmt in self._split_sql_statements(sql_script):
+                        try:
+                            conn.execute(stmt)
+                        except sqlite3.OperationalError as exc:
+                            # Rendre les ALTER TABLE ADD COLUMN idempotents en cas de reprise
+                            if "duplicate column name" in str(exc).lower():
+                                continue
+                            raise
                     conn.execute(
                         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
                         (version, utc_now_iso()),
                     )
+                    conn.commit()
             if self.vec_enabled:
                 conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(fact_id TEXT PRIMARY KEY, embedding FLOAT[16])"
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(fact_id TEXT PRIMARY KEY, embedding FLOAT[128])"
                 )
                 conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes USING vec0(episode_id TEXT PRIMARY KEY, embedding FLOAT[16])"
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_episodes USING vec0(episode_id TEXT PRIMARY KEY, embedding FLOAT[128])"
                 )
-            conn.commit()
+                conn.commit()
 
     def table_names(self) -> set[str]:
         with self._connect() as conn:
@@ -525,8 +577,15 @@ class MemoryDatabase:
             clauses.append("category = ?")
             params.append(category)
         if sensitivity:
-            clauses.append("sensitivity = ?")
-            params.append(sensitivity)
+            sens_variants = {
+                "prive": ("prive", "privé"),
+                "privé": ("prive", "privé"),
+                "tres_prive": ("tres_prive", "très privé"),
+                "très privé": ("tres_prive", "très privé"),
+            }.get(str(sensitivity), (str(sensitivity),))
+            placeholders = ", ".join("?" for _ in sens_variants)
+            clauses.append(f"sensitivity IN ({placeholders})")
+            params.extend(sens_variants)
         if query:
             clauses.append("(LOWER(text) LIKE ? OR LOWER(subject) LIKE ? OR LOWER(object) LIKE ?)")
             like = f"%{query.lower()}%"
@@ -540,7 +599,9 @@ class MemoryDatabase:
             ).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
-    def search_facts_hybrid(self, query: str, limit: int = 10) -> list[FactRecord]:
+    def search_facts_hybrid(
+        self, query: str, limit: int = 10, *, include_highly_private: bool = False
+    ) -> list[FactRecord]:
         """Combine correspondance textuelle et similarite cosinus sur les embeddings locaux."""
         query_vec = _deterministic_text_embedding(query)
         q_tokens = {tok for tok in query.lower().split() if len(tok) > 1}
@@ -549,6 +610,8 @@ class MemoryDatabase:
         scored: list[tuple[float, FactRecord]] = []
         for row in rows:
             fact = self._row_to_fact(row)
+            if not include_highly_private and str(fact.sensitivity) in {"très privé", "tres_prive"}:
+                continue
             text_lower = f"{fact.subject} {fact.predicate} {fact.object} {fact.text}".lower()
             lexical_hits = sum(1 for tok in q_tokens if tok in text_lower)
             lexical_score = lexical_hits / max(1, len(q_tokens))
@@ -571,16 +634,27 @@ class MemoryDatabase:
         new_sens = patch.sensitivity if patch.sensitivity is not None else existing.sensitivity
         new_sup = patch.superseded_by if patch.superseded_by is not None else existing.superseded_by
         now = utc_now_iso()
-        blob = _pack_vector(_deterministic_text_embedding(new_text))
+        vec = _deterministic_text_embedding(new_text)
+        blob = _pack_vector(vec)
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE facts
                 SET text = ?, category = ?, confidence = ?, sensitivity = ?,
-                    superseded_by = ?, updated_at = ?, embedding = ?
+                    superseded_by = ?, updated_at = ?, embedding = ?, embedding_json = ?
                 WHERE id = ?
                 """,
-                (new_text, new_cat, new_conf, new_sens, new_sup, now, blob, fact_id),
+                (
+                    new_text,
+                    new_cat,
+                    new_conf,
+                    new_sens,
+                    new_sup,
+                    now,
+                    blob,
+                    json.dumps(vec),
+                    fact_id,
+                ),
             )
             conn.commit()
         return self.get_fact(fact_id)
@@ -650,24 +724,27 @@ class MemoryDatabase:
         relation: str,
         birthday: str | None = None,
         contact_ref: str | None = None,
-        notes: str = "",
+        notes: str | None = None,
         person_id: str | None = None,
     ) -> PersonRecord:
         now = utc_now_iso()
         pid = person_id or f"pers_{uuid.uuid4().hex[:12]}"
+        effective_notes = notes or ""
         with self._connect() as conn:
             existing = conn.execute(
-                "SELECT id, created_at FROM people WHERE LOWER(name) = LOWER(?)", (name,)
+                "SELECT id, created_at, notes FROM people WHERE LOWER(name) = LOWER(?)", (name,)
             ).fetchone()
             if existing:
                 pid = str(existing["id"])
+                effective_notes = notes if notes is not None else str(existing["notes"] or "")
                 conn.execute(
                     """
                     UPDATE people
-                    SET relation = ?, birthday = ?, contact_ref = ?, notes = ?, updated_at = ?
+                    SET relation = ?, birthday = COALESCE(?, birthday),
+                        contact_ref = COALESCE(?, contact_ref), notes = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (relation, birthday, contact_ref, notes, now, pid),
+                    (relation, birthday, contact_ref, effective_notes, now, pid),
                 )
             else:
                 conn.execute(
@@ -675,7 +752,7 @@ class MemoryDatabase:
                     INSERT INTO people (id, name, relation, birthday, contact_ref, notes, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (pid, name, relation, birthday, contact_ref, notes, now, now),
+                    (pid, name, relation, birthday, contact_ref, effective_notes, now, now),
                 )
             conn.commit()
         return PersonRecord(
@@ -684,7 +761,7 @@ class MemoryDatabase:
             relation=relation,
             birthday=birthday,
             contact_ref=contact_ref,
-            notes=notes,
+            notes=effective_notes,
         )
 
     def list_people(self) -> list[PersonRecord]:
@@ -755,17 +832,27 @@ class MemoryDatabase:
         urgency = int(getattr(record, "urgency", 0))
         message = str(getattr(record, "message", ""))
         reason = str(getattr(record, "reason", ""))
-        status = str(getattr(record, "status", "sent"))
+        raw_status = str(getattr(record, "status", "sent"))
+        status = raw_status if raw_status in {"sent", "acked", "too_noisy"} else "sent"
         dedup_key = getattr(record, "dedup_key", None)
+        acked_at = getattr(record, "acked_at", None)
         nid = getattr(record, "id", None) or f"alert_{uuid.uuid4().hex[:12]}"
         ts = getattr(record, "ts", None) or utc_now_iso()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO notifications (id, ts, channel, urgency, message, reason, status, dedup_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO notifications (id, ts, channel, urgency, message, reason, status, dedup_key, acked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    channel = excluded.channel,
+                    urgency = excluded.urgency,
+                    message = excluded.message,
+                    reason = excluded.reason,
+                    status = excluded.status,
+                    dedup_key = COALESCE(excluded.dedup_key, notifications.dedup_key),
+                    acked_at = COALESCE(excluded.acked_at, notifications.acked_at)
                 """,
-                (nid, ts, channel, urgency, message, reason, status, dedup_key),
+                (nid, ts, channel, urgency, message, reason, status, dedup_key, acked_at),
             )
             conn.commit()
 
@@ -782,7 +869,7 @@ class MemoryDatabase:
                 urgency=int(r["urgency"]),  # type: ignore[arg-type]
                 message=str(r["message"]),
                 reason=str(r["reason"]),
-                status=r["status"],
+                status=r["status"] if r["status"] in {"sent", "acked", "too_noisy"} else "sent",
                 acked_at=r["acked_at"],
             )
             for r in rows
@@ -839,6 +926,7 @@ class MemoryDatabase:
         return cid
 
     def daily_usage(self, days: int = 14) -> list[DailyUsageItem]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -848,11 +936,12 @@ class MemoryDatabase:
                        COALESCE(SUM(tokens_out), 0) AS tokens_out,
                        COALESCE(SUM(cost), 0.0) AS cost
                 FROM llm_calls
+                WHERE ts >= ?
                 GROUP BY day, model
                 ORDER BY day DESC
                 LIMIT ?
                 """,
-                (days * 10,),
+                (cutoff, max(1, int(days)) * 20),
             ).fetchall()
         return [
             DailyUsageItem(
@@ -977,9 +1066,11 @@ class MemoryDatabase:
             status="pending",
         )
 
-    def list_approvals(self) -> list[ApprovalItem]:
+    def list_approvals(self, limit: int = 100) -> list[ApprovalItem]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM approvals ORDER BY created_at DESC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM approvals ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [
             ApprovalItem(
                 id=str(r["id"]),
@@ -997,7 +1088,10 @@ class MemoryDatabase:
     def decide_approval(self, approval_id: str, approved: bool) -> ApprovalItem | None:
         status = "approved" if approved else "denied"
         with self._connect() as conn:
-            conn.execute("UPDATE approvals SET status = ? WHERE id = ?", (status, approval_id))
+            conn.execute(
+                "UPDATE approvals SET status = ? WHERE id = ? AND status = 'pending'",
+                (status, approval_id),
+            )
             conn.commit()
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
         if not row:
@@ -1293,7 +1387,7 @@ class MemoryDatabase:
             goal=str(row["goal"]),
             status=str(row["status"]),  # type: ignore[arg-type]
             iterations=int(row["iterations"] or 0),
-            max_iterations=int(row["max_iterations"] or 30),
+            max_iterations=int(row["max_iterations"]) if row["max_iterations"] is not None else 0,
             tokens_used=int(row["tokens_used"] or 0),
             cost_usd=float(row["cost_usd"] or 0.0),
             current_step=str(row["current_step"] or ""),
@@ -1554,18 +1648,14 @@ class MemoryDatabase:
             conn.commit()
         return event
 
-    def _hydrate_goal(self, conn: sqlite3.Connection, row: sqlite3.Row) -> GoalRecord:
+    def _build_goal_record(
+        self,
+        row: sqlite3.Row,
+        sub_rows: list[sqlite3.Row],
+        run_rows: list[sqlite3.Row],
+        ev_rows: list[sqlite3.Row],
+    ) -> GoalRecord:
         gid = str(row["id"])
-        sub_rows = conn.execute(
-            "SELECT * FROM goal_subtasks WHERE goal_id = ? ORDER BY created_at ASC", (gid,)
-        ).fetchall()
-        run_rows = conn.execute(
-            "SELECT * FROM subagent_runs WHERE goal_id = ? ORDER BY started_at ASC", (gid,)
-        ).fetchall()
-        ev_rows = conn.execute(
-            "SELECT * FROM goal_events WHERE goal_id = ? ORDER BY ts DESC LIMIT 80", (gid,)
-        ).fetchall()
-
         runs_by_sub: dict[str, list[SubagentRunRecord]] = {}
         for rr in run_rows:
             rec = SubagentRunRecord(
@@ -1577,7 +1667,7 @@ class MemoryDatabase:
                 role_profile=str(rr["role_profile"] or "general"),
                 status=str(rr["status"]),  # type: ignore[arg-type]
                 iterations=int(rr["iterations"] or 0),
-                max_iterations=int(rr["max_iterations"] or 20),
+                max_iterations=int(rr["max_iterations"]) if rr["max_iterations"] is not None else 0,
                 tokens_in=int(rr["tokens_in"] or 0),
                 tokens_out=int(rr["tokens_out"] or 0),
                 cost_usd=float(rr["cost_usd"] or 0.0),
@@ -1622,7 +1712,7 @@ class MemoryDatabase:
                 message=str(er["message"]),
                 metadata=json.loads(er["metadata_json"] or "{}"),
             )
-            for er in ev_rows
+            for er in ev_rows[:80]
         ]
         events.reverse()
         return GoalRecord(
@@ -1636,7 +1726,7 @@ class MemoryDatabase:
             allowed_models=json.loads(row["allowed_models_json"] or "[]"),
             tokens_used=int(row["tokens_used"] or 0),
             cost_usd=float(row["cost_usd"] or 0.0),
-            max_cost_usd=float(row["max_cost_usd"] or 1.5),
+            max_cost_usd=float(row["max_cost_usd"]) if row["max_cost_usd"] is not None else 0.0,
             progress_pct=int(row["progress_pct"] or 0),
             current_phase=str(row["current_phase"] or ""),
             final_summary=str(row["final_summary"] or ""),
@@ -1648,6 +1738,19 @@ class MemoryDatabase:
             updated_at=str(row["updated_at"]),
             finished_at=row["finished_at"],
         )
+
+    def _hydrate_goal(self, conn: sqlite3.Connection, row: sqlite3.Row) -> GoalRecord:
+        gid = str(row["id"])
+        sub_rows = conn.execute(
+            "SELECT * FROM goal_subtasks WHERE goal_id = ? ORDER BY created_at ASC", (gid,)
+        ).fetchall()
+        run_rows = conn.execute(
+            "SELECT * FROM subagent_runs WHERE goal_id = ? ORDER BY started_at ASC", (gid,)
+        ).fetchall()
+        ev_rows = conn.execute(
+            "SELECT * FROM goal_events WHERE goal_id = ? ORDER BY ts DESC LIMIT 80", (gid,)
+        ).fetchall()
+        return self._build_goal_record(row, sub_rows, run_rows, ev_rows)
 
     def get_goal(self, goal_id: str) -> GoalRecord | None:
         with self._connect() as conn:
@@ -1661,4 +1764,39 @@ class MemoryDatabase:
             rows = conn.execute(
                 "SELECT * FROM goals ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
-            return [self._hydrate_goal(conn, r) for r in rows]
+            if not rows:
+                return []
+            goal_ids = [str(r["id"]) for r in rows]
+            placeholders = ", ".join("?" for _ in goal_ids)
+            sub_all = conn.execute(
+                f"SELECT * FROM goal_subtasks WHERE goal_id IN ({placeholders}) ORDER BY created_at ASC",
+                tuple(goal_ids),
+            ).fetchall()
+            run_all = conn.execute(
+                f"SELECT * FROM subagent_runs WHERE goal_id IN ({placeholders}) ORDER BY started_at ASC",
+                tuple(goal_ids),
+            ).fetchall()
+            ev_all = conn.execute(
+                f"SELECT * FROM goal_events WHERE goal_id IN ({placeholders}) ORDER BY ts DESC",
+                tuple(goal_ids),
+            ).fetchall()
+            subs_by_goal: dict[str, list[sqlite3.Row]] = {}
+            for sr in sub_all:
+                subs_by_goal.setdefault(str(sr["goal_id"]), []).append(sr)
+            runs_by_goal: dict[str, list[sqlite3.Row]] = {}
+            for rr in run_all:
+                runs_by_goal.setdefault(str(rr["goal_id"]), []).append(rr)
+            evs_by_goal: dict[str, list[sqlite3.Row]] = {}
+            for er in ev_all:
+                bucket = evs_by_goal.setdefault(str(er["goal_id"]), [])
+                if len(bucket) < 80:
+                    bucket.append(er)
+            return [
+                self._build_goal_record(
+                    r,
+                    subs_by_goal.get(str(r["id"]), []),
+                    runs_by_goal.get(str(r["id"]), []),
+                    evs_by_goal.get(str(r["id"]), []),
+                )
+                for r in rows
+            ]

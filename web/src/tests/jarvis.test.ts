@@ -34,6 +34,8 @@ function resetStore() {
     finalTranscript: "",
     streamingText: "",
     streamingMessageId: null,
+    streamingStepBoundary: false,
+    streamingStepCount: 0,
     messages: [],
     pendingTools: {},
     approvals: [],
@@ -110,6 +112,81 @@ describe("useJarvisStore", () => {
     expect(state.messages[0].tools).toHaveLength(1);
     expect(state.messages[0].tools[0].summary).toBe("1 evenement trouve.");
     expect(Object.keys(state.pendingTools)).toHaveLength(0);
+  });
+
+  it("remplace l'etape affichee a chaque nouvelle iteration sans additionner les etapes", () => {
+    const store = useJarvisStore.getState();
+
+    store.handleServerEvent({ type: "state", payload: { value: "thinking" } });
+    store.handleServerEvent({
+      type: "assistant.delta",
+      payload: { message_id: "msg_steps", text: "Je localise le code du bot." },
+    });
+    expect(useJarvisStore.getState().streamingText).toBe("Je localise le code du bot.");
+    expect(useJarvisStore.getState().streamingStepCount).toBe(1);
+
+    store.handleServerEvent({
+      type: "tool.call",
+      payload: { id: "tc_1", name: "search_files", args: { query: "bot.py" }, risk: 0 },
+    });
+    expect(useJarvisStore.getState().streamingText).toBe("Je localise le code du bot.");
+    expect(useJarvisStore.getState().streamingStepBoundary).toBe(true);
+
+    store.handleServerEvent({
+      type: "tool.result",
+      payload: { id: "tc_1", ok: true, summary: "bot.py trouve" },
+    });
+    store.handleServerEvent({
+      type: "assistant.delta",
+      payload: { message_id: "msg_steps", text: "Je lis le code du cycle " },
+    });
+    store.handleServerEvent({
+      type: "assistant.delta",
+      payload: { message_id: "msg_steps", text: "principal." },
+    });
+    expect(useJarvisStore.getState().streamingText).toBe("Je lis le code du cycle principal.");
+    expect(useJarvisStore.getState().streamingStepCount).toBe(2);
+
+    store.handleServerEvent({
+      type: "tool.call",
+      payload: { id: "tc_2", name: "read_file", args: { file_path: "bot.py" }, risk: 0 },
+    });
+    store.handleServerEvent({
+      type: "tool.result",
+      payload: { id: "tc_2", ok: true, summary: "lu" },
+    });
+    store.handleServerEvent({
+      type: "assistant.delta",
+      payload: { message_id: "msg_steps", text: "Diagnostic terminé : le correctif est en place." },
+    });
+    expect(useJarvisStore.getState().streamingText).toBe(
+      "Diagnostic terminé : le correctif est en place."
+    );
+    expect(useJarvisStore.getState().streamingStepCount).toBe(3);
+
+    store.handleServerEvent({
+      type: "assistant.done",
+      payload: {
+        message_id: "msg_steps",
+        usage: {
+          model: "z-ai/glm-5.3",
+          tokens_in: 120,
+          tokens_out: 45,
+          cost: 0.001,
+        },
+      },
+    });
+
+    const finalState = useJarvisStore.getState();
+    expect(finalState.streamingText).toBe("");
+    expect(finalState.streamingMessageId).toBeNull();
+    expect(finalState.streamingStepBoundary).toBe(false);
+    expect(finalState.streamingStepCount).toBe(0);
+    expect(finalState.messages).toHaveLength(1);
+    expect(finalState.messages[0].content).toBe(
+      "Diagnostic terminé : le correctif est en place."
+    );
+    expect(finalState.messages[0].tools).toHaveLength(2);
   });
 
   it("reinitialise les transcriptions vocales des que Jarvis repond", () => {
@@ -341,6 +418,27 @@ describe("JarvisWsClient", () => {
     expect(MockWebSocket.instances).toHaveLength(3);
 
     client.disconnect();
+  });
+
+  it("ne reconnexionne pas sur erreur d'authentification 4401 et borne la file hors ligne", () => {
+    const client = new JarvisWsClient({
+      url: "ws://localhost:8765/ws",
+      baseDelayMs: 100,
+      maxDelayMs: 1000,
+      onEvent: () => undefined,
+      WebSocketImpl: MockWebSocket as unknown as typeof WebSocket,
+    });
+    for (let i = 0; i < 60; i += 1) {
+      client.send({ type: "user.text", payload: { text: `msg-${i}` } });
+    }
+    expect(client.queuedCount()).toBe(50);
+
+    client.connect();
+    const sock = MockWebSocket.instances[0];
+    sock.readyState = 3;
+    sock.onclose?.({ code: 4401 } as CloseEvent);
+    vi.advanceTimersByTime(5000);
+    expect(MockWebSocket.instances).toHaveLength(1);
   });
 });
 

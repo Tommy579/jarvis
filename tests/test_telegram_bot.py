@@ -147,7 +147,21 @@ async def test_telegram_gui_commands_whitelist_and_help() -> None:
     gw_default = TelegramGateway(bot_token="fake_tok", allowed_chat_id=123456)
     help_res = await gw_default.handle_text(123456, "/help")
     assert help_res.authorized is True
-    for cmd in ("/workspace", "/clear", "/usage", "/local", "/council", "/auto", "/goal", "/skills", "/settings", "/tint", "/status", "/model", "/help"):
+    for cmd in (
+        "/workspace",
+        "/clear",
+        "/usage",
+        "/local",
+        "/council",
+        "/auto",
+        "/goal",
+        "/skills",
+        "/settings",
+        "/tint",
+        "/status",
+        "/model",
+        "/help",
+    ):
         assert cmd in help_res.reply_text
     assert "goal" in TELEGRAM_SUPPORTED_COMMANDS
 
@@ -167,7 +181,19 @@ async def test_telegram_execute_gui_commands(tmp_path: Path, monkeypatch) -> Non
 
     # /help liste toutes les commandes
     help_out = await execute_telegram_command(state, "help", "")
-    for expected in ("/workspace", "/clear", "/usage", "/local", "/council", "/auto", "/goal", "/skills", "/settings", "/tint", "/help"):
+    for expected in (
+        "/workspace",
+        "/clear",
+        "/usage",
+        "/local",
+        "/council",
+        "/auto",
+        "/goal",
+        "/skills",
+        "/settings",
+        "/tint",
+        "/help",
+    ):
         assert expected in help_out
 
     # /workspace + message + reset (resolution vers ~/Documents/marges)

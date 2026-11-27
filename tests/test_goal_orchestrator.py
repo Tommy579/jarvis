@@ -953,7 +953,7 @@ def test_goals_rest_endpoints_and_toolkit(tmp_path: Path, monkeypatch: pytest.Mo
 
         budget_get = client.get("/api/usage/budget")
         assert budget_get.status_code == 200
-        assert budget_get.json()["daily_budget_usd"] == 5.0
+        assert budget_get.json()["daily_budget_usd"] == 10.0
 
         budget_put = client.put("/api/usage/budget", json={"daily_budget_usd": 0.0})
         assert budget_put.status_code == 200

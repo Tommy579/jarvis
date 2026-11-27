@@ -43,7 +43,11 @@ def _spend_last_day(db: Any) -> float:
 def _messages_today(db: Any, now: datetime) -> int:
     today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
     try:
-        return sum(1 for m in db.list_messages(limit=500) if str(m.ts).startswith(today))
+        return sum(
+            1
+            for m in db.list_messages(limit=500)
+            if str(getattr(m, "created_at", None) or getattr(m, "ts", "")).startswith(today)
+        )
     except Exception:
         return 0
 

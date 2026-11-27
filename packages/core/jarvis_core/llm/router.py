@@ -16,6 +16,7 @@ from jarvis_shared.models import (
     Usage,
 )
 
+from ..tools.registry import wrap_untrusted_content
 from .base import BudgetExceededError, LLMProvider, ProviderError
 from .gemini import DEFAULT_KNOWN_GEMINI_MODELS
 from .ollama import DEFAULT_KNOWN_OLLAMA_MODELS
@@ -140,9 +141,10 @@ class LLMRouter:
         self,
         providers: dict[str, LLMProvider],
         roles: dict[str, RoleRoute] | None = None,
-        daily_budget_usd: float = 5.0,
+        daily_budget_usd: float = 10.0,
         usage_logger: Callable[[str, Usage], None] | None = None,
         daily_spend_getter: Callable[[], float] | None = None,
+        daily_provider_spend_getter: Callable[[str], float] | None = None,
     ):
         self.providers = providers
         self.thinking_mode: str = "auto"
@@ -159,7 +161,9 @@ class LLMRouter:
         self.daily_budget_usd = daily_budget_usd
         self.usage_logger = usage_logger
         self.daily_spend_getter = daily_spend_getter
+        self.daily_provider_spend_getter = daily_provider_spend_getter
         self._in_memory_spend_usd = 0.0
+        self._in_memory_spend_by_provider: dict[str, float] = {}
         self.capabilities: dict[str, ModelCapabilities] = {}
         self.capabilities.update(DEFAULT_KNOWN_OPENROUTER_MODELS)
         self.capabilities.update(DEFAULT_KNOWN_GEMINI_MODELS)
@@ -174,30 +178,6 @@ class LLMRouter:
         for provider in self.providers.values():
             setattr(provider, "thinking_mode", clean)
         return clean
-
-    async def validate_registry(self, strict: bool = False) -> dict[str, list[str]]:
-        """Interroge les fournisseurs au demarrage pour verifier les slugs et capacites."""
-        warnings: list[str] = []
-        errors: list[str] = []
-        for provider in self.providers.values():
-            caps = await provider.fetch_available_models()
-            self.capabilities.update(caps)
-
-        for role_name, route in self.roles.items():
-            cap = self.capabilities.get(route.model)
-            if not cap:
-                msg = f"Modele '{route.model}' du role '{role_name}' absent du catalogue connu."
-                if strict:
-                    errors.append(msg)
-                else:
-                    warnings.append(msg)
-                continue
-            if role_name == "agent" and not cap.supports_tools:
-                warnings.append(f"Le modele '{route.model}' ne declare pas le support des outils.")
-            if role_name == "vision" and not cap.supports_vision:
-                warnings.append(f"Le modele vision '{route.model}' ne supporte pas les images.")
-
-        return {"warnings": warnings, "errors": errors}
 
     def set_role_model(
         self,
@@ -220,11 +200,12 @@ class LLMRouter:
                 else (provider or resolved_provider)
             )
             model_or_alias = resolved_model
+        elif "/" in raw and not raw.startswith("models/"):
+            provider = "openrouter"
+            model_or_alias = raw
         elif ":" in raw or raw in DEFAULT_KNOWN_OLLAMA_MODELS:
             provider = "ollama"
             model_or_alias = raw
-        elif "/" in raw and not raw.startswith("models/"):
-            provider = "openrouter"
         elif provider is None:
             provider = "gemini"
 
@@ -254,20 +235,60 @@ class LLMRouter:
     def get_role_route(self, role_name: str) -> RoleRoute:
         return self.roles.get(role_name) or self.roles["agent"]
 
+    @staticmethod
+    def _is_candidate_trusted(prov: LLMProvider | None, model_id: str) -> bool:
+        if prov is None or not getattr(prov, "trusted_for_highly_private", False):
+            return False
+        checker = getattr(prov, "is_model_trusted", None)
+        if callable(checker):
+            return bool(checker(model_id))
+        return True
+
     def is_role_provider_trusted_for_highly_private(self, role_name: str = "agent") -> bool:
         route = self.get_role_route(role_name)
         prov = self.providers.get(route.provider)
-        return bool(prov and prov.trusted_for_highly_private)
+        return self._is_candidate_trusted(prov, route.model)
 
-    def _check_budget(self) -> None:
-        spent = self.daily_spend_getter() if self.daily_spend_getter else self._in_memory_spend_usd
+    def get_provider_spend_today(self, provider_name: str) -> float:
+        if self.daily_provider_spend_getter is not None:
+            return float(self.daily_provider_spend_getter(provider_name))
+        if self.daily_spend_getter is not None:
+            return float(self.daily_spend_getter())
+        return float(self._in_memory_spend_by_provider.get(provider_name, 0.0))
+
+    def _is_provider_over_budget(self, provider_name: str) -> tuple[bool, float]:
+        spent = self.get_provider_spend_today(provider_name)
         if self.daily_budget_usd > 0 and spent >= self.daily_budget_usd:
-            raise BudgetExceededError(spent, self.daily_budget_usd)
+            return True, spent
+        return False, spent
 
-    def _record_usage(self, role_name: str, usage: Usage | None) -> None:
+    def _filter_candidates_by_budget(
+        self, candidates: list[tuple[LLMProvider, str]]
+    ) -> list[tuple[LLMProvider, str]]:
+        """Exclut les fournisseurs ayant depasse leur plafond journalier, ou leve BudgetExceededError."""
+        allowed: list[tuple[LLMProvider, str]] = []
+        last_blocked: tuple[str, float] | None = None
+        for provider, model_id in candidates:
+            over, spent = self._is_provider_over_budget(provider.name)
+            if over:
+                last_blocked = (provider.name, spent)
+                continue
+            allowed.append((provider, model_id))
+        if not allowed and last_blocked is not None:
+            prov_name, spent = last_blocked
+            raise BudgetExceededError(spent, self.daily_budget_usd, provider=prov_name)
+        return allowed
+
+    def _record_usage(
+        self, role_name: str, usage: Usage | None, *, fallback_provider: str | None = None
+    ) -> None:
         if not usage:
             return
         self._in_memory_spend_usd += usage.cost_usd
+        prov = (usage.provider or fallback_provider or "").strip() or "unknown"
+        self._in_memory_spend_by_provider[prov] = (
+            self._in_memory_spend_by_provider.get(prov, 0.0) + usage.cost_usd
+        )
         if self.usage_logger:
             self.usage_logger(role_name, usage)
 
@@ -302,10 +323,10 @@ class LLMRouter:
             )
             vision_res = await self.complete(role="vision", messages=[vision_prompt])
             desc = vision_res.text.strip()
-            combined_content = (
-                f"{msg.content}\n\n"
-                f'<untrusted source="vision_delegation">\n[Description visuelle : {desc}]\n</untrusted>'
-            ).strip()
+            wrapped_desc = wrap_untrusted_content(
+                "vision_delegation", f"[Description visuelle : {desc}]"
+            )
+            combined_content = f"{msg.content}\n\n{wrapped_desc}".strip()
             rewritten.append(
                 Message(
                     id=msg.id,
@@ -333,13 +354,20 @@ class LLMRouter:
 
     @staticmethod
     def _infer_provider_for_model(model_id: str) -> str:
-        if ":" in model_id or model_id in DEFAULT_KNOWN_OLLAMA_MODELS:
-            return "ollama"
+        # Toujours verifier "/" avant ":" pour ne pas router les slugs OpenRouter :free/:thinking vers Ollama
         if "/" in model_id and not model_id.startswith("models/"):
             return "openrouter"
+        if ":" in model_id or model_id in DEFAULT_KNOWN_OLLAMA_MODELS:
+            return "ollama"
         return "gemini"
 
-    def _candidate_chain(self, route: RoleRoute) -> list[tuple[LLMProvider, str]]:
+    def _candidate_chain(
+        self,
+        route: RoleRoute,
+        *,
+        require_trusted: bool = False,
+        allow_global_fallbacks: bool = True,
+    ) -> list[tuple[LLMProvider, str]]:
         chain: list[tuple[LLMProvider, str]] = []
         primary_prov = self.providers.get(route.provider)
         primary_expected = self._infer_provider_for_model(route.model)
@@ -366,14 +394,17 @@ class LLMRouter:
                     fb_prov = None
             if fb_prov and (fb_prov, fb_model) not in chain:
                 chain.append((fb_prov, fb_model))
-        or_prov = self.providers.get("openrouter")
-        if self._is_provider_configured(or_prov) and or_prov is not None:
-            if (or_prov, "deepseek/deepseek-v4.1-flash-1017") not in chain:
-                chain.append((or_prov, "deepseek/deepseek-v4.1-flash-1017"))
-        gem_prov = self.providers.get("gemini")
-        if self._is_provider_configured(gem_prov) and gem_prov is not None:
-            if (gem_prov, "gemini-3.5-flash-lite") not in chain:
-                chain.append((gem_prov, "gemini-3.5-flash-lite"))
+        if allow_global_fallbacks:
+            or_prov = self.providers.get("openrouter")
+            if self._is_provider_configured(or_prov) and or_prov is not None:
+                if (or_prov, "deepseek/deepseek-v4.1-flash-1017") not in chain:
+                    chain.append((or_prov, "deepseek/deepseek-v4.1-flash-1017"))
+            gem_prov = self.providers.get("gemini")
+            if self._is_provider_configured(gem_prov) and gem_prov is not None:
+                if (gem_prov, "gemini-3.5-flash-lite") not in chain:
+                    chain.append((gem_prov, "gemini-3.5-flash-lite"))
+        if require_trusted:
+            chain = [(prov, mid) for prov, mid in chain if self._is_candidate_trusted(prov, mid)]
         return chain
 
     def _resolve_route(
@@ -385,7 +416,19 @@ class LLMRouter:
     ) -> RoleRoute:
         base = self.get_role_route(role)
         if not model_override:
-            return base
+            if fallback_models_override is None and provider_override is None:
+                return base
+            return RoleRoute(
+                role_name=base.role_name,
+                model=base.model,
+                provider=provider_override or base.provider,
+                fallback=(
+                    list(fallback_models_override)
+                    if fallback_models_override is not None
+                    else list(base.fallback)
+                ),
+                thinking_mode=base.thinking_mode,
+            )
         raw = model_override.strip()
         key = raw.lower()
         provider = provider_override
@@ -397,13 +440,12 @@ class LLMRouter:
             alias_prov, alias_model = MODEL_ALIASES[key]
             provider = provider or alias_prov
             resolved_model = alias_model
+        elif "/" in raw and not raw.startswith("models/"):
+            provider = provider or "openrouter"
         elif ":" in raw or raw in DEFAULT_KNOWN_OLLAMA_MODELS:
             provider = "ollama"
         elif provider is None:
-            if "/" in raw and not raw.startswith("models/"):
-                provider = "openrouter"
-            else:
-                provider = "gemini"
+            provider = "gemini"
 
         if provider not in self.providers:
             if "openrouter" in self.providers and "/" in resolved_model:
@@ -424,6 +466,11 @@ class LLMRouter:
             thinking_mode=base.thinking_mode,
         )
 
+    @staticmethod
+    def _openrouter_fallback_slugs(fallback: list[str]) -> list[str] | None:
+        slugs = [m for m in fallback if "/" in m and not m.startswith("models/")]
+        return slugs or None
+
     def _effective_thinking_mode(self, route: RoleRoute) -> str:
         return route.thinking_mode if route.thinking_mode != "auto" else self.thinking_mode
 
@@ -438,8 +485,8 @@ class LLMRouter:
         provider_override: str | None = None,
         fallback_models_override: list[str] | None = None,
         timeout_s: float | None = None,
+        require_trusted: bool = False,
     ) -> StreamDelta:
-        self._check_budget()
         route = self._resolve_route(
             role,
             model_override=model_override,
@@ -452,9 +499,17 @@ class LLMRouter:
         if role != "vision" and not self._model_supports_vision(route.model):
             effective_messages = await self._delegate_images_to_vision_role(messages)
 
-        candidates = self._candidate_chain(route)
+        allow_global = fallback_models_override is None or len(fallback_models_override) > 0
+        candidates = self._candidate_chain(
+            route, require_trusted=require_trusted, allow_global_fallbacks=allow_global
+        )
         if not candidates:
+            if require_trusted:
+                raise ProviderError(
+                    f"Aucun fournisseur de confiance disponible pour les donnees tres privees (role '{role}')."
+                )
             raise ProviderError(f"Aucun fournisseur configure pour le role '{role}'.")
+        candidates = self._filter_candidates_by_budget(candidates)
 
         effective_thinking = self._effective_thinking_mode(route)
         last_err: Exception | None = None
@@ -465,7 +520,9 @@ class LLMRouter:
                     "messages": effective_messages,
                     "tools": tools,
                     "fallback_models": (
-                        route.fallback if provider.name == "openrouter" else None
+                        self._openrouter_fallback_slugs(route.fallback)
+                        if provider.name == "openrouter"
+                        else None
                     ),
                     "temperature": temperature,
                 }
@@ -476,7 +533,7 @@ class LLMRouter:
                         delta = await provider.complete(**call_kwargs)
                 else:
                     delta = await provider.complete(**call_kwargs)
-                self._record_usage(role, delta.usage)
+                self._record_usage(role, delta.usage, fallback_provider=provider.name)
                 return delta
             except Exception as e:
                 last_err = e
@@ -497,8 +554,8 @@ class LLMRouter:
         provider_override: str | None = None,
         fallback_models_override: list[str] | None = None,
         timeout_s: float | None = None,
+        require_trusted: bool = False,
     ) -> AsyncIterator[StreamDelta]:
-        self._check_budget()
         route = self._resolve_route(
             role,
             model_override=model_override,
@@ -509,9 +566,17 @@ class LLMRouter:
         if role != "vision" and not self._model_supports_vision(route.model):
             effective_messages = await self._delegate_images_to_vision_role(messages)
 
-        candidates = self._candidate_chain(route)
+        allow_global = fallback_models_override is None or len(fallback_models_override) > 0
+        candidates = self._candidate_chain(
+            route, require_trusted=require_trusted, allow_global_fallbacks=allow_global
+        )
         if not candidates:
+            if require_trusted:
+                raise ProviderError(
+                    f"Aucun fournisseur de confiance disponible pour les donnees tres privees (role '{role}')."
+                )
             raise ProviderError(f"Aucun fournisseur configure pour le role '{role}'.")
+        candidates = self._filter_candidates_by_budget(candidates)
 
         effective_thinking = self._effective_thinking_mode(route)
         last_err: Exception | None = None
@@ -522,7 +587,9 @@ class LLMRouter:
                     "messages": effective_messages,
                     "tools": tools,
                     "fallback_models": (
-                        route.fallback if provider.name == "openrouter" else None
+                        self._openrouter_fallback_slugs(route.fallback)
+                        if provider.name == "openrouter"
+                        else None
                     ),
                     "temperature": temperature,
                 }
@@ -532,12 +599,14 @@ class LLMRouter:
                     async with asyncio.timeout(timeout_s):
                         async for delta in provider.stream(**call_kwargs):
                             if delta.usage:
-                                self._record_usage(role, delta.usage)
+                                self._record_usage(
+                                    role, delta.usage, fallback_provider=provider.name
+                                )
                             yield delta
                 else:
                     async for delta in provider.stream(**call_kwargs):
                         if delta.usage:
-                            self._record_usage(role, delta.usage)
+                            self._record_usage(role, delta.usage, fallback_provider=provider.name)
                         yield delta
                 return
             except Exception as e:

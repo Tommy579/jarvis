@@ -1,6 +1,5 @@
-"""Support MCP (Model Context Protocol) entrant et sortant."""
+"""Support MCP (Model Context Protocol) client stdio."""
 
 from .client import MCPClientManager, MCPServerConfig
-from .server import JARVISMemoryMCPServer
 
-__all__ = ["MCPClientManager", "MCPServerConfig", "JARVISMemoryMCPServer"]
+__all__ = ["MCPClientManager", "MCPServerConfig"]

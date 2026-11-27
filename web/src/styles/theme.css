@@ -11,11 +11,14 @@
     /* Neutres : ardoise architecturale (clair) ou cockpit obsidienne (sombre) */
     --bg: light-dark(oklch(0.962 0.006 242), oklch(0.132 0.012 248));
     --surface: light-dark(oklch(0.996 0.002 242), oklch(0.175 0.014 248));
+    --surface-1: var(--surface);
+    --bg-card: var(--surface);
     --surface-2: light-dark(oklch(0.942 0.008 242), oklch(0.218 0.016 248));
     --surface-3: light-dark(oklch(0.91 0.01 242), oklch(0.265 0.018 248));
     --line: light-dark(oklch(0.88 0.01 242), oklch(0.275 0.016 246));
     --line-strong: light-dark(oklch(0.77 0.014 242), oklch(0.37 0.02 244));
     --text: light-dark(oklch(0.2 0.018 248), oklch(0.955 0.006 242));
+    --text-1: var(--text);
     --text-2: light-dark(oklch(0.44 0.015 248), oklch(0.745 0.012 242));
     --text-3: light-dark(oklch(0.56 0.012 248), oklch(0.61 0.012 242));
 
@@ -25,6 +28,7 @@
     --accent-fill-hover: light-dark(oklch(0.56 0.17 240), oklch(0.82 0.13 220));
     --on-accent: light-dark(oklch(0.99 0.005 240), oklch(0.16 0.04 240));
     --accent-soft: color-mix(in oklch, var(--accent-fill) 14%, transparent);
+    --accent-line: color-mix(in oklch, var(--accent) 42%, var(--line));
 
     --danger: light-dark(oklch(0.52 0.2 26), oklch(0.72 0.17 24));
     --danger-soft: color-mix(in oklch, var(--danger) 12%, transparent);
@@ -55,12 +59,38 @@
     --sp-7: 48px;
 
     --r-sm: 6px;
+    --radius-sm: var(--r-sm);
     --r-md: 10px;
     --r-lg: 16px;
+    --r-xl: 18px;
     --r-full: 999px;
+
+    /* --- Aperçu caméra : palette dédiée, entièrement en OKLCH -------------
+       Le mode sombre est la référence de conception (cockpit obsidienne) ;
+       le mode clair est dérivé en conservant les mêmes teintes (hue 248/250)
+       pour que la vignette reste cohérente avec le reste de l'interface. */
+    --cam-bg: light-dark(oklch(0.928 0.008 248), oklch(0.148 0.014 250));
+    --cam-bg-deep: light-dark(oklch(0.878 0.011 248), oklch(0.104 0.012 252));
+    --cam-line: light-dark(oklch(0.845 0.012 248), oklch(0.322 0.021 246));
+    --cam-line-soft: light-dark(oklch(0.9 0.008 248), oklch(0.243 0.016 248));
+    --cam-accent: light-dark(oklch(0.55 0.15 240), oklch(0.82 0.14 218));
+    --cam-live: light-dark(oklch(0.58 0.19 22), oklch(0.73 0.2 22));
+    --cam-shimmer-a: light-dark(oklch(0.9 0.008 248), oklch(0.19 0.015 250));
+    --cam-shimmer-b: light-dark(oklch(0.955 0.005 248), oklch(0.268 0.019 248));
+    --cam-shadow: 0 1px 2px light-dark(oklch(0.2 0.02 245 / 0.06), oklch(0 0 0 / 0.4)),
+      0 10px 28px -10px light-dark(oklch(0.2 0.03 245 / 0.16), oklch(0 0 0 / 0.62));
+    /* Durée du crossfade entre deux frames (rafraîchissement à 1 Hz). */
+    --cam-fade: 420ms;
 
     --sidebar-w: 236px;
     --bottom-nav-h: 64px;
+    /* Hauteur de reference des controles interactifs (boutons, champs, pastilles).
+       Utilisee partout ou plusieurs controles se font face dans une meme barre
+       d'action : garantit un alignement horizontal strict et evite tout
+       debordement/decalage vertical. */
+    --control-h: 38px;
+    /* Variante compacte (boutons/champs secondaires, contrôles segmentes). */
+    --control-h-sm: 32px;
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --dur: 160ms;
 
@@ -310,12 +340,16 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
+  .nav__badge--accent {
+    background: var(--accent-fill);
+    color: var(--on-accent);
+  }
 
   .sidebar__search {
     display: flex;
     align-items: center;
     gap: var(--sp-2);
-    min-height: 38px;
+    min-height: var(--control-h);
     padding: 0 var(--sp-3);
     border: 1px solid var(--line);
     border-radius: var(--r-md);
@@ -494,7 +528,7 @@
     align-items: center;
     justify-content: center;
     gap: var(--sp-2);
-    min-height: 38px;
+    min-height: var(--control-h);
     padding: 0 var(--sp-4);
     border: 1px solid var(--line-strong);
     border-radius: var(--r-md);
@@ -553,7 +587,7 @@
     background: var(--ok-soft);
   }
   .btn--sm {
-    min-height: 32px;
+    min-height: var(--control-h-sm);
     padding: 0 var(--sp-3);
     font-size: var(--fs-xs);
   }
@@ -561,8 +595,8 @@
   .icon-btn {
     display: inline-grid;
     place-items: center;
-    width: 38px;
-    height: 38px;
+    width: var(--control-h);
+    height: var(--control-h);
     flex-shrink: 0;
     border: 1px solid transparent;
     border-radius: var(--r-md);
@@ -612,8 +646,10 @@
   .select,
   .textarea {
     width: 100%;
-    min-height: 40px;
-    padding: 8px 12px;
+    min-height: var(--control-h);
+    /* Padding vertical calcule : une ligne de texte (1.5em) + bordures retombe
+       exactement sur --control-h, donc un champ et un bouton voisins s'alignent. */
+    padding: calc((var(--control-h) - 1.5em - 2px) / 2) 12px;
     border: 1px solid var(--line-strong);
     border-radius: var(--r-md);
     background: var(--surface);
@@ -626,6 +662,8 @@
   }
   .textarea {
     resize: vertical;
+    /* line-height propre au textarea : le padding garde une ligne = --control-h. */
+    padding-block: calc((var(--control-h) - 1.55em - 2px) / 2);
     line-height: 1.55;
   }
   .input::placeholder,
@@ -646,7 +684,7 @@
   }
   .input--sm,
   .select--sm {
-    min-height: 32px;
+    min-height: var(--control-h-sm);
     padding: 4px 10px;
     font-size: var(--fs-sm);
   }
@@ -774,6 +812,15 @@
     background: var(--ok-soft);
     color: var(--ok);
   }
+  .badge--info {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .badge--warn {
+    --warn: light-dark(oklch(0.55 0.14 70), oklch(0.8 0.14 75));
+    background: color-mix(in oklch, var(--warn) 14%, transparent);
+    color: var(--warn);
+  }
 
   .dot {
     width: 7px;
@@ -816,7 +863,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-height: 32px;
+    min-height: var(--control-h-sm);
     padding: 0 var(--sp-3);
     border: 0;
     border-radius: 7px;
@@ -921,6 +968,23 @@
   }
   .banner > span {
     flex: 1;
+  }
+  /* Variante discrete pour les erreurs de chargement par section : moins
+     agressive qu'une alerte plein cadre, avec action « Réessayer ». */
+  .banner--error {
+    margin-bottom: var(--sp-3);
+    background: color-mix(in oklch, var(--danger) 7%, transparent);
+    border-style: dashed;
+    border-color: color-mix(in oklch, var(--danger) 26%, transparent);
+    font-size: var(--fs-xs);
+  }
+  .banner__retry {
+    flex-shrink: 0;
+    color: var(--danger);
+    border-color: color-mix(in oklch, var(--danger) 34%, transparent);
+  }
+  .banner__retry:hover:not(:disabled) {
+    background: var(--danger-soft);
   }
 
   /* Toasts */
@@ -1112,7 +1176,7 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    height: 32px;
+    height: var(--control-h);
     padding: 0 12px;
     border-radius: var(--r-full);
     border: 1px solid var(--line);
@@ -1191,11 +1255,137 @@
     color: var(--accent);
     font-weight: 600;
   }
-  .state-pill {
+
+  .goal-widget {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: 8px;
     height: 32px;
+    padding: 0 6px 0 11px;
+    border-radius: var(--r-full);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text-2);
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    box-shadow: 0 1px 2px light-dark(oklch(0 0 0 / 0.04), oklch(0 0 0 / 0.3));
+    transition: border-color var(--dur), background-color var(--dur);
+  }
+  .goal-widget[data-active="true"] {
+    border-color: color-mix(in oklch, var(--accent) 45%, var(--line));
+    color: var(--text);
+  }
+  .goal-widget__status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .goal-widget__status .dot {
+    color: var(--text-3);
+  }
+  .goal-widget[data-active="true"] .goal-widget__status .dot {
+    color: var(--accent-fill);
+  }
+  .goal-widget__toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: var(--r-full);
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color var(--dur), color var(--dur);
+  }
+  .goal-widget__toggle:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .goal-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 36;
+    width: min(360px, 90vw);
+    padding: var(--sp-4);
+    border-radius: var(--r-lg);
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    box-shadow: var(--shadow-pop);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    text-align: left;
+  }
+  .goal-popover__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+  }
+  .goal-popover__title {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .goal-popover__hint {
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    line-height: 1.45;
+  }
+  .goal-popover__toggle {
+    padding: 5px 12px;
+    border-radius: var(--r-full);
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--text-2);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color var(--dur), background-color var(--dur), color var(--dur);
+  }
+  .goal-popover__toggle[aria-pressed="true"] {
+    background: var(--accent-soft);
+    border-color: color-mix(in oklch, var(--accent) 45%, var(--line));
+    color: var(--accent);
+  }
+  .goal-inline-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    padding: 8px 12px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .goal-inline-bar__info {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-width: 0;
+    font-size: var(--fs-sm);
+  }
+  .goal-inline-bar__info .dot {
+    color: var(--accent-fill);
+  }
+  .goal-inline-bar__title {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .state-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: var(--control-h);
     padding: 0 13px;
     border-radius: var(--r-full);
     border: 1px solid var(--line);
@@ -1307,6 +1497,78 @@
     color: var(--text);
     background: var(--surface-2);
     transform: translateY(-1px);
+  }
+
+  .live-line-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+  }
+
+  .text-wave,
+  .text-wave .rich-p,
+  .text-wave .rich-heading,
+  .text-wave .rich-list li,
+  .text-wave .rich-table th,
+  .text-wave .rich-table td {
+    --jarvis-wave-base: var(--text);
+    --jarvis-wave-mid: light-dark(oklch(0.58 0.15 236), oklch(0.82 0.13 224));
+    --jarvis-wave-crest: light-dark(oklch(0.48 0.18 240), oklch(0.72 0.16 226));
+    background-image: linear-gradient(
+      90deg,
+      var(--jarvis-wave-base) 0%,
+      var(--jarvis-wave-base) 30%,
+      var(--jarvis-wave-mid) 38%,
+      var(--jarvis-wave-crest) 50%,
+      var(--jarvis-wave-mid) 62%,
+      var(--jarvis-wave-base) 70%,
+      var(--jarvis-wave-base) 100%
+    );
+    background-size: 200% 100%;
+    background-repeat: repeat-x;
+    background-position: 200% 50%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: jarvis-text-wave 1.9s linear infinite;
+  }
+  .text-wave:has(.rich-text) {
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    -webkit-text-fill-color: currentColor;
+    color: inherit;
+    animation: none;
+  }
+  .text-wave .rich-code {
+    -webkit-text-fill-color: var(--accent);
+    color: var(--accent);
+  }
+  @keyframes jarvis-text-wave {
+    from {
+      background-position: 200% 50%;
+    }
+    to {
+      background-position: 0% 50%;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .text-wave,
+    .text-wave .rich-p,
+    .text-wave .rich-heading,
+    .text-wave .rich-list li,
+    .text-wave .rich-table th,
+    .text-wave .rich-table td {
+      animation: none;
+      background-image: none;
+      -webkit-background-clip: border-box;
+      background-clip: border-box;
+      -webkit-text-fill-color: var(--text);
+      color: var(--text);
+    }
   }
 
   .live-line {
@@ -1437,12 +1699,113 @@
   .composer:focus-within {
     border-color: var(--accent);
   }
+  .composer-tools {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .composer-tools__btn {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid transparent;
+    border-radius: var(--r-md);
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: background-color var(--dur), color var(--dur), border-color var(--dur);
+  }
+  .composer-tools__btn:hover,
+  .composer-tools__btn[aria-expanded="true"] {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .composer-tools__btn--active {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: color-mix(in oklch, var(--accent) 35%, transparent);
+  }
+  .composer-tools__dot {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-fill);
+  }
+  .composer-popover {
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 10px);
+    z-index: 30;
+    width: min(300px, 84vw);
+    padding: var(--sp-3);
+    border-radius: var(--r-lg);
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    box-shadow: var(--shadow-pop);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    animation: slash-rise 0.15s var(--ease-out);
+  }
+  .composer-popover__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--r-md);
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--dur);
+  }
+  .composer-popover__row:hover {
+    background: var(--surface-2);
+  }
+  .composer-popover__text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+  .composer-popover__title {
+    font-size: var(--fs-sm);
+    font-weight: 500;
+  }
+  .composer-popover__meta {
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+  }
+  .composer-popover__pill {
+    flex-shrink: 0;
+    padding: 2px 9px;
+    border-radius: var(--r-full);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--text-2);
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+  .composer-popover__row[aria-pressed="true"] .composer-popover__pill {
+    background: var(--accent-soft);
+    border-color: color-mix(in oklch, var(--accent) 45%, var(--line));
+    color: var(--accent);
+  }
   .composer__input {
     flex: 1;
     min-width: 0;
-    min-height: 40px;
+    /* Une seule ligne du textarea = --control-h, comme les boutons voisins. */
+    min-height: var(--control-h);
     max-height: 160px;
-    padding: 9px 10px;
+    /* Sans bordure : une ligne (1.45em) + ce padding = exactement --control-h. */
+    padding: calc((var(--control-h) - 1.45em) / 2) 10px;
     border: 0;
     background: transparent;
     resize: none;
@@ -1530,8 +1893,8 @@
   .mic-btn {
     display: inline-grid;
     place-items: center;
-    width: 40px;
-    height: 40px;
+    width: var(--control-h);
+    height: var(--control-h);
     flex-shrink: 0;
     border: 1px solid var(--line);
     border-radius: var(--r-md);
@@ -1552,8 +1915,8 @@
     transform: scale(1.06);
   }
   .send-btn {
-    width: 40px;
-    min-height: 40px;
+    width: var(--control-h);
+    height: var(--control-h);
     padding: 0;
   }
   .send-btn:disabled {
@@ -1563,7 +1926,8 @@
   }
   .cancel-btn {
     width: auto;
-    min-width: 40px;
+    min-width: var(--control-h);
+    height: var(--control-h);
     padding: 0 var(--sp-3);
     gap: var(--sp-1);
     font-size: var(--fs-xs);
@@ -1589,7 +1953,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 30px;
+    height: var(--control-h);
     padding: 0 10px 0 8px;
     border: 1px solid var(--line);
     border-radius: var(--r-full);
@@ -1621,14 +1985,16 @@
     right: 0;
     z-index: 20;
     width: clamp(148px, 18vw, 208px);
+    margin: 0;
     padding: 4px;
-    border-radius: var(--r-lg);
-    border: 1px solid var(--line);
-    background: color-mix(in oklch, var(--surface) 88%, transparent);
-    backdrop-filter: blur(8px);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+    border-radius: var(--r-xl);
+    border: 1px solid var(--cam-line);
+    background: color-mix(in oklch, var(--cam-bg) 82%, transparent);
+    backdrop-filter: blur(10px) saturate(1.1);
+    box-shadow: var(--cam-shadow);
     pointer-events: none;
-    transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color var(--dur) ease;
   }
   @media (min-width: 1180px) {
     .app[data-sidebar-collapsed="true"] .camera-preview {
@@ -1640,14 +2006,138 @@
       transition: none;
     }
   }
-  .camera-preview img {
+
+  /* Fenêtre d'affichage : cadre arrondi, ratio 4/3, fond obsidienne.
+     Les frames sont empilées en absolu (double buffer) et se croisent en fondu. */
+  .camera-preview__viewport {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    aspect-ratio: 4 / 3;
+    border-radius: calc(var(--r-xl) - 5px);
+    background: radial-gradient(
+      120% 120% at 50% 0%,
+      var(--cam-shimmer-a) 0%,
+      var(--cam-bg-deep) 100%
+    );
+    box-shadow: inset 0 0 0 1px var(--cam-line-soft);
+  }
+
+  .camera-preview__img {
+    position: absolute;
+    inset: 0;
     display: block;
     width: 100%;
-    height: auto;
-    aspect-ratio: 4 / 3;
+    height: 100%;
     object-fit: cover;
-    border-radius: var(--r-md);
+    object-position: center;
+    border-radius: inherit;
+    /* Miroir horizontal : la caméra est vue comme dans un miroir. */
     transform: scaleX(-1);
+    opacity: 0;
+    /* La frame entrante est au-dessus (ordre DOM) : elle apparaît en fondu
+       par-dessus la sortante, qui reste opaque jusqu'à la fin du fondu. */
+    transition: opacity var(--cam-fade) ease-in-out;
+    will-change: opacity;
+  }
+  .camera-preview__img[data-active="true"] {
+    opacity: 1;
+  }
+
+  /* Badge discret « Live 1Hz » */
+  .camera-preview__badge {
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px 2px 6px;
+    border-radius: var(--r-full);
+    border: 1px solid color-mix(in oklch, var(--cam-line) 70%, transparent);
+    background: color-mix(in oklch, var(--cam-bg-deep) 72%, transparent);
+    backdrop-filter: blur(6px);
+    color: color-mix(in oklch, var(--text) 88%, transparent);
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    line-height: 1.5;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .camera-preview__badge-dot {
+    width: 5px;
+    height: 5px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--text-3);
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--text-3) 22%, transparent);
+  }
+  .camera-preview__badge[data-live="true"] {
+    border-color: color-mix(in oklch, var(--cam-accent) 34%, var(--cam-line));
+  }
+  .camera-preview__badge[data-live="true"] .camera-preview__badge-dot {
+    background: var(--cam-live);
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--cam-live) 26%, transparent);
+    animation: cam-live-pulse 2s ease-in-out infinite;
+  }
+  @keyframes cam-live-pulse {
+    50% {
+      opacity: 0.4;
+    }
+  }
+
+  /* État de chargement : shimmer élégant tant qu'aucune frame n'est arrivée */
+  .camera-preview__shimmer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 7px;
+    padding: 0 14px;
+    background: linear-gradient(
+      100deg,
+      var(--cam-shimmer-a) 0%,
+      var(--cam-shimmer-b) 45%,
+      var(--cam-shimmer-a) 90%
+    );
+    background-size: 220% 100%;
+    animation: cam-shimmer 1.6s linear infinite;
+  }
+  .camera-preview__shimmer-bar {
+    height: 6px;
+    border-radius: var(--r-full);
+    background: color-mix(in oklch, var(--cam-line) 62%, transparent);
+  }
+  .camera-preview__shimmer-bar:nth-child(1) {
+    width: 62%;
+  }
+  .camera-preview__shimmer-bar:nth-child(2) {
+    width: 84%;
+  }
+  .camera-preview__shimmer-bar:nth-child(3) {
+    width: 46%;
+  }
+  @keyframes cam-shimmer {
+    to {
+      background-position: -220% 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .camera-preview__img {
+      transition: none;
+    }
+    .camera-preview__shimmer {
+      animation: none;
+      background: var(--cam-shimmer-a);
+    }
+    .camera-preview__badge[data-live="true"] .camera-preview__badge-dot {
+      animation: none;
+    }
   }
 
   /* Conversation */
@@ -2369,14 +2859,18 @@
       display: none;
     }
     .sensor-chip {
-      min-height: 38px;
+      min-height: var(--control-h);
       height: auto;
       padding: 6px 12px 6px 10px;
     }
+    /* Cibles tactiles : .input--sm partageait deja la regle de .select--sm en
+       desktop, il doit donc suivre la meme remontee ici, sinon un champ compact
+       et le select voisin se decalent de 6px. */
+    .input--sm,
     .select--sm,
     .btn--sm,
     .segmented__item {
-      min-height: 38px;
+      min-height: var(--control-h);
     }
   }
 

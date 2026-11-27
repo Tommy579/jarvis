@@ -5,6 +5,7 @@ import { computeRms, encodeWavPcm16 } from "../sphere/AudioEngine";
 import { errorMessage, toast } from "../store/useToastStore";
 import type { VoiceVerifyResult } from "../types/generated";
 import { Icon } from "./Icon";
+import { QueryErrorBanner } from "./QueryErrorBanner";
 import { Segmented } from "./ui";
 
 const ROLE_OPTIONS = [
@@ -73,8 +74,11 @@ export function VoiceProfilesCard() {
   const sampleRateRef = useRef<number>(16000);
   const timerRef = useRef<number | null>(null);
   const targetRef = useRef<RecordTarget | null>(null);
+  const mountedRef = useRef(true);
+  const recordSessionRef = useRef(0);
 
   const cleanupRecorder = useCallback(() => {
+    recordSessionRef.current += 1;
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
@@ -101,7 +105,13 @@ export function VoiceProfilesCard() {
     setMicLevel(0);
   }, []);
 
-  useEffect(() => cleanupRecorder, [cleanupRecorder]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanupRecorder();
+    };
+  }, [cleanupRecorder]);
 
   const submitRecordedWav = useCallback(
     async (target: RecordTarget, wavBase64: string) => {
@@ -170,6 +180,7 @@ export function VoiceProfilesCard() {
     }
     setTestResult(null);
 
+    const sessionId = ++recordSessionRef.current;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -178,6 +189,10 @@ export function VoiceProfilesCard() {
           autoGainControl: true,
         },
       });
+      if (!mountedRef.current || sessionId !== recordSessionRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -263,6 +278,10 @@ export function VoiceProfilesCard() {
 
   return (
     <div className="stack">
+      <QueryErrorBanner
+        query={profilesQuery}
+        fallback="Impossible de charger les profils vocaux."
+      />
       <div className="card card--flush">
         <div className="setting">
           <div className="setting__text">

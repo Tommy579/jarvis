@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
 
 from ..memory.schema import MemoryDatabase
 from .base import BaseIntegration
+
+_HA_IDENT_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 class HomeAssistantIntegration(BaseIntegration):
@@ -29,7 +32,7 @@ class HomeAssistantIntegration(BaseIntegration):
         self.connected = bool(self.base_url and self.token)
 
     def tools(self) -> list[str]:
-        return ["home_get_states", "home_call_service", "home_announce"]
+        return []
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
@@ -64,6 +67,8 @@ class HomeAssistantIntegration(BaseIntegration):
     async def call_service(self, domain: str, service: str, data: dict[str, Any]) -> dict[str, Any]:
         if not (self.base_url and self.token):
             return {"ok": False, "error": "Home Assistant non configure."}
+        if not _HA_IDENT_RE.match(domain) or not _HA_IDENT_RE.match(service):
+            return {"ok": False, "error": "Nom de domaine ou service Home Assistant invalide."}
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{self.base_url}/api/services/{domain}/{service}",

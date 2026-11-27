@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -14,6 +15,17 @@ from dotenv import set_key
 from jarvis_shared.rest_models import IntegrationInfo
 
 from ..memory.schema import MemoryDatabase
+
+_OAUTH_REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _get_refresh_lock(provider: str) -> asyncio.Lock:
+    lock = _OAUTH_REFRESH_LOCKS.get(provider)
+    if lock is None:
+        lock = asyncio.Lock()
+        _OAUTH_REFRESH_LOCKS[provider] = lock
+    return lock
+
 
 GOOGLE_OAUTH_SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -33,6 +45,7 @@ MICROSOFT_OAUTH_SCOPES = (
     "User.Read",
     "Mail.Read",
     "Mail.ReadWrite",
+    "Mail.Send",
     "Calendars.ReadWrite",
 )
 
@@ -139,43 +152,58 @@ def _persist_refreshed_env(key: str, value: str) -> None:
     if env_path.exists():
         try:
             set_key(str(env_path), key, value)
+            if os.name != "nt":
+                os.chmod(env_path, 0o600)
         except OSError:
             pass
 
 
-async def refresh_oauth_access_token(provider: str) -> str | None:
-    """Rafraichit un jeton OAuth 2.0 expire a l'aide du refresh_token enregistre."""
+_LAST_REFRESHED_TOKENS: dict[str, tuple[str, str]] = {}
+
+
+async def refresh_oauth_access_token(
+    provider: str, *, failed_token: str | None = None
+) -> str | None:
+    """Rafraichit un jeton OAuth 2.0 expire de facon serialisee (evite les courses critiques)."""
     cfg = _OAUTH_REFRESH_CONFIG.get(provider)
     if not cfg:
         return None
     token_url, id_env, secret_env, access_env, refresh_env = cfg
-    client_id = os.environ.get(id_env, "").strip()
-    client_secret = os.environ.get(secret_env, "").strip()
-    refresh_token = os.environ.get(refresh_env, "").strip()
-    if not (client_id and client_secret and refresh_token):
-        return None
+    async with _get_refresh_lock(provider):
+        # Si une autre coroutine vient deja de renouveler exactement ce jeton expire, le reutiliser
+        last_pair = _LAST_REFRESHED_TOKENS.get(provider)
+        if failed_token and last_pair and last_pair[0] == failed_token and last_pair[1]:
+            return last_pair[1]
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            token_url,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-        )
-    if resp.status_code >= 400:
-        return None
-    payload = resp.json()
-    new_access = str(payload.get("access_token", "")).strip()
-    if not new_access:
-        return None
-    _persist_refreshed_env(access_env, new_access)
-    new_refresh = str(payload.get("refresh_token", "")).strip()
-    if new_refresh:
-        _persist_refreshed_env(refresh_env, new_refresh)
-    return new_access
+        client_id = os.environ.get(id_env, "").strip()
+        client_secret = os.environ.get(secret_env, "").strip()
+        refresh_token = os.environ.get(refresh_env, "").strip()
+        if not (client_id and client_secret and refresh_token):
+            return None
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                token_url,
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+        if resp.status_code >= 400:
+            return None
+        payload = resp.json()
+        new_access = str(payload.get("access_token", "")).strip()
+        if not new_access:
+            return None
+        if failed_token:
+            _LAST_REFRESHED_TOKENS[provider] = (failed_token, new_access)
+        _persist_refreshed_env(access_env, new_access)
+        new_refresh = str(payload.get("refresh_token", "")).strip()
+        if new_refresh:
+            _persist_refreshed_env(refresh_env, new_refresh)
+        return new_access
 
 
 class BaseIntegration(ABC):
@@ -238,11 +266,19 @@ class BaseIntegration(ABC):
         """Execute une requete HTTP Bearer avec rafraichissement automatique sur 401."""
         headers = dict(kwargs.pop("headers", None) or {})
         token = getattr(self, "access_token", "") or ""
+        if self.oauth_provider and self.oauth_provider in _OAUTH_REFRESH_CONFIG:
+            access_env = _OAUTH_REFRESH_CONFIG[self.oauth_provider][3]
+            env_tok = os.environ.get(access_env, "").strip()
+            if env_tok and env_tok != token and getattr(self, "_from_env_token", False):
+                token = env_tok
+                self.access_token = env_tok
         headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.request(method, url, headers=headers, **kwargs)
             if resp.status_code == 401 and self.oauth_provider:
-                new_token = await refresh_oauth_access_token(self.oauth_provider)
+                new_token = await refresh_oauth_access_token(
+                    self.oauth_provider, failed_token=token
+                )
                 if new_token:
                     self.access_token = new_token
                     headers["Authorization"] = f"Bearer {new_token}"

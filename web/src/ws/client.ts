@@ -23,6 +23,7 @@ export class JarvisWsClient {
 
   private ws: WebSocket | null = null;
   private queue: ClientWsEvent[] = [];
+  private readonly maxQueueSize = 50;
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closedManually = false;
@@ -54,12 +55,14 @@ export class JarvisWsClient {
     this.ws = socket;
 
     socket.onopen = () => {
+      if (this.ws !== socket) return;
       this.attempt = 0;
       this.onConnectionChange?.(true);
       this.flushQueue();
     };
 
     socket.onmessage = (msg) => {
+      if (this.ws !== socket) return;
       try {
         const parsed = JSON.parse(String(msg.data)) as ServerWsEvent;
         if (parsed.type === "tts.chunk") {
@@ -71,9 +74,14 @@ export class JarvisWsClient {
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (ev: CloseEvent) => {
+      if (this.ws !== socket) return;
       this.ws = null;
       this.onConnectionChange?.(false);
+      if (ev?.code === 4401) {
+        this.closedManually = true;
+        return;
+      }
       if (!this.closedManually) {
         this.scheduleReconnect();
       }
@@ -105,6 +113,9 @@ export class JarvisWsClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(event));
       return true;
+    }
+    if (this.queue.length >= this.maxQueueSize) {
+      this.queue.shift();
     }
     this.queue.push(event);
     return false;

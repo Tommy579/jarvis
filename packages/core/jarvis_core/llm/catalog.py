@@ -228,9 +228,10 @@ class ModelSelectionCatalog:
                 if p.model_id == norm:
                     return p.model_id
 
-        # Sinon choisir le moins cher adapte au role_profile
+        # Sinon choisir le moins cher adapte au role_profile (hors local_fallback sauf demande explicite)
         matching = [p for p in candidates if role_profile in p.best_for]
-        pool = matching or candidates
+        non_local = [p for p in candidates if p.tier != "local_fallback"]
+        pool = matching or non_local or candidates
         cheapest = min(pool, key=lambda p: p.input_cost_per_1m + p.output_cost_per_1m)
         return cheapest.model_id
 
@@ -249,11 +250,14 @@ class ModelSelectionCatalog:
                 candidates = vision_cands
 
         norm = self.normalize_id(current_model)
-        # Trier du moins cher vers le plus capable (escalation en dernier)
+        # Ne jamais retrograder vers un petit modele local lors d'une escalade tant qu'il existe du cloud
+        cloud_candidates = [p for p in candidates if p.tier != "local_fallback"]
+        pool = cloud_candidates or candidates
+        tier_order = {"ultra_cheap": 0, "cheap": 1, "escalation": 2, "local_fallback": 9}
         ordered = sorted(
-            candidates,
+            pool,
             key=lambda p: (
-                1 if p.tier == "escalation" else 0,
+                tier_order.get(p.tier, 1),
                 p.input_cost_per_1m + p.output_cost_per_1m,
             ),
         )

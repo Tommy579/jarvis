@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 from email.message import EmailMessage
 from typing import Any
+from urllib.parse import quote
 
 from ..memory.schema import MemoryDatabase
+from ..security import wrap_untrusted_content
 from .base import GoogleOAuthIntegration
 
 NOISE_SENDERS = ("noreply@", "no-reply@", "newsletter@", "notifications@")
@@ -38,11 +41,12 @@ class GmailIntegration(GoogleOAuthIntegration):
 
     def __init__(self, access_token: str | None = None, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = not bool(access_token)
         self.access_token = access_token or os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "")
         self.connected = bool(self.access_token)
 
     def tools(self) -> list[str]:
-        return ["mail_search", "mail_read", "mail_draft", "mail_send"]
+        return ["mail_search", "mail_draft", "mail_send"]
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:
@@ -50,13 +54,22 @@ class GmailIntegration(GoogleOAuthIntegration):
         if not self.access_token:
             return {"ok": False, "error": "Jeton OAuth Gmail manquant."}
         raw = await self.list_messages(query="is:unread", max_results=20)
-        filtered = filter_important_messages(raw)
+        sem = asyncio.Semaphore(5)
+
+        async def _hydrate(item: dict[str, Any]) -> dict[str, Any]:
+            if item.get("from") or item.get("subject") or not item.get("id"):
+                return item
+            async with sem:
+                return await self.get_message(str(item["id"]))
+
+        hydrated = list(await asyncio.gather(*(_hydrate(m) for m in raw))) if raw else []
+        filtered = filter_important_messages(hydrated)
         for msg in filtered:
             payload = {
                 "id": msg.get("id"),
                 "from": msg.get("from", ""),
                 "subject": msg.get("subject", ""),
-                "snippet": f'<untrusted source="gmail">{msg.get("snippet", "")}</untrusted>',
+                "snippet": wrap_untrusted_content("gmail", str(msg.get("snippet", ""))),
             }
             self._pending_events.append(
                 {"source": self.id, "type": "gmail.message", "payload": payload}
@@ -88,9 +101,10 @@ class GmailIntegration(GoogleOAuthIntegration):
     async def get_message(self, message_id: str) -> dict[str, Any]:
         if not self.access_token:
             return {}
+        safe_id = quote(str(message_id).strip(), safe="")
         resp = await self._oauth_request(
             "GET",
-            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{safe_id}",
             params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]},
         )
         data = resp.json()
@@ -101,6 +115,7 @@ class GmailIntegration(GoogleOAuthIntegration):
         }
         return {
             "id": data.get("id", message_id),
+            "labelIds": data.get("labelIds", []),
             "from": headers.get("from", ""),
             "subject": headers.get("subject", ""),
             "date": headers.get("date", ""),

@@ -36,8 +36,12 @@ DEFAULT_PERSONA_PROMPT = (
     "Tu es Jarvis, l'assistant personnel d'JARVIS 2.0. "
     "Le modèle actif est le moteur principal choisi par l'utilisateur.\n\n"
     "RÈGLES IMPÉRATIVES DE COMMUNICATION (À APPLIQUER STRICTEMENT PAR TOUS LES MODÈLES) :\n"
-    "1. Concision maximale : Sois direct, percutant et très concis (1 à 3 phrases courtes au maximum). "
-    "Évite tout bavardage, formule de politesse répétitive ou énumération superflue.\n"
+    "1. Concision maximale : Réponds en 1 ou 2 phrases courtes mais grammaticalement complètes "
+    "(sujet, verbe, complément, ton naturel ; jamais de mots-clés isolés ni de style télégraphique). "
+    "Supprime tout préambule (« Bonjour Tom », « Voici le bilan », « Diagnostic terminé »), "
+    "toute formule de politesse ou de remplissage, toute parenthèse explicative et toute liste à puces non sollicitée. "
+    "Pendant les appels d'outils, annonce chaque étape intermédiaire en 1 seule phrase courte (10 à 15 mots max) "
+    "décrivant uniquement l'action immédiate, sans résumer les étapes précédentes ni détailler les sorties techniques.\n"
     "2. Réponses longues ou denses : Si la réponse complète nécessite un développement important ou "
     "dépasse ce format concis, délivre le cœur essentiel de l'information et termine impérativement par '... [suite]' "
     "pour indiquer clairement à l'utilisateur qu'une suite détaillée est disponible sur demande.\n"
@@ -51,6 +55,8 @@ DEFAULT_PERSONA_PROMPT = (
     "passent obligatoirement par les outils notify_me et set_notification_policy ; ne promets jamais une notification sans avoir appelé ces outils.\n"
     "5. Autonomie navigateur & PC sans screenshots : Utilise browser_list_tabs, browser_snapshot, browser_click, browser_fill, browser_select "
     "(ou desktop_list_windows / desktop_snapshot / desktop_action sur Linux) pour piloter les pages et applis par arbre d'accessibilité. "
+    "Pour une application web installée sur le PC (raccourci .desktop comme Apple Music, Marges ou Gemini), utilise `browser_launch` avec `app=\"Apple Music\"` "
+    "(ou l'URL de l'application) afin d'ouvrir ou réutiliser directement sa fenêtre dédiée (`--app`) plutôt qu'un onglet navigateur classique. "
     "Pour les tâches longues multi-étapes ou objectifs autonomes devant tourner jusqu'à vérification complète (code, recherche + synthèse, "
     "automatisation web multi-onglets, etc.), lance un objectif supervisé via start_goal plutôt que de t'arrêter à mi-chemin "
     "(ou run_autonomous_task pour une routine simple) et formule ta courte confirmation dans la MÊME réponse que l'appel d'outil "
@@ -268,8 +274,11 @@ class MemoryEngine:
             summary or "",
             flags=re.DOTALL | re.IGNORECASE,
         )
-        clean_summary = clean_summary.replace("<untrusted", "[untrusted").replace(
-            "</untrusted>", "[/untrusted]"
+        clean_summary = re.sub(
+            r"</?\s*untrusted\b[^>]*>",
+            "[untrusted]",
+            clean_summary,
+            flags=re.IGNORECASE,
         )
         ep = Episode(kind=kind, channel=channel, summary=clean_summary, raw_ref=raw_ref)
         emb = self.embedder.embed(clean_summary)
@@ -318,6 +327,8 @@ class MemoryEngine:
                 )
 
         for ep, emb in self.storage.list_episodes(limit=100):
+            if not allow_highly_private and self.query_touches_highly_private_topic(ep.summary):
+                continue
             vec_score = self.embedder.cosine_similarity(q_vec, emb)
             bm25_score = self._bm25_overlap_score(q_tokens, ep.summary)
             hybrid_score = 0.55 * bm25_score + 0.45 * max(0.0, vec_score)
@@ -453,24 +464,25 @@ class MemoryEngine:
         ref_now = now or datetime.now(timezone.utc)
         active = self.storage.list_active_facts()
 
-        # 1. Fusion des quasi-doublons (similarite cosinus > 0.96 dans la meme categorie)
+        # 1. Fusion des quasi-doublons (partitionne par categorie + sujet pour eviter le O(n^2) global)
         merged_count = 0
         seen: list[tuple[Fact, list[float]]] = []
+        seen_by_bucket: dict[tuple[str, str], list[tuple[Fact, list[float]]]] = {}
         for fact, emb, _ in active:
+            bucket_key = (fact.category, fact.subject.lower())
+            bucket = seen_by_bucket.setdefault(bucket_key, [])
             duplicate_of: Fact | None = None
-            for prev_fact, prev_emb in seen:
-                if (
-                    prev_fact.category == fact.category
-                    and prev_fact.subject.lower() == fact.subject.lower()
-                    and self.embedder.cosine_similarity(emb, prev_emb) > 0.96
-                ):
+            for prev_fact, prev_emb in bucket:
+                if self.embedder.cosine_similarity(emb, prev_emb) > 0.96:
                     duplicate_of = prev_fact
                     break
             if duplicate_of is not None:
                 self.storage.mark_fact_superseded(fact.id, duplicate_of.id)
                 merged_count += 1
             else:
-                seen.append((fact, emb))
+                entry = (fact, emb)
+                bucket.append(entry)
+                seen.append(entry)
 
         # 2. Regeneration de moi.md a partir des faits actifs non tres prives
         by_category: dict[str, list[str]] = {}

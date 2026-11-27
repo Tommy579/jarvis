@@ -4,7 +4,6 @@ import type {
   AlertRecord,
   ApprovalItem,
   AttentionRules,
-  AutonomousTaskCreate,
   AutonomousTaskRecord,
   AutonomyPolicyConfig,
   AutonomyPolicyUpdate,
@@ -103,16 +102,34 @@ export const apiClient = {
         ...(wake_threshold !== undefined ? { wake_threshold } : {}),
       }),
     }),
-  speakVoice: (text: string) =>
+  speakVoice: (text: string, signal?: AbortSignal) =>
     requestJson<{ audio_base64: string; sample_rate: number }>("/api/voice/speak", {
       method: "POST",
       body: JSON.stringify({ text }),
+      ...(signal ? { signal } : {}),
     }),
-  setAudioDucking: (active: boolean, ratio = 0.22) =>
+  setAudioDucking: (active: boolean, ratio = 0.22, opts?: { keepalive?: boolean }) =>
     requestJson<{ active: boolean }>("/api/voice/ducking", {
       method: "POST",
       body: JSON.stringify({ active, ratio }),
+      ...(opts?.keepalive ? { keepalive: true } : {}),
     }),
+  fetchCameraFrameBlob: async (signal?: AbortSignal): Promise<Blob> => {
+    const token = getAuthToken();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const resp = await fetch(`${API_BASE}/api/sensors/camera/frame?t=${Date.now()}`, {
+      headers,
+      cache: "no-store",
+      ...(signal ? { signal } : {}),
+    });
+    if (!resp.ok) {
+      throw new HttpError(`Erreur camera HTTP ${resp.status}`, resp.status);
+    }
+    return await resp.blob();
+  },
   getVoiceProfiles: () => requestJson<VoiceProfilesConfig>("/api/voice/profiles"),
   updateVoiceProfileSettings: (payload: { enabled?: boolean; threshold?: number }) =>
     requestJson<VoiceProfilesConfig>("/api/voice/profiles/settings", {
@@ -159,7 +176,6 @@ export const apiClient = {
   deleteFact: (id: string) =>
     requestJson<{ deleted: boolean }>(`/api/facts/${id}`, { method: "DELETE" }),
   listWiki: () => requestJson<WikiPage[]>("/api/wiki"),
-  getWiki: (slug: string) => requestJson<WikiPage>(`/api/wiki/${slug}`),
   putWiki: (slug: string, content: string) =>
     requestJson<WikiPage>(`/api/wiki/${slug}`, { method: "PUT", body: JSON.stringify({ content }) }),
   getPeople: () => requestJson<PersonRecord[]>("/api/people"),
@@ -184,7 +200,6 @@ export const apiClient = {
       body: JSON.stringify({ answers }),
     }),
   getModels: () => requestJson<RoleModelConfig[]>("/api/models"),
-  getThinkingMode: () => requestJson<{ mode: string }>("/api/models/thinking"),
   updateThinkingMode: (mode: string) =>
     requestJson<{ mode: string }>("/api/models/thinking", {
       method: "PUT",
@@ -294,29 +309,10 @@ export const apiClient = {
         note: string;
       }>
     >(`/api/notifications/orders?active_only=${activeOnly}`),
-  createNotificationOrder: (order: Record<string, unknown>) =>
-    requestJson<Record<string, unknown>>("/api/notifications/orders", {
-      method: "POST",
-      body: JSON.stringify(order),
-    }),
   deleteNotificationOrder: (orderId: string) =>
     requestJson<{ ok: boolean; revoked: string }>(`/api/notifications/orders/${orderId}`, {
       method: "DELETE",
     }),
-  getNotificationAttempts: (limit = 50) =>
-    requestJson<
-      Array<{
-        id: string;
-        notification_id: string;
-        approval_id: string | null;
-        channel: string;
-        target: string;
-        ts: string;
-        status: string;
-        error: string | null;
-        external_id: string | null;
-      }>
-    >(`/api/notifications/attempts?limit=${limit}`),
   getAutostart: () => requestJson<SystemAutostartConfig>("/api/system/autostart"),
   updateAutostart: (enabled: boolean) =>
     requestJson<SystemAutostartConfig>("/api/system/autostart", {
@@ -329,18 +325,8 @@ export const apiClient = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
-  emergencyStop: () =>
-    requestJson<{ ok: boolean; emergency_stop: boolean; cancelled_tasks: string[] }>(
-      "/api/autonomy/emergency-stop",
-      { method: "POST" }
-    ),
   getAutonomousTasks: (limit = 20) =>
     requestJson<AutonomousTaskRecord[]>(`/api/autonomy/tasks?limit=${limit}`),
-  createAutonomousTask: (payload: AutonomousTaskCreate) =>
-    requestJson<AutonomousTaskRecord>("/api/autonomy/tasks", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
   cancelAutonomousTask: (taskId: string) =>
     requestJson<AutonomousTaskRecord>(`/api/autonomy/tasks/${taskId}/cancel`, {
       method: "POST",

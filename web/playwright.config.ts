@@ -9,7 +9,7 @@ export default defineConfig({
   projects: [
     {
       name: "mock",
-      testMatch: /app\.spec\.ts/,
+      testMatch: /(app|section-errors)\.spec\.ts/,
       use: { baseURL: "http://127.0.0.1:4173" },
     },
     {

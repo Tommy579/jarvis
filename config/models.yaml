@@ -1,6 +1,6 @@
 defaults:
   provider: openrouter
-  daily_budget_usd: 5.0
+  daily_budget_usd: 10.0
 
 autonomous_pool:
   - gemini-4-carbon
@@ -60,23 +60,3 @@ roles:
     model: gemini-live
     provider: gemini
     thinking_mode: auto
-
-providers:
-  openrouter:
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    app_name: JARVIS
-    data_collection: deny
-    trusted_for_highly_private: false
-  gemini:
-    api_key_env: GEMINI_API_KEY
-    trusted_for_highly_private: true
-  ollama:
-    base_url: http://127.0.0.1:11434/v1
-    trusted_for_highly_private: true
-    models:
-      - qwen3.5:2b
-      - qwen3.5:0.8b
-      - gemma4:31b-cloud
-      - nemotron-3-ultra:cloud
-      - minimax-m3:cloud

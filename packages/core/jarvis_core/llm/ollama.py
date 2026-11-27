@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from jarvis_shared.models import Message, ModelCapabilities, StreamDelta
@@ -75,16 +76,28 @@ class OllamaProvider(OpenRouterProvider):
         raw_base = (
             base_url or os.environ.get("OLLAMA_BASE_URL", "").strip() or "http://127.0.0.1:11434/v1"
         ).rstrip("/")
+        parsed_base = urlparse(raw_base)
+        if parsed_base.scheme.lower() not in {"http", "https"} or not parsed_base.hostname:
+            raw_base = "http://127.0.0.1:11434/v1"
+            parsed_base = urlparse(raw_base)
+        is_loopback = parsed_base.hostname.lower() in {"127.0.0.1", "localhost", "::1"}
         if not raw_base.endswith("/v1"):
             raw_base = f"{raw_base}/v1"
         super().__init__(
             api_key="ollama",
             base_url=raw_base,
             app_name="JARVIS",
-            trusted_for_highly_private=trusted_for_highly_private,
+            trusted_for_highly_private=(trusted_for_highly_private and is_loopback),
             timeout=timeout,
         )
         self.root_url = raw_base[:-3]
+
+    def is_model_trusted(self, model: str) -> bool:
+        """Un modele :cloud ou un serveur Ollama distant n'est pas local de confiance."""
+        if not self.trusted_for_highly_private:
+            return False
+        low = self.clean_model_id(model).lower()
+        return not (low.endswith(":cloud") or "-cloud" in low)
 
     def _headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json"}

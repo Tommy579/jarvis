@@ -36,17 +36,22 @@ export function getAuthToken(): string {
   return readSession() || readLocal();
 }
 
-export function setAuthToken(token: string): void {
+export function setAuthToken(token: string, persist = false): void {
   if (!hasWindow()) return;
   const clean = token.trim();
   if (!clean) return;
   try {
     window.sessionStorage.setItem(STORAGE_KEY, clean);
   } catch {
-    // sessionStorage indisponible (mode prive strict) : on garde localStorage.
+    // sessionStorage indisponible (mode prive strict) : repli localStorage ci-dessous.
+    persist = true;
   }
   try {
-    window.localStorage.setItem(STORAGE_KEY, clean);
+    if (persist) {
+      window.localStorage.setItem(STORAGE_KEY, clean);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
   } catch {
     // ignore
   }

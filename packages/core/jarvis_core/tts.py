@@ -88,7 +88,8 @@ def synthesize_gemini_tts_wav(
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
                     "speechConfig": {
-                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": tts_voice}}
+                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": tts_voice}},
+                        "speakingRate": 1.5,
                     },
                 },
             },
@@ -110,7 +111,7 @@ def synthesize_gemini_tts_wav(
 
 
 def wav_to_pcm16_16khz(wav_bytes: bytes) -> bytes | None:
-    """Convertit un WAV en PCM16 mono 16 kHz brut (s16le)."""
+    """Convertit un WAV en PCM16 mono 16 kHz brut (s16le)"""
     return _transcode_audio(
         wav_bytes,
         ["-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000"],
@@ -118,7 +119,7 @@ def wav_to_pcm16_16khz(wav_bytes: bytes) -> bytes | None:
 
 
 def wav_to_mp3(wav_bytes: bytes) -> bytes | None:
-    """Convertit un WAV en MP3 pour les messages vocaux Telegram."""
+    """Convertit un WAV en MP3 pour les messages vocaux Telegram"""
     return _transcode_audio(
         wav_bytes,
         ["-f", "mp3", "-acodec", "libmp3lame", "-b:a", "96k"],

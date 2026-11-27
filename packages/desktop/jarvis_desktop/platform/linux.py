@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -21,7 +22,7 @@ def search_files_linux(
     if shutil.which("fd"):
         try:
             proc = subprocess.run(
-                ["fd", "--max-results", str(limit), cleaned, base],
+                ["fd", "--max-results", str(limit), "--", cleaned, base],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -36,7 +37,7 @@ def search_files_linux(
     if shutil.which("plocate") and root_dir is None:
         try:
             proc = subprocess.run(
-                ["plocate", "-l", str(limit), "-i", cleaned],
+                ["plocate", "-l", str(limit), "-i", "--", cleaned],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -50,8 +51,15 @@ def search_files_linux(
 
     matches: list[str] = []
     q_lower = cleaned.lower()
+    deadline = time.monotonic() + max(timeout, 0.5)
     for root, dirs, files in os.walk(base):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {"node_modules", ".venv"}]
+        if time.monotonic() > deadline:
+            return {"matches": matches, "method": "walk", "truncated": True}
+        dirs[:] = [
+            d
+            for d in dirs
+            if not d.startswith(".") and d not in {"node_modules", ".venv", "proc", "sys", "dev"}
+        ]
         for fname in files:
             if q_lower in fname.lower():
                 matches.append(os.path.join(root, fname))
@@ -65,7 +73,7 @@ def send_notification_linux(title: str, message: str, timeout: float = 3.0) -> d
     if shutil.which("notify-send"):
         try:
             subprocess.run(
-                ["notify-send", "-a", "JARVIS", title, message],
+                ["notify-send", "-a", "JARVIS", "--", title, message],
                 capture_output=True,
                 text=True,
                 timeout=timeout,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 
 from jarvis_shared.notifications import NotificationPolicy
@@ -11,6 +13,7 @@ from pydantic import ValidationError
 from ..memory.schema import MemoryDatabase
 
 logger = logging.getLogger(__name__)
+_HHMM_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 class PolicyStore:
@@ -36,9 +39,31 @@ class PolicyStore:
 
     def update(self, **changes: object) -> NotificationPolicy:
         current = self.get()
-        # Filtre les valeurs None pour ne pas écraser les paramètres non mentionnés
-        filtered = {k: v for k, v in changes.items() if v is not None}
-        updated = current.model_copy(update=filtered)
+        # Filtre les valeurs None sauf snooze_until qui peut etre explicitement reinitialise
+        filtered = {k: v for k, v in changes.items() if v is not None or k == "snooze_until"}
+        for key in ("quiet_start", "quiet_end"):
+            if key in filtered and not _HHMM_RE.match(str(filtered[key]).strip()):
+                raise ValueError(f"Format {key} invalide : attendu HH:MM.")
+        if "snooze_until" in filtered and filtered["snooze_until"] is not None:
+            raw_snooze = str(filtered["snooze_until"]).strip()
+            if raw_snooze:
+                datetime.fromisoformat(raw_snooze.replace("Z", "+00:00"))
+            else:
+                filtered["snooze_until"] = None
+        if "approval_ttl_seconds" in filtered:
+            ttl = int(filtered["approval_ttl_seconds"])  # type: ignore[arg-type]
+            if ttl < 30 or ttl > 86400:
+                raise ValueError("approval_ttl_seconds doit etre compris entre 30 et 86400.")
+        if "max_calls_per_day" in filtered:
+            cap = int(filtered["max_calls_per_day"])  # type: ignore[arg-type]
+            if cap < 0 or cap > 100:
+                raise ValueError("max_calls_per_day doit etre compris entre 0 et 100.")
+        if "min_seconds_between_calls" in filtered:
+            gap = int(filtered["min_seconds_between_calls"])  # type: ignore[arg-type]
+            if gap < 0 or gap > 86400:
+                raise ValueError("min_seconds_between_calls doit etre compris entre 0 et 86400.")
+        merged = {**current.model_dump(), **filtered}
+        updated = NotificationPolicy.model_validate(merged)
         self.db.set_policy_json(updated.model_dump_json())
         self._cache = updated
         self._mirror_to_wiki(updated)

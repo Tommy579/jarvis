@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from ..memory.schema import MemoryDatabase
+from ..security import wrap_untrusted_content
 from .base import MicrosoftOAuthIntegration
 from .gmail import filter_important_messages
 
@@ -18,11 +20,12 @@ class OutlookMailIntegration(MicrosoftOAuthIntegration):
 
     def __init__(self, access_token: str | None = None, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = not bool(access_token)
         self.access_token = access_token or os.environ.get("MICROSOFT_OAUTH_ACCESS_TOKEN", "")
         self.connected = bool(self.access_token)
 
     def tools(self) -> list[str]:
-        return ["outlook_mail_search", "outlook_mail_draft", "outlook_mail_send"]
+        return ["mail_search", "mail_draft", "mail_send"]
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:
@@ -45,7 +48,7 @@ class OutlookMailIntegration(MicrosoftOAuthIntegration):
                 "id": msg.get("id"),
                 "from": msg.get("from", ""),
                 "subject": msg.get("subject", ""),
-                "snippet": f'<untrusted source="outlook">{msg.get("snippet", "")}</untrusted>',
+                "snippet": wrap_untrusted_content("outlook", str(msg.get("snippet", ""))),
             }
             self._pending_events.append(
                 {"source": self.id, "type": "outlook.message", "payload": payload}
@@ -54,17 +57,28 @@ class OutlookMailIntegration(MicrosoftOAuthIntegration):
         self.mark_synced()
         return {"ok": True, "fetched": len(raw), "kept": len(filtered)}
 
-    async def list_messages(self, max_results: int = 10) -> list[dict[str, Any]]:
+    async def list_messages(
+        self, max_results: int = 10, query: str | None = None
+    ) -> list[dict[str, Any]]:
         if not self.access_token:
             return []
+        cleaned_query = (query or "").strip()
+        params: dict[str, Any] = {
+            "$top": max_results,
+            "$select": "id,subject,from,bodyPreview,receivedDateTime",
+        }
+        headers: dict[str, str] = {}
+        if cleaned_query and cleaned_query.lower() != "is:unread":
+            escaped = cleaned_query.replace('"', '\\"')
+            params["$search"] = f'"{escaped}"'
+            headers["ConsistencyLevel"] = "eventual"
+        else:
+            params["$filter"] = "isRead eq false"
         resp = await self._oauth_request(
             "GET",
             "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-            params={
-                "$top": max_results,
-                "$filter": "isRead eq false",
-                "$select": "id,subject,from,bodyPreview,receivedDateTime",
-            },
+            params=params,
+            headers=headers or None,
         )
         return resp.json().get("value", [])
 
@@ -107,11 +121,12 @@ class OutlookCalendarIntegration(MicrosoftOAuthIntegration):
 
     def __init__(self, access_token: str | None = None, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = not bool(access_token)
         self.access_token = access_token or os.environ.get("MICROSOFT_OAUTH_ACCESS_TOKEN", "")
         self.connected = bool(self.access_token)
 
     def tools(self) -> list[str]:
-        return ["outlook_calendar_list_events", "outlook_calendar_create_event"]
+        return ["calendar_list_events", "calendar_create_event"]
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:
@@ -139,11 +154,13 @@ class OutlookCalendarIntegration(MicrosoftOAuthIntegration):
     async def list_upcoming_events(self, max_results: int = 10) -> list[dict[str, Any]]:
         if not self.access_token:
             return []
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         resp = await self._oauth_request(
             "GET",
             "https://graph.microsoft.com/v1.0/me/events",
             params={
                 "$top": max_results,
+                "$filter": f"start/dateTime ge '{now_iso}'",
                 "$orderby": "start/dateTime asc",
                 "$select": "id,subject,start,end",
             },

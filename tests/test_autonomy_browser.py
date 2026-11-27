@@ -529,7 +529,7 @@ def _make_fake_cdp(ax_nodes: list[dict], state: dict | None = None):
                 import base64
 
                 fake_png = base64.b64encode(b"fake_png_bytes").decode("ascii")
-                return {"result": {"data": fake_png}}
+                return {"data": fake_png}
             return {}
 
     return _FakeCDP
@@ -1044,3 +1044,139 @@ def test_desktop_a11y_blacklist_and_autonomy_rest_endpoints(monkeypatch: pytest.
 
         audit_resp = client.get("/api/autonomy/audit")
         assert audit_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_webapp_shortcut_discovery_and_reuse(tmp_path: Path):
+    apps_dir = tmp_path / "applications"
+    apps_dir.mkdir()
+    desktop_file = apps_dir / "chrome-music.apple.com__fr_home-Default.desktop"
+    desktop_file.write_text(
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Type=Application\n"
+        "Name=Apple Music\n"
+        "Exec=/usr/bin/chromium --remote-debugging-port=9222 --profile-directory=Default "
+        "--ignore-profile-directory-if-not-exists --app=https://music.apple.com/fr/home\n"
+        "StartupWMClass=chrome-music.apple.com__fr_home-Default\n",
+        encoding="utf-8",
+    )
+    (apps_dir / "jarvis.desktop").write_text(
+        "[Desktop Entry]\nName=JARVIS\nExec=/usr/bin/chromium --app=http://localhost:8765\n",
+        encoding="utf-8",
+    )
+
+    toolkit = BrowserToolkit(cdp_url="http://127.0.0.1:9222", apps_dir=apps_dir)
+    by_app = toolkit._find_webapp_shortcut(app="Apple Music")
+    assert by_app is not None
+    assert by_app.name == "Apple Music"
+    assert by_app.domain == "music.apple.com"
+    assert by_app.app_url == "https://music.apple.com/fr/home"
+
+    by_url = toolkit._find_webapp_shortcut(url="https://music.apple.com/fr/library/playlists")
+    assert by_url is not None
+    assert by_url.desktop_id == "chrome-music.apple.com__fr_home-Default.desktop"
+    assert toolkit._find_webapp_shortcut(url="http://localhost:8765") is None
+
+    # Si l'appli web est deja ouverte dans CDP, browser_open_tab et browser_launch
+    # activent cette fenetre au lieu d'appeler PUT /json/new.
+    fake_tabs = [
+        {
+            "id": "tab-am",
+            "type": "page",
+            "title": "Apple Music",
+            "url": "https://music.apple.com/fr/home",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/tab-am",
+        }
+    ]
+    activated: list[str] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url: str):
+            activated.append(url)
+            return type("Resp", (), {"status_code": 200})()
+
+        async def put(self, url: str):
+            raise AssertionError(f"Ne doit pas ouvrir un nouvel onglet ({url})")
+
+    from jarvis_core.tools.browser import BrowserLaunchArgs, BrowserOpenTabArgs
+
+    with (
+        patch.object(toolkit, "_fetch_tabs", AsyncMock(return_value=fake_tabs)),
+        patch("jarvis_core.tools.browser.httpx.AsyncClient", _FakeAsyncClient),
+    ):
+        res_tab = await toolkit.browser_open_tab(
+            BrowserOpenTabArgs(url="https://music.apple.com/fr/home")
+        )
+        assert res_tab["ok"] is True
+        assert res_tab["already_open"] is True
+        assert res_tab["tab_id"] == "tab-am"
+        assert res_tab["web_app"] == "Apple Music"
+
+        res_launch = await toolkit.browser_launch(BrowserLaunchArgs(app="Apple Music"))
+        assert res_launch["ok"] is True
+        assert res_launch["already_open"] is True
+        assert res_launch["tab_id"] == "tab-am"
+        assert len(activated) == 2
+
+
+@pytest.mark.asyncio
+async def test_webapp_shortcut_launches_in_app_mode_when_not_open(tmp_path: Path):
+    apps_dir = tmp_path / "applications"
+    apps_dir.mkdir()
+    desktop_file = apps_dir / "chrome-music.apple.com__fr_home-Default.desktop"
+    desktop_file.write_text(
+        "[Desktop Entry]\n"
+        "Name=Apple Music\n"
+        "Exec=/usr/bin/chromium --profile-directory=Default --app=https://music.apple.com/fr/home\n"
+        "StartupWMClass=chrome-music.apple.com__fr_home-Default\n",
+        encoding="utf-8",
+    )
+
+    toolkit = BrowserToolkit(cdp_url="http://127.0.0.1:9222", apps_dir=apps_dir)
+    launched_cmds: list[list[str]] = []
+
+    def _fake_popen(cmd, **kwargs):
+        launched_cmds.append(list(cmd))
+        return type("Proc", (), {"poll": lambda self: None})()
+
+    fetch_mock = AsyncMock(
+        side_effect=[
+            RuntimeError("no cdp yet"),
+            [
+                {
+                    "id": "tab-am-new",
+                    "type": "page",
+                    "title": "Apple Music",
+                    "url": "https://music.apple.com/fr/home",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/tab-am-new",
+                }
+            ],
+        ]
+    )
+
+    from jarvis_core.tools.browser import BrowserLaunchArgs
+
+    with (
+        patch.object(toolkit, "_fetch_tabs", fetch_mock),
+        patch.object(toolkit, "_wait_tab_stable", AsyncMock(return_value=True)),
+        patch("jarvis_core.tools.browser.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        res = await toolkit.browser_launch(BrowserLaunchArgs(app="Apple Music"))
+
+    assert res["ok"] is True
+    assert res["launched"] is True
+    assert res["web_app"] == "Apple Music"
+    assert res["tab_id"] == "tab-am-new"
+    assert len(launched_cmds) == 1
+    assert "--app=https://music.apple.com/fr/home" in launched_cmds[0]
+    assert "--remote-debugging-port=9222" in launched_cmds[0]

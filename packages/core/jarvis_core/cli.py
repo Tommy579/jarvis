@@ -11,7 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
-load_dotenv(ROOT_DIR / ".env", override=False)
+if not os.environ.get("PYTEST_CURRENT_TEST"):
+    load_dotenv(ROOT_DIR / ".env", override=False)
 for p in (
     ROOT_DIR,
     ROOT_DIR / "packages" / "shared",

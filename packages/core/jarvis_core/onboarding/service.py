@@ -148,6 +148,7 @@ class OnboardingService:
                 continue
             field_key = str(q["field_key"])
             self.db.save_onboarding_answer(module_id, str(q["id"]), field_key, val)
+            sensitivity = str(q.get("sensitivity", "normal"))
             self.db.create_fact(
                 FactCreate(
                     subject="Tom",
@@ -157,10 +158,15 @@ class OnboardingService:
                     category=str(q.get("category", module_id)),
                     confidence=0.98,
                     source="onboarding",
-                    sensitivity=q.get("sensitivity", "normal"),
+                    sensitivity=sensitivity,  # type: ignore[arg-type]
                 )
             )
-            if self.wiki_dir:
+            # Ne jamais copier les donnees tres privees (sante, finances) dans le wiki en clair
+            if (
+                self.wiki_dir
+                and sensitivity not in {"très privé", "tres_prive"}
+                and module_id not in {"sante", "finances"}
+            ):
                 self._append_to_wiki(module_id, str(target["title"]), field_key, val)
 
         return self.get_status()
@@ -173,7 +179,7 @@ class OnboardingService:
             "identite": "moi",
             "entourage": "famille",
             "travail_etudes": "projets",
-            "regles_jarvis": "regles",
+            "regles_jarvis": "rules",
             "gouts": "preferences",
         }
         slug = slug_map.get(module_id, module_id)

@@ -207,10 +207,10 @@ export class AudioEngine {
   private vadFlush: ((minSpeechMs: number) => void) | null = null;
   private activeSources: Set<AudioBufferSourceNode> = new Set();
   private nextStartTime = 0;
-  private synthSpeaking = false;
-  private speechPhase = 0;
+  private micSessionId = 0;
   private speakAbort: AbortController | null = null;
   private speechRecognizer: any = null;
+  private speechRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private smoothed: AudioMetrics = { amplitude: 0, low: 0, mid: 0, high: 0 };
   /** Niveau RMS du dernier fragment TTS joue : sert de reference pour le seuil de barge-in. */
   private playbackLevel = 0;
@@ -355,7 +355,10 @@ export class AudioEngine {
 
   speakText(
     text: string,
-    fetchTts?: (text: string) => Promise<{ audio_base64: string; sample_rate?: number }>
+    fetchTts?: (
+      text: string,
+      signal?: AbortSignal
+    ) => Promise<{ audio_base64: string; sample_rate?: number }>
   ): void {
     const cleaned = text
       .replace(/<untrusted[^>]*>[\s\S]*?<\/untrusted>/g, "")
@@ -371,7 +374,9 @@ export class AudioEngine {
 
     const controller = new AbortController();
     this.speakAbort = controller;
-    fetchTts(cleaned)
+    const req =
+      fetchTts.length >= 2 ? fetchTts(cleaned, controller.signal) : fetchTts(cleaned);
+    req
       .then((res) => {
         if (controller.signal.aborted) return;
         if (res?.audio_base64) {
@@ -386,16 +391,24 @@ export class AudioEngine {
       return false;
     }
     this.stopMicrophone();
+    const sessionId = ++this.micSessionId;
     const ctx = this.ensureContext();
     if (!ctx || !this.analyser) return false;
     try {
-      this.micStream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
         },
       });
+      if (sessionId !== this.micSessionId || this.ctx !== ctx) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+        return false;
+      }
+      this.micStream = stream;
       this.micSource = ctx.createMediaStreamSource(this.micStream);
       this.micSource.connect(this.analyser);
 
@@ -405,11 +418,14 @@ export class AudioEngine {
         if (SpeechRecognition) {
           try {
             let currentUtteranceStartIndex = 0;
+            let recognitionFatalError = false;
+            let consecutiveErrors = 0;
             const rec = new SpeechRecognition();
             rec.continuous = true;
             rec.interimResults = true;
             rec.lang = "fr-FR";
             rec.onresult = (ev: any) => {
+              consecutiveErrors = 0;
               let full = "";
               let isFinal = false;
               for (let i = currentUtteranceStartIndex; i < ev.results.length; i += 1) {
@@ -448,16 +464,39 @@ export class AudioEngine {
                 callbacks?.onLiveTranscript?.(trimmed, isFinal);
               }
             };
-            rec.onerror = () => undefined;
+            rec.onerror = (ev: any) => {
+              const code = String(ev?.error ?? "");
+              if (
+                code === "not-allowed" ||
+                code === "service-not-allowed" ||
+                code === "audio-capture"
+              ) {
+                recognitionFatalError = true;
+              } else if (code && code !== "no-speech" && code !== "aborted") {
+                consecutiveErrors += 1;
+              }
+            };
             rec.onend = () => {
               currentUtteranceStartIndex = 0;
-              if (this.micStream && this.speechRecognizer === rec) {
-                try {
-                  rec.start();
-                } catch {
-                  // ignore
-                }
+              if (
+                recognitionFatalError ||
+                consecutiveErrors >= 5 ||
+                !this.micStream ||
+                this.speechRecognizer !== rec
+              ) {
+                return;
               }
+              const delayMs = consecutiveErrors > 0 ? Math.min(4000, 300 * consecutiveErrors) : 150;
+              if (this.speechRestartTimer) clearTimeout(this.speechRestartTimer);
+              this.speechRestartTimer = setTimeout(() => {
+                if (this.micStream && this.speechRecognizer === rec && !recognitionFatalError) {
+                  try {
+                    rec.start();
+                  } catch {
+                    // ignore
+                  }
+                }
+              }, delayMs);
             };
             rec.start();
             this.speechRecognizer = rec;
@@ -622,11 +661,17 @@ export class AudioEngine {
   }
 
   stopMicrophone(): void {
+    this.micSessionId += 1;
+    if (this.speechRestartTimer) {
+      clearTimeout(this.speechRestartTimer);
+      this.speechRestartTimer = null;
+    }
     if (this.speechRecognizer) {
       const rec = this.speechRecognizer;
       this.speechRecognizer = null;
       try {
         rec.onend = null;
+        rec.onerror = null;
         rec.stop();
       } catch {
         // ignore
@@ -656,8 +701,20 @@ export class AudioEngine {
     }
   }
 
+  dispose(): void {
+    this.stopMicrophone();
+    this.stopPlayback();
+    if (this.ctx) {
+      const ctx = this.ctx;
+      this.ctx = null;
+      this.analyser = null;
+      this.bins = null;
+      void ctx.close().catch(() => undefined);
+    }
+  }
+
   isPlaying(): boolean {
-    return this.activeSources.size > 0 || this.synthSpeaking;
+    return this.activeSources.size > 0;
   }
 
   stopPlayback(): void {
@@ -665,7 +722,6 @@ export class AudioEngine {
       this.speakAbort.abort();
       this.speakAbort = null;
     }
-    this.synthSpeaking = false;
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
         window.speechSynthesis.cancel();
@@ -695,16 +751,6 @@ export class AudioEngine {
     if (this.analyser && this.bins) {
       this.analyser.getByteFrequencyData(this.bins);
       raw = computeFrequencyBands(this.bins);
-    }
-    if (this.synthSpeaking && raw.amplitude < 0.05) {
-      this.speechPhase += dtMs * 0.012;
-      const pulse = 0.28 + 0.18 * Math.abs(Math.sin(this.speechPhase));
-      raw = {
-        amplitude: pulse,
-        low: pulse * 0.85,
-        mid: pulse * 0.7,
-        high: pulse * 0.45,
-      };
     }
     if (externalMicLevel > raw.amplitude) {
       raw = {

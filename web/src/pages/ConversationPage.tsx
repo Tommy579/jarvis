@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { GoalTrackerCard } from "../components/GoalTrackerCard";
@@ -6,9 +6,10 @@ import { Icon } from "../components/Icon";
 import { JarvisLogo } from "../components/JarvisLogo";
 import { RichText } from "../components/RichText";
 import { SlashCommandMenu } from "../components/SlashCommandMenu";
+import { QueryErrorBanner } from "../components/QueryErrorBanner";
 import { EmptyState, PageHeader, Skeleton } from "../components/ui";
 import { formatModelLabel } from "../lib/modelLabels";
-import { filterSlashCommands, type SlashCommandDef } from "../lib/slashCommands";
+import { useSlashComposer } from "../lib/useSlashComposer";
 import { useJarvisStore } from "../store/useJarvisStore";
 import { errorMessage, toast } from "../store/useToastStore";
 
@@ -26,9 +27,8 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
   const goalMode = useJarvisStore((s) => s.goalMode);
   const setGoalMode = useJarvisStore((s) => s.setGoalMode);
   const [draft, setDraft] = useState("");
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [slashDismissed, setSlashDismissed] = useState(false);
   const [sending, setSending] = useState(false);
+  const [goalExpanded, setGoalExpanded] = useState(false);
 
   const activeGoal = Object.values(goalsMap)
     .filter((g) =>
@@ -62,15 +62,11 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [draft]);
 
-  const slashItems = slashDismissed ? [] : filterSlashCommands(draft);
-  const activeSlashIndex = slashItems.length > 0 ? Math.min(slashIndex, slashItems.length - 1) : 0;
-
   const sendDirect = async (text: string) => {
     if (!text || sending) return;
     setSending(true);
     setDraft("");
-    setSlashIndex(0);
-    setSlashDismissed(false);
+    resetSlashMenu();
     try {
       if (onSendText) {
         await onSendText(text);
@@ -88,60 +84,30 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
     }
   };
 
-  const selectSlashItem = (item: SlashCommandDef, fromTab = false) => {
-    if ((fromTab && item.type !== "immediate") || item.type === "goal") {
-      setDraft(`${item.cmd} `);
-      setSlashIndex(0);
-      setSlashDismissed(false);
-      inputRef.current?.focus();
-      return;
-    }
-    void sendDirect(item.cmd);
-  };
-
-  const submit = async () => {
-    const text = draft.trim();
+  const submit = async (rawText = draft) => {
+    const text = rawText.trim();
     if (!text || sending) return;
     await sendDirect(text);
   };
 
+  const {
+    slashItems,
+    activeSlashIndex,
+    setSlashIndex,
+    resetSlashMenu,
+    selectSlashItem,
+    handleKeyDown,
+  } = useSlashComposer({
+    value: draft,
+    setValue: setDraft,
+    inputRef,
+    onSubmitText: (text) => void submit(text),
+    onExecuteCommand: (cmd) => void sendDirect(cmd),
+  });
+
   const handleSend = (e: FormEvent) => {
     e.preventDefault();
     void submit();
-  };
-
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (slashItems.length > 0) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSlashIndex((activeSlashIndex + 1) % slashItems.length);
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSlashIndex((activeSlashIndex - 1 + slashItems.length) % slashItems.length);
-        return;
-      }
-      if (e.key === "Tab") {
-        e.preventDefault();
-        selectSlashItem(slashItems[activeSlashIndex], true);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setSlashDismissed(true);
-        return;
-      }
-      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-        e.preventDefault();
-        selectSlashItem(slashItems[activeSlashIndex], false);
-        return;
-      }
-    }
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      void submit();
-    }
   };
 
   return (
@@ -170,13 +136,12 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
         </div>
       )}
 
-      {query.error && (
-        <div className="banner" role="alert">
-          <span>Impossible de charger l'historique : {String(query.error)}</span>
-        </div>
-      )}
+      <QueryErrorBanner
+        query={query}
+        fallback="Impossible de charger l'historique de conversation."
+      />
 
-      {messages.length === 0 && !query.isLoading && !streamingText && (
+      {messages.length === 0 && !query.isLoading && !query.isError && !streamingText && (
         <div className="card">
           <EmptyState title="Aucun échange enregistré pour le moment.">
             Écrivez un message ci-dessous pour démarrer une discussion avec Jarvis.
@@ -278,7 +243,11 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
                 <span>en cours…</span>
               </div>
               <div className="msg__content">
-                {streamingText.replace(/\s*(?:\.\.\.|…)?\s*(?:\[suite\]|\(suite\)|suite\.\.\.)\s*$/i, "").trimEnd()}
+                <span className="text-wave" data-wave="true">
+                  {streamingText
+                    .replace(/\s*(?:\.\.\.|…)?\s*(?:\[suite\]|\(suite\)|suite\.\.\.)\s*$/i, "")
+                    .trimEnd()}
+                </span>
               </div>
             </article>
           )}
@@ -287,8 +256,25 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
       )}
 
       {activeGoal && (
-        <div className="home-goal-banner">
-          <GoalTrackerCard goal={activeGoal} compact onOpenGoals={onOpenGoals} />
+        <div className="home-goal-banner stack">
+          <div className="goal-inline-bar">
+            <div className="goal-inline-bar__info">
+              <span className="dot" aria-hidden="true" />
+              <span className="goal-inline-bar__title">{activeGoal.title}</span>
+              <span className="badge badge--info">{activeGoal.progress_pct}%</span>
+            </div>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              aria-expanded={goalExpanded}
+              onClick={() => setGoalExpanded((v) => !v)}
+            >
+              {goalExpanded ? "Réduire" : "Développer"}
+            </button>
+          </div>
+          {goalExpanded && (
+            <GoalTrackerCard goal={activeGoal} compact onOpenGoals={onOpenGoals} />
+          )}
         </div>
       )}
 
@@ -301,13 +287,14 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
         />
         <button
           type="button"
-          className={`sensor-chip goal-mode-chip ${goalMode ? "goal-mode-chip--active" : ""}`}
+          className={`composer-tools__btn ${goalMode ? "composer-tools__btn--active" : ""}`}
           aria-pressed={goalMode}
-          title="Activer le mode Objectif autonome (orchestration multi-agents jusqu'à vérification)"
+          title="Mode Objectif autonome (orchestration multi-agents jusqu'à vérification)"
+          aria-label={goalMode ? "Désactiver le mode Objectif" : "Activer le mode Objectif"}
           onClick={() => setGoalMode(!goalMode)}
         >
-          <span className="dot" aria-hidden="true" />
-          Objectif
+          <Icon name="target" size={17} />
+          {goalMode && <span className="composer-tools__dot" aria-hidden="true" />}
         </button>
         <textarea
           ref={inputRef}
@@ -322,8 +309,7 @@ export function ConversationPage({ onSendText, onOpenGoals }: ConversationPagePr
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
-            setSlashIndex(0);
-            setSlashDismissed(false);
+            resetSlashMenu();
           }}
           onKeyDown={handleKeyDown}
           disabled={sending}

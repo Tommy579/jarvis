@@ -67,16 +67,18 @@ def test_openrouter_and_ollama_payload_respect_explicit_thinking_mode() -> None:
     msgs = [Message(role=Role.USER, content="Salut")]
 
     assert "reasoning" not in or_prov.build_payload("deepseek/deepseek-v4.1-flash-1017", msgs)
-    assert or_prov.build_payload(
-        "deepseek/deepseek-v4.1-flash-1017", msgs, thinking_mode="off"
-    )["reasoning"] == {"enabled": False}
-    assert or_prov.build_payload(
-        "deepseek/deepseek-v4.1-flash-1017", msgs, thinking_mode="high"
-    )["reasoning"] == {"effort": "high"}
+    assert or_prov.build_payload("deepseek/deepseek-v4.1-flash-1017", msgs, thinking_mode="off")[
+        "reasoning"
+    ] == {"enabled": False}
+    assert or_prov.build_payload("deepseek/deepseek-v4.1-flash-1017", msgs, thinking_mode="high")[
+        "reasoning"
+    ] == {"effort": "high"}
 
     ol_prov = OllamaProvider()
     assert "reasoning_effort" not in ol_prov.build_payload("qwen3.5:2b", msgs, thinking_mode="auto")
-    assert ol_prov.build_payload("qwen3.5:2b", msgs, thinking_mode="off")["reasoning_effort"] == "none"
+    assert (
+        ol_prov.build_payload("qwen3.5:2b", msgs, thinking_mode="off")["reasoning_effort"] == "none"
+    )
     assert (
         ol_prov.build_payload("qwen3.5:2b", msgs, thinking_mode="medium")["reasoning_effort"]
         == "medium"
@@ -89,7 +91,9 @@ async def test_router_passes_per_role_thinking_mode() -> None:
     router = LLMRouter(
         providers={"openrouter": or_prov, "gemini": gem_prov},
         roles={
-            "agent": RoleRoute("agent", "deepseek/deepseek-v4.1-flash-1017", "openrouter", thinking_mode="auto"),
+            "agent": RoleRoute(
+                "agent", "deepseek/deepseek-v4.1-flash-1017", "openrouter", thinking_mode="auto"
+            ),
             "triage": RoleRoute("triage", "gemini-4-carbon", "gemini", thinking_mode="off"),
             "deep": RoleRoute("deep", "gemini-4-hydrogen", "gemini", thinking_mode="high"),
         },

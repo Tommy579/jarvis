@@ -42,6 +42,51 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   );
 }
 
+/**
+ * Bandeau d'erreur discret et reutilisable : message en francais, bouton
+ * « Réessayer » qui relance le fetch concerne et bouton de fermeture.
+ */
+export function ErrorBanner({
+  message,
+  onRetry,
+  retrying = false,
+  onDismiss,
+  testId,
+}: {
+  message: string;
+  onRetry?: () => void | Promise<unknown>;
+  retrying?: boolean;
+  onDismiss?: () => void;
+  testId?: string;
+}) {
+  return (
+    <div className="banner banner--error" role="alert" data-testid={testId}>
+      <span>{message}</span>
+      {onRetry && (
+        <button
+          type="button"
+          className="btn btn--sm banner__retry"
+          onClick={() => void onRetry()}
+          disabled={retrying}
+        >
+          <Icon name="refresh" size={14} />
+          {retrying ? "Nouvelle tentative…" : "Réessayer"}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          type="button"
+          className="icon-btn icon-btn--sm"
+          aria-label="Masquer l'erreur"
+          onClick={onDismiss}
+        >
+          <Icon name="x" size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** Bouton destructif en deux temps : un premier clic arme, le second confirme. */
 export function ConfirmButton({
   onConfirm,

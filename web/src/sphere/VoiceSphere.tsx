@@ -15,7 +15,10 @@ function detectWebGL(): boolean {
   }
   try {
     const canvas = document.createElement("canvas");
-    return Boolean(canvas.getContext("webgl2") || canvas.getContext("webgl"));
+    const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+    if (!gl) return false;
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return true;
   } catch {
     return false;
   }
@@ -44,8 +47,6 @@ interface CoreMeshProps {
 function SphereCoreMesh({ audioEngine, reducedMotion, pointerX, pointerY }: CoreMeshProps) {
   const sphereState = useJarvisStore((s) => s.sphereState);
   const theme = useJarvisStore((s) => s.theme);
-  const micLevel = useJarvisStore((s) => s.micLevel);
-  const setAudioMetrics = useJarvisStore((s) => s.setAudioMetrics);
 
   const parallaxGroupRef = useRef<THREE.Group | null>(null);
   const coreMeshRef = useRef<THREE.Mesh | null>(null);
@@ -97,8 +98,7 @@ function SphereCoreMesh({ audioEngine, reducedMotion, pointerX, pointerY }: Core
     const dt = Math.min(0.1, delta);
     const dtMs = dt * 1000;
     const cfg = getStateVisualConfig(sphereState, theme);
-    const metrics = audioEngine.sample(dtMs, micLevel);
-    setAudioMetrics(metrics);
+    const metrics = audioEngine.sample(dtMs, useJarvisStore.getState().micLevel);
 
     const lerpAlpha = Math.min(1, dt / 0.35);
     targetA.set(cfg.colorA);
@@ -303,10 +303,10 @@ interface VoiceSphereProps {
 export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
   const sphereState = useJarvisStore((s) => s.sphereState);
   const theme = useJarvisStore((s) => s.theme);
-  const amplitude = useJarvisStore((s) => s.audio.amplitude);
 
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [webglReady, setWebglReady] = useState<boolean>(() => detectWebGL());
+  const [inViewport, setInViewport] = useState<boolean>(true);
   const [tabVisible, setTabVisible] = useState<boolean>(
     () => typeof document === "undefined" || !document.hidden
   );
@@ -328,8 +328,17 @@ export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
   const wrapperY = useTransform(smoothPointerY, [-1, 1], [2.5, -2.5]);
 
   useEffect(() => {
-    setWebglReady(detectWebGL());
+    const el = wrapperRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setInViewport(entry ? entry.isIntersecting : true),
+      { threshold: 0.01 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
+  useEffect(() => {
     const syncForeground = () => {
       const visible = !document.hidden;
       const focused = typeof document.hasFocus === "function" ? document.hasFocus() : true;
@@ -393,7 +402,8 @@ export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
     <SphereFallback2D
       sphereState={sphereState}
       theme={theme}
-      amplitude={amplitude}
+      amplitude={0}
+      audioEngine={audioEngine}
       reducedMotion={reducedMotion}
       pointerX={smoothPointerX}
       pointerY={smoothPointerY}
@@ -414,7 +424,7 @@ export function VoiceSphere({ audioEngine }: VoiceSphereProps) {
         <CanvasErrorBoundary fallback={fallback}>
           <Canvas
             dpr={[1, 2]}
-            frameloop={tabVisible ? "always" : "never"}
+            frameloop={tabVisible && inViewport ? "always" : "never"}
             camera={{ position: [0, 0, 4.85], fov: 45 }}
             gl={{ antialias: true, alpha: true, premultipliedAlpha: true, powerPreference: "default" }}
             onCreated={({ gl }) => {

@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from jarvis_shared.models import RiskLevel
 from jarvis_shared.rest_models import AutonomyPolicyConfig, AutonomyPolicyUpdate
+
+from ..security import is_forbidden_ip_address, validate_http_target_host
+
+__all__ = [
+    "AUTONOMY_SETTING_KEY",
+    "AutonomyPolicy",
+    "DEFAULT_BLOCKED_DOMAINS",
+    "NEVER_AUTO_APPROVE_TOOLS",
+    "extract_domain",
+    "is_forbidden_ip_address",
+    "validate_http_target_host",
+]
 
 AUTONOMY_SETTING_KEY = "autonomy_policy"
 
@@ -21,22 +34,34 @@ DEFAULT_BLOCKED_DOMAINS: tuple[str, ...] = (
 NEVER_AUTO_APPROVE_TOOLS: frozenset[str] = frozenset(
     {
         "mail_send",
-        "execute_command",
-        "dangerous_shell",
+        "run_command",
+        "run_cli_subagent",
+        "write_file",
+        "browser_upload_file",
     }
 )
+
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _clean_url_raw(url_or_host: str) -> str:
+    return _CTRL_CHARS_RE.sub("", (url_or_host or "")).strip()
 
 
 def extract_domain(url_or_host: str) -> str:
     """Extrait le nom de domaine normalise d'une URL ou d'un hote."""
-    raw = (url_or_host or "").strip()
+    raw = _clean_url_raw(url_or_host)
     if not raw:
         return ""
-    if "://" in raw:
+    if raw.startswith("//"):
+        parsed = urlparse(f"https:{raw}")
+        host = (parsed.hostname or "").lower()
+    elif "://" in raw:
         parsed = urlparse(raw)
         host = (parsed.hostname or "").lower()
     else:
-        host = raw.split("/", 1)[0].split(":", 1)[0].lower()
+        parsed = urlparse(f"https://{raw}")
+        host = (parsed.hostname or "").lower()
     return host.strip(".")
 
 
@@ -57,8 +82,8 @@ class AutonomyPolicy:
     blocked_domains: list[str] = field(default_factory=lambda: list(DEFAULT_BLOCKED_DOMAINS))
     allow_browser_in_untrusted: bool = True
     block_shell_in_untrusted: bool = True
-    max_steps: int = 150
-    max_cost_usd: float = 1.0
+    max_steps: int = 0
+    max_cost_usd: float = 10.0
     emergency_stop: bool = False
     never_auto_approve: set[str] = field(default_factory=lambda: set(NEVER_AUTO_APPROVE_TOOLS))
 
@@ -131,16 +156,21 @@ class AutonomyPolicy:
             return cls()
 
     def check_url_allowed(self, url: str) -> tuple[bool, str | None]:
-        """Verifie qu'une URL respecte les listes noire/blanche de domaines."""
-        raw = (url or "").strip()
+        """Verifie qu'une URL respecte le schema http/https et les listes noire/blanche de domaines."""
+        raw = _clean_url_raw(url)
         if not raw:
             return True, None
-        lower = raw.lower()
-        if lower.startswith(("javascript:", "data:", "file://")):
-            return False, f"Schema URL interdit en navigation autonome : {lower.split(':', 1)[0]}"
-        host = extract_domain(raw)
+        if raw.startswith("//"):
+            return False, "URL relative au protocole (//...) interdite."
+        parsed = urlparse(raw)
+        scheme = (parsed.scheme or "").lower()
+        if not scheme:
+            return False, "Schema URL manquant : seul http:// ou https:// est autorise."
+        if scheme not in {"http", "https"}:
+            return False, f"Schema URL interdit en navigation autonome : {scheme}"
+        host = (parsed.hostname or "").lower().strip(".")
         if not host:
-            return True, None
+            return False, "Nom d'hote manquant dans l'URL."
         for blocked in self.blocked_domains:
             if _domain_matches(host, blocked):
                 return False, f"Domaine '{host}' bloque par la politique de securite ({blocked})."
@@ -150,6 +180,8 @@ class AutonomyPolicy:
         return True, None
 
     def is_ui_tool(self, tool_name: str, is_interactive_ui: bool = False) -> bool:
+        if tool_name in self.never_auto_approve:
+            return False
         if is_interactive_ui:
             return True
         return tool_name.startswith(("browser_", "desktop_", "mcp_playwright_"))

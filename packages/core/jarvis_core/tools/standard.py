@@ -6,10 +6,12 @@ import asyncio
 import html
 import os
 import re
+import signal
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import psutil
@@ -18,6 +20,7 @@ from jarvis_shared.rest_models import FactCreate, SensitivityLevel
 from pydantic import BaseModel, Field
 
 from ..memory.schema import MemoryDatabase
+from .autonomy import AutonomyPolicy, validate_http_target_host
 
 
 def extract_clean_html_text(raw_html: str, max_chars: int = 8000) -> str:
@@ -58,6 +61,61 @@ _SENSITIVE_LINUX_PREFIXES = (
     "/var/log",
 )
 
+_SENSITIVE_READ_PREFIXES = (
+    "/proc",
+    "/sys",
+    "/dev",
+    "/root",
+)
+
+_SENSITIVE_USER_DIR_NAMES = frozenset(
+    {
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".gcloud",
+        ".kube",
+        ".docker",
+        ".password-store",
+        "keyrings",
+        "jarvis-data",
+        "jarvis-browser",
+    }
+)
+
+_SENSITIVE_USER_FILE_NAMES = frozenset(
+    {
+        ".netrc",
+        "netrc",
+        ".git-credentials",
+        ".npmrc",
+        ".pypirc",
+        ".bash_history",
+        ".zsh_history",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "secrets.enc",
+        "shadow",
+        "credentials",
+    }
+)
+
+_SENSITIVE_WRITE_USER_FILES = frozenset(
+    {
+        ".bashrc",
+        ".zshrc",
+        ".profile",
+        ".bash_profile",
+        ".zprofile",
+        ".xinitrc",
+        "authorized_keys",
+    }
+)
+
+_SENSITIVE_SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".kdbx", ".gpg", ".ovpn"})
+
 _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\brm\b[^\n;|&]*--no-preserve-root"),
@@ -65,10 +123,16 @@ _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     (
         re.compile(
-            r"\brm\b[^\n;|&]*\s(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+"
-            r"(?:/\*?|/etc|/usr|/boot|/bin|/sbin|/lib\d*|/sys|/proc|/dev|/root|/home/?)(?:\s|$|;|&|\|)"
+            r"\brm\b[^\n;|&]*(?:\s-(?:[a-zA-Z]*[rR][a-zA-Z]*)|\s--recursive)(?:[^\n;|&]*)\s+"
+            r"(?:/\*?|/etc(?:/\S*)?|/usr(?:/\S*)?|/boot(?:/\S*)?|/bin(?:/\S*)?|/sbin(?:/\S*)?|"
+            r"/lib\d*(?:/\S*)?|/sys(?:/\S*)?|/proc(?:/\S*)?|/dev(?:/\S*)?|/root(?:/\S*)?|"
+            r"/home(?:/[^/\s;|&]+)?/?)(?:\s|$|;|&|\|)"
         ),
-        "suppression recursive sur un dossier systeme ou racine",
+        "suppression recursive sur un dossier systeme, racine ou home",
+    ),
+    (
+        re.compile(r"\bfind\b[^\n;|&]*\s+/(?:\s|$)[^\n;|&]*\s-delete\b"),
+        "suppression recursive via find -delete sur /",
     ),
     (
         re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
@@ -95,18 +159,43 @@ _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "arret ou redemarrage systeme",
     ),
     (
-        re.compile(r"\b(?:chmod|chown)\b[^\n;|&]*\s-[a-zA-Z]*R[^\n;|&]*\s+/(?:\s|$)"),
+        re.compile(
+            r"\b(?:chmod|chown)\b[^\n;|&]*(?:\s-[a-zA-Z]*R|\s--recursive)[^\n;|&]*\s+/(?:\s|$)"
+        ),
         "modification recursive des permissions sur /",
     ),
 ]
 
 
+def _has_sensitive_secret_name(resolved: Path) -> bool:
+    name = resolved.name.lower()
+    if name.startswith(".env") or name.endswith(".env") or name in _SENSITIVE_USER_FILE_NAMES:
+        return True
+    if resolved.suffix.lower() in _SENSITIVE_SECRET_SUFFIXES:
+        return True
+    parts = {p.lower() for p in resolved.parts}
+    return bool(parts & _SENSITIVE_USER_DIR_NAMES)
+
+
+def is_sensitive_read_path(path: Path) -> bool:
+    """Retourne True si le chemin expose des secrets locaux ou fichiers noyau sensibles."""
+    resolved = path.resolve()
+    if os.name != "nt":
+        for prefix in _SENSITIVE_READ_PREFIXES:
+            p = Path(prefix)
+            if resolved == p or resolved.is_relative_to(p):
+                return True
+        if resolved == Path("/etc/shadow"):
+            return True
+    return _has_sensitive_secret_name(resolved)
+
+
 def is_sensitive_system_path(path: Path) -> bool:
-    """Retourne True si le chemin cible un fichier ou dossier systeme sensible."""
+    """Retourne True si le chemin cible un fichier ou dossier systeme ou de persistance sensible."""
     resolved = path.resolve()
     if os.name == "nt":
         norm = str(resolved).lower()
-        return any(
+        if any(
             norm == prefix or norm.startswith(prefix + "\\")
             for prefix in (
                 "c:\\windows",
@@ -114,13 +203,23 @@ def is_sensitive_system_path(path: Path) -> bool:
                 "c:\\program files (x86)",
                 "c:\\programdata",
             )
-        )
-    if str(resolved) == "/":
-        return True
-    for prefix in _SENSITIVE_LINUX_PREFIXES:
-        p = Path(prefix)
-        if resolved == p or resolved.is_relative_to(p):
+        ):
             return True
+    else:
+        if str(resolved) == "/":
+            return True
+        for prefix in _SENSITIVE_LINUX_PREFIXES:
+            p = Path(prefix)
+            if resolved == p or resolved.is_relative_to(p):
+                return True
+    if _has_sensitive_secret_name(resolved):
+        return True
+    name = resolved.name.lower()
+    if name in _SENSITIVE_WRITE_USER_FILES:
+        return True
+    parts_lower = [p.lower() for p in resolved.parts]
+    if ".config" in parts_lower and ("autostart" in parts_lower or "systemd" in parts_lower):
+        return True
     return False
 
 
@@ -158,10 +257,6 @@ class RunCommandArgs(BaseModel):
     command: str = Field(min_length=1, max_length=2000, description="Commande shell a executer.")
     cwd: str | None = Field(default=None, description="Repertoire de travail (defaut : /).")
     timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
-    sudo_password: str | None = Field(
-        default=None,
-        description="Mot de passe sudo si la commande l'exige (a demander a l'utilisateur si besoin).",
-    )
 
 
 class SystemStatsArgs(BaseModel):
@@ -236,34 +331,32 @@ class StandardToolkit:
         db: MemoryDatabase | None = None,
         timeout_seconds: float = 10.0,
         database: MemoryDatabase | None = None,
+        autonomy_policy: AutonomyPolicy | None = None,
     ) -> None:
         self.db = database or db
         self.timeout_seconds = timeout_seconds
+        self.autonomy_policy = autonomy_policy
 
     def register_all(self, registry: Any) -> None:
         from jarvis_shared.models import RiskLevel
 
         from .registry import ToolSpec as RegistryToolSpec
 
+        if self.autonomy_policy is None and hasattr(registry, "autonomy_policy"):
+            self.autonomy_policy = registry.autonomy_policy
+
         for spec in self.specs().values():
-
-            def _make_handler(s: ToolSpec):
-                async def _wrapped(**kwargs: Any) -> dict[str, Any]:
-                    parsed = s.args_model.model_validate(kwargs)
-                    return await s.handler(parsed)
-
-                return _wrapped
-
             is_external = spec.name in {"web_search", "web_fetch"}
             registry.register(
                 RegistryToolSpec(
                     name=spec.name,
                     description=spec.description,
-                    handler=_make_handler(spec),
+                    handler=spec.handler,
                     args_model=spec.args_model,
                     risk=RiskLevel(spec.risk),
                     returns_untrusted=is_external,
                     untrusted_source=spec.name if is_external else None,
+                    pass_model=True,
                 )
             )
 
@@ -295,8 +388,8 @@ class StandardToolkit:
             ),
             ToolSpec(
                 "run_command",
-                "Execute une commande terminal (repertoire de travail par defaut : /). Demande le mot de passe sudo a l'utilisateur si besoin.",
-                1,
+                "Execute une commande terminal (repertoire de travail par defaut : /).",
+                2,
                 RunCommandArgs,
                 self.run_command,
             ),
@@ -388,22 +481,35 @@ class StandardToolkit:
         return await spec.handler(parsed)
 
     async def read_file(self, args: ReadFileArgs) -> dict[str, Any]:
-        try:
+        def _sync_read() -> dict[str, Any]:
             path = resolve_workdir_path(args.file_path)
+            if is_sensitive_read_path(path):
+                return {
+                    "ok": False,
+                    "path": str(path),
+                    "error": f"Lecture refusee : '{path}' est un fichier sensible ou de secrets.",
+                }
             if not path.is_file():
                 return {"ok": False, "error": f"Fichier introuvable : {path}"}
             if path.stat().st_size > args.max_bytes:
                 return {"ok": False, "error": "Fichier trop volumineux."}
+            with path.open("rb") as fh:
+                raw = fh.read(args.max_bytes + 1)
+            if len(raw) > args.max_bytes:
+                return {"ok": False, "error": "Fichier trop volumineux."}
             return {
                 "ok": True,
                 "path": str(path),
-                "content": path.read_text(encoding="utf-8", errors="replace"),
+                "content": raw.decode("utf-8", errors="replace"),
             }
+
+        try:
+            return await asyncio.to_thread(_sync_read)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     async def write_file(self, args: WriteFileArgs) -> dict[str, Any]:
-        try:
+        def _sync_write() -> dict[str, Any]:
             path = resolve_workdir_path(args.file_path)
             if is_sensitive_system_path(path):
                 return {
@@ -421,11 +527,14 @@ class StandardToolkit:
                 "path": str(path),
                 "bytes_written": len(args.content.encode("utf-8")),
             }
+
+        try:
+            return await asyncio.to_thread(_sync_write)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     async def list_directory(self, args: ListDirectoryArgs) -> dict[str, Any]:
-        try:
+        def _sync_list() -> dict[str, Any]:
             path = resolve_workdir_path(args.path)
             if not path.is_dir():
                 return {"ok": False, "error": f"Dossier introuvable : {path}"}
@@ -437,83 +546,117 @@ class StandardToolkit:
                 key=str.lower,
             )
             return {"ok": True, "path": str(path), "items": entries}
+
+        try:
+            return await asyncio.to_thread(_sync_list)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     async def search_files(self, args: SearchFilesArgs) -> dict[str, Any]:
-        root_dir = (
-            str(resolve_workdir_path(args.root_dir)) if args.root_dir else str(default_workdir())
-        )
+        root_dir = str(resolve_workdir_path(args.root_dir)) if args.root_dir else None
         adapter = current_platform_adapter()
+        timeout = min(self.timeout_seconds, 5.0)
         if hasattr(adapter, "search_files_linux"):
-            res = adapter.search_files_linux(
-                args.query, root_dir, args.limit, min(self.timeout_seconds, 5.0)
+            res = await asyncio.to_thread(
+                adapter.search_files_linux, args.query, root_dir, args.limit, timeout
             )
         else:
-            res = adapter.search_files_windows(
-                args.query, root_dir, args.limit, min(self.timeout_seconds, 5.0)
+            res = await asyncio.to_thread(
+                adapter.search_files_windows,
+                args.query,
+                root_dir or str(default_workdir()),
+                args.limit,
+                timeout,
             )
         return {"ok": "error" not in res, **res}
 
+    @staticmethod
+    async def _read_capped(stream: asyncio.StreamReader | None, limit: int = 262_144) -> bytes:
+        if stream is None:
+            return b""
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await stream.read(32768)
+            if not chunk:
+                break
+            if total < limit:
+                take = min(len(chunk), limit - total)
+                chunks.append(chunk[:take])
+                total += take
+        return b"".join(chunks)
+
+    @staticmethod
+    def _kill_proc_group(proc: asyncio.subprocess.Process) -> None:
+        if proc.returncode is not None:
+            return
+        try:
+            if os.name != "nt" and proc.pid:
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
     async def run_command(self, args: RunCommandArgs) -> dict[str, Any]:
-        danger = is_dangerous_command(args.command)
-        if danger:
-            return {
-                "ok": False,
-                "error": f"Commande bloquee car trop dangereuse : {danger}.",
-            }
         work_dir = resolve_workdir_path(args.cwd) if args.cwd else default_workdir()
         if not work_dir.is_dir():
             return {"ok": False, "error": f"Repertoire introuvable : {work_dir}"}
 
         cmd_to_run = args.command
-        stdin_bytes: bytes | None = None
         uses_sudo = bool(re.search(r"(?:^|[;&|]\s*|\s)sudo\b", cmd_to_run))
-        if uses_sudo:
-            if args.sudo_password:
-                cmd_to_run = re.sub(r"\bsudo\b(?!\s+-S\b)", 'sudo -S -p ""', cmd_to_run)
-                stdin_bytes = f"{args.sudo_password}\n".encode("utf-8")
-            elif not re.search(r"\bsudo\s+-n\b", cmd_to_run):
-                check = await asyncio.create_subprocess_exec(
-                    "sudo",
-                    "-n",
-                    "true",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                if await check.wait() != 0:
-                    return {
-                        "ok": False,
-                        "needs_sudo_password": True,
-                        "cwd": str(work_dir),
-                        "error": (
-                            "Mot de passe sudo requis pour executer cette commande. "
-                            "Demande son mot de passe sudo a l'utilisateur et reessaie avec sudo_password."
-                        ),
-                    }
+        if uses_sudo and not re.search(r"\bsudo\s+-n\b", cmd_to_run):
+            check = await asyncio.create_subprocess_exec(
+                "sudo",
+                "-n",
+                "true",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            if await check.wait() != 0:
+                return {
+                    "ok": False,
+                    "needs_elevation": True,
+                    "cwd": str(work_dir),
+                    "error": (
+                        "Elevation sudo requise : ne jamais transmettre de mot de passe root dans le chat. "
+                        "Execute cette commande dans un terminal local ou via pkexec."
+                    ),
+                }
 
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd_to_run,
                 cwd=str(work_dir),
-                stdin=asyncio.subprocess.PIPE
-                if stdin_bytes is not None
-                else asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name != "nt"),
             )
             try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(input=stdin_bytes), timeout=args.timeout_seconds
+                stdout_b, stderr_b, _ = await asyncio.wait_for(
+                    asyncio.gather(
+                        self._read_capped(proc.stdout),
+                        self._read_capped(proc.stderr),
+                        proc.wait(),
+                    ),
+                    timeout=args.timeout_seconds,
                 )
-            except asyncio.TimeoutError:
-                proc.kill()
+            except (TimeoutError, asyncio.TimeoutError):
+                self._kill_proc_group(proc)
                 await proc.wait()
                 return {
                     "ok": False,
                     "cwd": str(work_dir),
                     "error": f"Delai depasse ({args.timeout_seconds}s).",
                 }
+            except asyncio.CancelledError:
+                self._kill_proc_group(proc)
+                await proc.wait()
+                raise
             return {
                 "ok": proc.returncode == 0,
                 "exit_code": proc.returncode,
@@ -526,62 +669,82 @@ class StandardToolkit:
 
     async def get_system_stats(self, args: SystemStatsArgs) -> dict[str, Any]:
         _ = args
-        cpu_pct = psutil.cpu_percent(interval=0.05)
-        ram = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        battery = psutil.sensors_battery()
-        return {
-            "ok": True,
-            "cpu_usage_pct": cpu_pct,
-            "ram_used_gb": round(ram.used / (1024**3), 2),
-            "ram_total_gb": round(ram.total / (1024**3), 2),
-            "ram_usage_pct": ram.percent,
-            "disk_free_gb": round(disk.free / (1024**3), 2),
-            "disk_usage_pct": disk.percent,
-            "battery_pct": battery.percent if battery else None,
-            "battery_plugged": battery.power_plugged if battery else None,
-        }
+
+        def _sync_stats() -> dict[str, Any]:
+            cpu_pct = psutil.cpu_percent(interval=0.05)
+            ram = psutil.virtual_memory()
+            disk = psutil.disk_usage("/")
+            battery = psutil.sensors_battery()
+            return {
+                "ok": True,
+                "cpu_usage_pct": cpu_pct,
+                "ram_used_gb": round(ram.used / (1024**3), 2),
+                "ram_total_gb": round(ram.total / (1024**3), 2),
+                "ram_usage_pct": ram.percent,
+                "disk_free_gb": round(disk.free / (1024**3), 2),
+                "disk_usage_pct": disk.percent,
+                "battery_pct": battery.percent if battery else None,
+                "battery_plugged": battery.power_plugged if battery else None,
+            }
+
+        return await asyncio.to_thread(_sync_stats)
 
     async def list_processes(self, args: ListProcessesArgs) -> dict[str, Any]:
-        procs: list[dict[str, Any]] = []
-        for p in psutil.process_iter(["pid", "name", "username", "cpu_percent", "memory_percent"]):
-            try:
-                procs.append(dict(p.info))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        procs.sort(key=lambda x: x.get(args.sort_by) or 0.0, reverse=True)
-        return {"ok": True, "processes": procs[: args.limit]}
+        def _sync_procs() -> dict[str, Any]:
+            procs: list[dict[str, Any]] = []
+            for p in psutil.process_iter(
+                ["pid", "name", "username", "cpu_percent", "memory_percent"]
+            ):
+                try:
+                    procs.append(dict(p.info))
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            procs.sort(key=lambda x: x.get(args.sort_by) or 0.0, reverse=True)
+            return {"ok": True, "processes": procs[: args.limit]}
+
+        return await asyncio.to_thread(_sync_procs)
 
     async def get_clipboard(self, args: ClipboardArgs) -> dict[str, Any]:
         _ = args
         adapter = current_platform_adapter()
         if hasattr(adapter, "get_clipboard_linux"):
-            res = adapter.get_clipboard_linux(timeout=min(self.timeout_seconds, 2.0))
+            res = await asyncio.to_thread(
+                adapter.get_clipboard_linux, min(self.timeout_seconds, 2.0)
+            )
         else:
-            res = adapter.get_clipboard_windows()
+            res = await asyncio.to_thread(adapter.get_clipboard_windows)
         return {"ok": "error" not in res, **res}
 
     async def send_notification(self, args: SendNotificationArgs) -> dict[str, Any]:
         adapter = current_platform_adapter()
         if hasattr(adapter, "send_notification_linux"):
-            return adapter.send_notification_linux(
-                args.title, args.message, min(self.timeout_seconds, 3.0)
+            return await asyncio.to_thread(
+                adapter.send_notification_linux,
+                args.title,
+                args.message,
+                min(self.timeout_seconds, 3.0),
             )
-        return adapter.send_notification_windows(
-            args.title, args.message, min(self.timeout_seconds, 5.0)
+        return await asyncio.to_thread(
+            adapter.send_notification_windows,
+            args.title,
+            args.message,
+            min(self.timeout_seconds, 5.0),
         )
 
     async def media_control(self, args: MediaControlArgs) -> dict[str, Any]:
         adapter = current_platform_adapter()
         if hasattr(adapter, "media_control_linux"):
-            return adapter.media_control_linux(args.action, min(self.timeout_seconds, 3.0))
-        return adapter.media_control_windows(args.action)
+            return await asyncio.to_thread(
+                adapter.media_control_linux, args.action, min(self.timeout_seconds, 3.0)
+            )
+        return await asyncio.to_thread(adapter.media_control_windows, args.action)
 
     async def open_url(self, args: OpenUrlArgs) -> dict[str, Any]:
-        if not args.url.startswith(("http://", "https://")):
+        parsed = urlparse(args.url.strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
             return {"ok": False, "error": "Seules les URLs http:// ou https:// sont autorisees."}
-        opened = webbrowser.open(args.url)
-        return {"ok": bool(opened), "url": args.url}
+        opened = await asyncio.to_thread(webbrowser.open, args.url.strip())
+        return {"ok": bool(opened), "url": args.url.strip()}
 
     async def web_search(self, args: WebSearchArgs) -> dict[str, Any]:
         brave_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
@@ -630,34 +793,74 @@ class StandardToolkit:
         }
 
     async def web_fetch(self, args: WebFetchArgs) -> dict[str, Any]:
-        if not args.url.startswith(("http://", "https://")):
-            return {"ok": False, "error": "URL invalide (http/https requis)."}
+        current_url = args.url.strip()
+        max_bytes = 2 * 1024 * 1024
         try:
             async with httpx.AsyncClient(
-                timeout=self.timeout_seconds, follow_redirects=True
+                timeout=self.timeout_seconds, follow_redirects=False
             ) as client:
-                resp = await client.get(args.url, headers={"User-Agent": "JARVIS-Core/2.0"})
-                resp.raise_for_status()
-                text = extract_clean_html_text(resp.text, max_chars=args.max_chars)
-                return {
-                    "ok": True,
-                    "url": str(resp.url),
-                    "untrusted": True,
-                    "content": f'<untrusted source="{resp.url}">\n{text}\n</untrusted>',
-                }
+                for _hop in range(6):
+                    ok_host, host_reason = await asyncio.to_thread(
+                        validate_http_target_host, current_url
+                    )
+                    if not ok_host:
+                        return {"ok": False, "error": host_reason or "URL interdite (SSRF)."}
+                    if self.autonomy_policy is not None:
+                        ok_dom, dom_reason = self.autonomy_policy.check_url_allowed(current_url)
+                        if not ok_dom:
+                            return {"ok": False, "error": dom_reason or "Domaine interdit."}
+
+                    async with client.stream(
+                        "GET", current_url, headers={"User-Agent": "JARVIS-Core/2.0"}
+                    ) as resp:
+                        if resp.status_code in {301, 302, 303, 307, 308}:
+                            loc = resp.headers.get("location")
+                            if not loc:
+                                return {"ok": False, "error": "Redirection HTTP sans Location."}
+                            current_url = urljoin(str(resp.url), loc)
+                            continue
+                        resp.raise_for_status()
+                        chunks: list[bytes] = []
+                        total = 0
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            total += len(chunk)
+                            if total > max_bytes:
+                                break
+                            chunks.append(chunk)
+                        raw_html = b"".join(chunks).decode(
+                            resp.encoding or "utf-8", errors="replace"
+                        )
+                        text = extract_clean_html_text(raw_html, max_chars=args.max_chars)
+                        return {
+                            "ok": True,
+                            "url": str(resp.url),
+                            "untrusted": True,
+                            "content": text,
+                        }
+                return {"ok": False, "error": "Trop de redirections HTTP (> 5)."}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     async def memory_search(self, args: MemorySearchArgs) -> dict[str, Any]:
         if not self.db:
             return {"ok": False, "error": "Base memoire non initialisee."}
-        facts = self.db.search_facts_hybrid(args.query, limit=args.limit)
-        return {"ok": True, "facts": [f.model_dump() for f in facts]}
+
+        def _sync_search() -> list[dict[str, Any]]:
+            facts = self.db.search_facts_hybrid(args.query, limit=args.limit * 2)  # type: ignore[union-attr]
+            safe = [
+                f.model_dump()
+                for f in facts
+                if str(getattr(f, "sensitivity", "")).lower() not in {"tres_prive", "très privé"}
+            ]
+            return safe[: args.limit]
+
+        return {"ok": True, "facts": await asyncio.to_thread(_sync_search)}
 
     async def memory_save(self, args: MemorySaveArgs) -> dict[str, Any]:
         if not self.db:
             return {"ok": False, "error": "Base memoire non initialisee."}
-        fact = self.db.create_fact(
+        fact = await asyncio.to_thread(
+            self.db.create_fact,
             FactCreate(
                 subject=args.subject,
                 predicate=args.predicate,
@@ -667,7 +870,7 @@ class StandardToolkit:
                 confidence=0.95,
                 source="tool_memory_save",
                 sensitivity=args.sensitivity,
-            )
+            ),
         )
         return {"ok": True, "fact": fact.model_dump()}
 
@@ -675,13 +878,18 @@ class StandardToolkit:
         if not self.db:
             return {"ok": False, "error": "Base memoire non initialisee."}
         if args.fact_id:
-            deleted = self.db.delete_fact(args.fact_id)
+            deleted = await asyncio.to_thread(self.db.delete_fact, args.fact_id)
             return {"ok": deleted, "deleted_count": 1 if deleted else 0}
         if args.query:
-            matches = self.db.list_facts(query=args.query, limit=50)
-            count = 0
-            for item in matches:
-                if self.db.delete_fact(item.id):
-                    count += 1
+
+            def _sync_forget_query() -> int:
+                matches = self.db.list_facts(query=args.query, limit=50)  # type: ignore[union-attr]
+                count = 0
+                for item in matches:
+                    if self.db.delete_fact(item.id):  # type: ignore[union-attr]
+                        count += 1
+                return count
+
+            count = await asyncio.to_thread(_sync_forget_query)
             return {"ok": True, "deleted_count": count}
         return {"ok": False, "error": "Fournir fact_id ou query."}

@@ -189,3 +189,138 @@ async def test_main_agent_excludes_direct_coding_tools(tmp_path: Path, monkeypat
     )
     assert blocked.is_error is True
     assert blocked.output.get("blocked_by") == "orchestrator_delegation_policy"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_uncapped_even_with_errors() -> None:
+    from jarvis_core.tools.registry import ToolSpec
+    from pydantic import BaseModel
+
+    class _StepArgs(BaseModel):
+        step: int
+
+    # 75 etapes (> 64 et > 20) incluant des erreurs d'outils transitoires
+    responses: list[list[StreamDelta]] = [
+        [
+            StreamDelta(
+                tool_calls=[ToolCall(id=f"tc_{i}", name="step_tool", arguments={"step": i})],
+                usage=Usage(
+                    model="agent", provider="mock", tokens_in=2, tokens_out=2, cost_usd=0.0
+                ),
+            )
+        ]
+        for i in range(75)
+    ]
+    responses.append([StreamDelta(text="Objectif complet apres 75 etapes.")])
+
+    provider = _MockProvider(responses)
+    router = LLMRouter(
+        providers={"mock": provider},
+        roles={"agent": RoleRoute(role_name="agent", model="mock-agent", provider="mock")},
+    )
+    registry = ToolRegistry()
+
+    async def _step_handler(step: int) -> dict[str, Any]:
+        if step % 10 == 0:
+            return {"ok": False, "error": "erreur transitoire"}
+        return {"ok": True, "step": step}
+
+    registry.register(
+        ToolSpec(
+            name="step_tool",
+            description="Outil de test multi-etapes",
+            handler=_step_handler,
+            args_model=_StepArgs,
+        )
+    )
+
+    loop = AgentLoop(router=router, tool_registry=registry)
+    res = await loop.run_turn("Execute 75 etapes sans t'arreter")
+    assert res.iterations == 76
+    assert "Objectif complet apres 75 etapes." in res.text
+
+
+@pytest.mark.asyncio
+async def test_per_provider_daily_budget_failover_and_clean_stop(tmp_path: Path) -> None:
+    class _NamedProvider(LLMProvider):
+        def __init__(self, name: str, reply: str) -> None:
+            self.name = name
+            self.reply = reply
+            self.calls = 0
+
+        async def fetch_available_models(self) -> dict[str, ModelCapabilities]:
+            return {}
+
+        async def complete(self, *args, **kwargs) -> StreamDelta:
+            self.calls += 1
+            return StreamDelta(
+                text=self.reply,
+                usage=Usage(model="m", provider=self.name, tokens_in=5, tokens_out=5, cost_usd=0.1),
+            )
+
+        async def stream(self, *args, **kwargs):
+            yield await self.complete(*args, **kwargs)
+
+    storage = MemoryStorage(tmp_path / "budget.db")
+    storage.log_llm_call(
+        "agent",
+        Usage(
+            model="deepseek/deepseek-v4.1-flash-1017",
+            provider="openrouter",
+            tokens_in=10,
+            tokens_out=10,
+            cost_usd=10.5,
+        ),
+    )
+    storage.log_llm_call(
+        "agent",
+        Usage(
+            model="gemini-3.5-flash-lite",
+            provider="gemini",
+            tokens_in=10,
+            tokens_out=10,
+            cost_usd=1.0,
+        ),
+    )
+
+    assert storage.get_today_spend_usd("openrouter") == pytest.approx(10.5)
+    assert storage.get_today_spend_usd("gemini") == pytest.approx(1.0)
+
+    or_prov = _NamedProvider("openrouter", "from-openrouter")
+    gem_prov = _NamedProvider("gemini", "from-gemini")
+    router = LLMRouter(
+        providers={"openrouter": or_prov, "gemini": gem_prov},
+        roles={
+            "agent": RoleRoute(
+                role_name="agent",
+                model="deepseek/deepseek-v4.1-flash-1017",
+                provider="openrouter",
+                fallback=["gemini-3.5-flash-lite"],
+            )
+        },
+        daily_budget_usd=10.0,
+        usage_logger=lambda role, usage: storage.log_llm_call(role, usage),
+        daily_provider_spend_getter=storage.get_today_spend_usd,
+    )
+
+    # openrouter > 10$ -> bascule automatique sur gemini (< 10$) sans erreur
+    loop = AgentLoop(router=router, tool_registry=ToolRegistry())
+    res = await loop.run_turn("Bonjour")
+    assert or_prov.calls == 0
+    assert gem_prov.calls == 1
+    assert "from-gemini" in res.text
+
+    # Si gemini depasse aussi 10$, AgentLoop s'arrete proprement sans lever d'exception
+    storage.log_llm_call(
+        "agent",
+        Usage(
+            model="gemini-3.5-flash-lite",
+            provider="gemini",
+            tokens_in=10,
+            tokens_out=10,
+            cost_usd=9.5,
+        ),
+    )
+    res_stop = await loop.run_turn("Continue")
+    assert "Plafond journalier" in res_stop.text
+    assert "10.00 $" in res_stop.text

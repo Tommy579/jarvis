@@ -25,6 +25,34 @@ class ApprovalManager:
         self.on_approval_requested = on_approval_requested
         self._requests: dict[str, ApprovalRequest] = {}
         self._events: dict[str, asyncio.Event] = {}
+        self._loops: dict[str, asyncio.AbstractEventLoop] = {}
+
+    def _wake(self, request_id: str) -> None:
+        ev = self._events.get(request_id)
+        if ev is None:
+            return
+        loop = self._loops.get(request_id)
+        if loop is not None and not loop.is_closed():
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not loop:
+                loop.call_soon_threadsafe(ev.set)
+                return
+        ev.set()
+
+    def _prune_old_requests(self, max_entries: int = 500) -> None:
+        if len(self._requests) <= max_entries:
+            return
+        now = datetime.now(timezone.utc)
+        for req_id, req in list(self._requests.items()):
+            if len(self._requests) <= max_entries // 2:
+                break
+            if req.status != "pending" or now >= datetime.fromisoformat(req.expires_at):
+                self._requests.pop(req_id, None)
+                self._events.pop(req_id, None)
+                self._loops.pop(req_id, None)
 
     def create_request(
         self,
@@ -34,6 +62,7 @@ class ApprovalManager:
         risk: RiskLevel,
         exact_command: str | None = None,
     ) -> ApprovalRequest:
+        self._prune_old_requests()
         expires = (datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds)).isoformat()
         req = ApprovalRequest(
             tool_name=tool_name,
@@ -45,6 +74,10 @@ class ApprovalManager:
         )
         self._requests[req.id] = req
         self._events[req.id] = asyncio.Event()
+        try:
+            self._loops[req.id] = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         if self.on_approval_requested:
             self.on_approval_requested(req)
         return req
@@ -60,13 +93,15 @@ class ApprovalManager:
         if not req:
             raise KeyError(f"Demande d'approbation '{request_id}' introuvable.")
 
+        # Etats terminaux immuables : interdit l'ecrasement d'un refus ou le brute-force PIN
+        if req.status != "pending":
+            return req
+
         now = datetime.now(timezone.utc)
         expires_dt = datetime.fromisoformat(req.expires_at)
         if now >= expires_dt:
             req.status = "expired"
-            ev = self._events.get(request_id)
-            if ev:
-                ev.set()
+            self._wake(request_id)
             return req
 
         # Au telephone, une action de niveau 3 exige un code PIN vocal valide
@@ -77,15 +112,11 @@ class ApprovalManager:
                 or not hmac.compare_digest(str(self.voice_pin), str(provided_pin).strip())
             ):
                 req.status = "denied"
-                ev = self._events.get(request_id)
-                if ev:
-                    ev.set()
+                self._wake(request_id)
                 return req
 
         req.status = "approved" if approved else "denied"
-        ev = self._events.get(request_id)
-        if ev:
-            ev.set()
+        self._wake(request_id)
         return req
 
     async def wait_for_decision(self, request_id: str, timeout: float | None = None) -> str:
@@ -93,11 +124,16 @@ class ApprovalManager:
         ev = self._events.get(request_id)
         if not req or not ev:
             return "expired"
+        try:
+            self._loops[request_id] = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
         wait_secs = timeout if timeout is not None else self.ttl_seconds
         try:
             await asyncio.wait_for(ev.wait(), timeout=wait_secs)
         except asyncio.TimeoutError:
-            req.status = "expired"
+            if req.status == "pending":
+                req.status = "expired"
         return req.status
 
     def list_pending(self) -> list[ApprovalRequest]:

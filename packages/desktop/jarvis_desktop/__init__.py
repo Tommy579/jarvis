@@ -1,12 +1,5 @@
-"""Agent de bureau jarvis-desktop (capteurs KDE Wayland et pipeline vocal temps reel)."""
+"""Agent de bureau jarvis-desktop (adaptateurs Linux/Windows et icone systeme)."""
 
-from .voice_pipeline import GeminiLiveBridge, RealtimeVoicePipeline, VoiceLatencyMetrics
-from .wayland_sensors import ActiveWindowInfo, WaylandSensors
+from .platform import current_platform_adapter
 
-__all__ = [
-    "ActiveWindowInfo",
-    "GeminiLiveBridge",
-    "RealtimeVoicePipeline",
-    "VoiceLatencyMetrics",
-    "WaylandSensors",
-]
+__all__ = ["current_platform_adapter"]

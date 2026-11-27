@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,9 +18,8 @@ from jarvis_core.llm.router import LLMRouter
 from jarvis_core.memory.engine import MemoryEngine
 from jarvis_core.memory.storage import MemoryStorage
 from jarvis_core.memory.wiki import MarkdownWiki
+from jarvis_core.tools.desktop_a11y import is_sensitive_app
 from jarvis_core.tools.registry import ToolRegistry, ToolSpec
-from jarvis_desktop.voice_pipeline import RealtimeVoicePipeline
-from jarvis_desktop.wayland_sensors import WaylandSensors
 from jarvis_shared.models import (
     Message,
     ModelCapabilities,
@@ -39,6 +39,18 @@ class EvalScenarioResult:
     category: str
     passed: bool
     details: str = ""
+
+
+_WAKE_WORD_RE = re.compile(
+    r"^(?:(?:hey|salut|dis|ok)\s+)?j'?arvi[sc]e?[\s,:;-]*(.*)$", re.IGNORECASE
+)
+
+
+def _extract_wake_word_query(transcript: str) -> str | None:
+    m = _WAKE_WORD_RE.match((transcript or "").strip())
+    if not m:
+        return None
+    return m.group(1).strip()
 
 
 class _DummyArgs(BaseModel):
@@ -139,7 +151,6 @@ class EvalHarness:
             agent = AgentLoop(router=router, tool_registry=registry, memory_engine=mem)
             presence = PresenceDetector()
             attention = AttentionEngine(presence=presence, storage=storage, router=router)
-            sensors = WaylandSensors(restore_token_path=tmp_path / "token.txt")
 
             for sc in scenarios:
                 sid = sc["id"]
@@ -259,12 +270,12 @@ class EvalHarness:
                     )
 
                 elif cat == "voice":
-                    q = RealtimeVoicePipeline.extract_wake_word_query(sc["transcript"])
+                    q = _extract_wake_word_query(sc["transcript"])
                     ok = q == sc["expected_query"]
                     results.append(EvalScenarioResult(sid, cat, ok, details=f"query={q!r}"))
 
                 elif cat == "wayland_security":
-                    bl = sensors.is_window_blacklisted(sc["app_name"], sc["window_title"])
+                    bl = is_sensitive_app(sc["app_name"], sc["window_title"])
                     ok = bl == bool(sc["expected_blacklisted"])
                     results.append(EvalScenarioResult(sid, cat, ok, details=f"blacklisted={bl}"))
 

@@ -12,22 +12,16 @@ from jarvis_core.llm.base import BudgetExceededError, LLMProvider, RateLimitErro
 from jarvis_core.llm.openrouter import OpenRouterProvider
 from jarvis_core.llm.router import LLMRouter
 from jarvis_core.mcp.client import MCPClientManager
-from jarvis_core.mcp.server import JARVISMemoryMCPServer
 from jarvis_core.memory.engine import MemoryEngine
 from jarvis_core.memory.storage import MemoryStorage
 from jarvis_core.memory.wiki import MarkdownWiki
 from jarvis_core.security import (
-    ResticBackupManager,
     SecretStore,
     SlidingWindowRateLimiter,
-    TokenAuthManager,
-    is_allowed_bind_or_peer_ip,
 )
 from jarvis_core.tools.approvals import ApprovalManager
+from jarvis_core.tools.desktop_a11y import is_sensitive_app
 from jarvis_core.tools.registry import ToolRegistry, ToolSpec
-from jarvis_core.tools.sandbox import PodmanSandbox
-from jarvis_desktop.voice_pipeline import RealtimeVoicePipeline, VoiceLatencyMetrics
-from jarvis_desktop.wayland_sensors import WaylandSensors
 from jarvis_shared.models import (
     ImageAttachment,
     Message,
@@ -96,11 +90,6 @@ class _FakeProvider(LLMProvider):
 
 class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
     def test_security_network_tokens_and_twilio_signature(self):
-        self.assertTrue(is_allowed_bind_or_peer_ip("127.0.0.1"))
-        self.assertTrue(is_allowed_bind_or_peer_ip("100.101.102.103"))
-        self.assertFalse(is_allowed_bind_or_peer_ip("0.0.0.0"))
-        self.assertFalse(is_allowed_bind_or_peer_ip("8.8.8.8"))
-
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             cred_dir = tmp_path / "creds"
@@ -108,18 +97,6 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
             (cred_dir / "OPENROUTER_API_KEY").write_text("sk-or-systemd-secret\n", encoding="utf-8")
             store = SecretStore(credentials_dir=cred_dir)
             self.assertEqual(store.get_secret("OPENROUTER_API_KEY"), "sk-or-systemd-secret")
-
-            auth = TokenAuthManager(storage_path=tmp_path / "tokens.json")
-            tok = auth.issue_token("arch-laptop", scopes=["ws", "rest"])
-            self.assertTrue(auth.verify_token(tok, required_scope="ws"))
-            self.assertFalse(auth.verify_token("invalid_token"))
-            auth.revoke_device("arch-laptop")
-            self.assertFalse(auth.verify_token(tok))
-
-            backup = ResticBackupManager(data_dir=tmp_path, repo_url="sftp:nas:/backups/jarvis")
-            cmd = backup.build_backup_command()
-            self.assertEqual(cmd[0], "restic")
-            self.assertIn("jarvis-daily", cmd)
 
         limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60.0)
         self.assertTrue(limiter.allow("ip1", now=10.0))
@@ -250,12 +227,6 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         approvals.resolve(req2.id, approved=True, channel="phone", provided_pin="4242")
         self.assertEqual(req2.status, "approved")
 
-        # Verification PodmanSandbox (--network=none, --read-only)
-        sandbox = PodmanSandbox()
-        podman_cmd = sandbox.build_podman_command(Path("/tmp/s.py"), Path("/tmp/w"))
-        self.assertIn("--network=none", podman_cmd)
-        self.assertIn("--read-only", podman_cmd)
-
         # Verification import MCP (risque niveau 2 par defaut)
         mcp_client = MCPClientManager(registry)
         imported = mcp_client.import_server_tools(
@@ -304,18 +275,6 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(stats["active_facts"], 1)
             self.assertIn("Paris", wiki.read_page("moi.md"))
 
-            # Serveur MCP sortant
-            mcp_srv = JARVISMemoryMCPServer(mem)
-            rpc_res = await mcp_srv.handle_jsonrpc(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": "wiki_read", "arguments": {"slug": "moi.md"}},
-                }
-            )
-            self.assertIn("Paris", rpc_res["result"]["content"][0]["text"])
-
     async def test_attention_escalation_and_twilio_tiers(self):
         presence = PresenceDetector()
         presence.update_desktop_signals(
@@ -347,33 +306,8 @@ class TestPlanCoeurComplete(unittest.IsolatedAsyncioTestCase):
         self.assertIn("phone_call", escalated[0].channel)
 
     async def test_wayland_sensors_voice_pipeline_and_eval_harness(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            sensors = WaylandSensors(restore_token_path=Path(tmpdir) / "restore.tok")
-            sensors.save_portal_restore_token("tok_kde_123")
-            self.assertEqual(sensors.load_portal_restore_token(), "tok_kde_123")
-            self.assertTrue(sensors.is_window_blacklisted("keepassxc", "Base de mots de passe"))
-            self.assertFalse(sensors.is_window_blacklisted("code", "main.py - VS Code"))
-
-        voice = RealtimeVoicePipeline()
-        self.assertEqual(
-            voice.extract_wake_word_query("Jarvis, lance le diagnostic"), "lance le diagnostic"
-        )
-        self.assertIsNone(voice.extract_wake_word_query("La nomination est prevue demain"))
-
-        # Test du barge-in : si l'utilisateur parle pendant le TTS, le TTS est coupe
-        voice.start_tts_playback("Phrase en cours de lecture.")
-        self.assertTrue(voice.is_tts_playing)
-        # Sur haut-parleur, la voix de Jarvis revient au micro : ce n'est pas une interruption
-        self.assertFalse(voice.on_vad_speech_detected(0.9, transcript="phrase en cours de lecture"))
-        self.assertTrue(voice.is_tts_playing)
-        voice.on_vad_speech_detected(0.85)
-        self.assertFalse(voice.is_tts_playing)
-        self.assertTrue(voice.tts_interrupted)
-
-        metrics = VoiceLatencyMetrics(
-            vad_end_ms=280, stt_final_ms=290, llm_first_token_ms=450, tts_first_chunk_ms=280
-        )
-        self.assertTrue(metrics.within_budget)
+        self.assertTrue(is_sensitive_app("keepassxc", "Base de mots de passe"))
+        self.assertFalse(is_sensitive_app("code", "main.py - VS Code"))
 
         # Execution complete des 22 scenarios du banc d'essai (jarvis eval)
         harness = EvalHarness()

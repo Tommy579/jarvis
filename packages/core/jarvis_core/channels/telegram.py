@@ -67,6 +67,7 @@ TELEGRAM_SUPPORTED_COMMANDS: frozenset[str] = frozenset(
         "config",
         "tint",
         "theme",
+        "ask",
     }
 )
 
@@ -80,6 +81,7 @@ TELEGRAM_MENU_COMMANDS: tuple[tuple[str, str], ...] = (
     ("local", "Activer le modèle local (qwen3.5:2b)"),
     ("council", "Activer le mode conseil avancé"),
     ("auto", "Routage auto ou tâche autonome"),
+    ("ask", "Demander approbation terminal niveau 3+"),
     ("goal", "Lancer un objectif autonome supervisé"),
     ("goals", "Lister les objectifs récents"),
     ("tasks", "Lister les tâches autonomes"),
@@ -109,6 +111,7 @@ TELEGRAM_HELP_TEXT = (
     "- /local [message] : activer le modèle local (qwen3.5:2b)\n"
     "- /council (ou /moa) [message] : activer le mode conseil avancé\n"
     "- /auto [objectif] : rétablir le routage auto (sans argument) ou lancer une tâche autonome\n"
+    "- /ask <demande> : notifier et demander approbation pour les commandes terminal niveau 3+\n"
     "- /workspace [dossier | reset] : définir ou afficher le dossier de travail actif\n\n"
     "🎯 Objectifs & Tâches\n"
     "- /goal <objectif> : lancer un objectif autonome supervisé\n"
@@ -178,7 +181,7 @@ class TelegramGateway:
                 reply_text=(
                     "Commande inconnue. Tapez /help pour la liste complète.\n"
                     "Commandes disponibles : /start, /help, /status, /brief, /model, /local, "
-                    "/council, /auto, /workspace, /usage, /clear, /goal, /goals, /tasks, "
+                    "/council, /auto, /ask, /workspace, /usage, /clear, /goal, /goals, /tasks, "
                     "/stop, /skills, /settings, /tint, /remember, /forget, /pause, /quiet."
                 ),
             )
@@ -314,10 +317,18 @@ class TelegramGateway:
                         return
                 await message.answer(res.reply_text, reply_markup=_to_markup(res.inline_keyboard))
 
+        max_media_bytes = 15 * 1024 * 1024
+
         @dp.message(F.voice | F.audio)
         async def _on_voice(message: Message) -> None:
+            if not self.is_authorized(message.chat.id):
+                return
             voice_item = message.voice or message.audio
             if not voice_item:
+                return
+            file_size = int(getattr(voice_item, "file_size", 0) or 0)
+            if file_size > max_media_bytes:
+                await message.answer("Fichier audio trop volumineux (max 15 Mo).")
                 return
             try:
                 dest = io.BytesIO()
@@ -340,22 +351,29 @@ class TelegramGateway:
                     )
             except Exception as exc:
                 logger.exception("Erreur traitement audio Telegram: %s", exc)
-                await message.answer(f"Erreur audio: {exc}")
+                await message.answer("Erreur interne lors du traitement du message audio.")
 
         @dp.message(F.photo)
         async def _on_photo(message: Message) -> None:
+            if not self.is_authorized(message.chat.id):
+                return
             if not message.photo:
+                return
+            photo_item = message.photo[-1]
+            file_size = int(getattr(photo_item, "file_size", 0) or 0)
+            if file_size > max_media_bytes:
+                await message.answer("Image trop volumineuse (max 15 Mo).")
                 return
             try:
                 dest = io.BytesIO()
-                await bot.download(message.photo[-1], destination=dest)
+                await bot.download(photo_item, destination=dest)
                 img_bytes = dest.getvalue()
                 res = await self.handle_photo(message.chat.id, img_bytes, message.caption or "")
                 if res.authorized and res.reply_text:
                     await message.answer(res.reply_text)
             except Exception as exc:
                 logger.exception("Erreur photo Telegram: %s", exc)
-                await message.answer(f"Erreur photo: {exc}")
+                await message.answer("Erreur interne lors du traitement de l'image.")
 
         @dp.callback_query()
         async def _on_cb(query: CallbackQuery) -> None:

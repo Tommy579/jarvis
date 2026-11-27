@@ -45,7 +45,7 @@ class SpotifyIntegration(BaseIntegration):
         return "https://developer.spotify.com/dashboard"
 
     def tools(self) -> list[str]:
-        return ["spotify_current_track", "spotify_play"]
+        return []
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:
@@ -67,7 +67,7 @@ class HealthIntegration(BaseIntegration):
         self.connected = bool(os.environ.get("HOME_ASSISTANT_URL"))
 
     def tools(self) -> list[str]:
-        return ["health_summary"]
+        return []
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:
@@ -88,7 +88,7 @@ class FinanceIntegration(BaseIntegration):
         self.connected = True
 
     def tools(self) -> list[str]:
-        return ["finance_import_csv"]
+        return []
 
     def import_csv_text(self, csv_text: str, db: MemoryDatabase) -> int:
         reader = csv.DictReader(io.StringIO(csv_text))
