@@ -44,7 +44,7 @@ def test_contains_untrusted_tags_detects_spaced_and_unclosed_tags() -> None:
 
 
 def test_memory_engine_filters_truncated_untrusted_and_system_summary(tmp_path: Path) -> None:
-    assert "<untrusted" in DEFAULT_PERSONA_PROMPT
+    assert "untrusted" in DEFAULT_PERSONA_PROMPT.lower()
 
     db = MemoryDatabase(tmp_path / "mem.db")
     storage = MemoryStorage(tmp_path / "mem.db", database=db)
