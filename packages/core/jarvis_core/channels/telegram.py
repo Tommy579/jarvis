@@ -4,10 +4,34 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+MAX_TEXT_CHARS = 4000
+MAX_CAPTION_CHARS = 1024
+MAX_MEDIA_BYTES = 15 * 1024 * 1024
+MAX_CALLBACK_DATA_CHARS = 128
+MAX_TELEGRAM_REPLY_CHARS = 4096
+_MAX_BLOCKED_ATTEMPTS = 500
+_TG_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]{16,}")
+
+
+def redact_telegram_secrets(text: str, bot_token: str = "") -> str:
+    """Masque tout jeton Telegram (bot<id>:<secret>) avant journalisation."""
+    cleaned = _TG_BOT_TOKEN_RE.sub("bot***", str(text or ""))
+    tok = (bot_token or "").strip()
+    if tok:
+        cleaned = cleaned.replace(tok, "***")
+    return cleaned
+
+
+def _cap_telegram_text(text: str, limit: int = MAX_TELEGRAM_REPLY_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)] + "…"
 
 
 @dataclass(slots=True)
@@ -159,20 +183,30 @@ class TelegramGateway:
         self.on_alert_ack = on_alert_ack
         self.blocked_attempts: list[int] = []
 
-    def is_authorized(self, chat_id: int) -> bool:
+    def is_authorized(self, chat_id: int, user_id: int | None = None) -> bool:
         if self.allowed_chat_id is None:
             return False
         allowed = int(chat_id) == self.allowed_chat_id
+        # Pour un chat prive (allowed_chat_id > 0), l'expediteur doit aussi correspondre
+        if allowed and user_id is not None and self.allowed_chat_id > 0:
+            allowed = int(user_id) == self.allowed_chat_id
         if not allowed:
             self.blocked_attempts.append(int(chat_id))
+            if len(self.blocked_attempts) > _MAX_BLOCKED_ATTEMPTS:
+                del self.blocked_attempts[:-_MAX_BLOCKED_ATTEMPTS]
             logger.warning("Tentative Telegram non autorisee depuis chat_id=%s", chat_id)
         return allowed
 
     async def handle_command(
-        self, chat_id: int, command: str, arg: str = ""
+        self, chat_id: int, command: str, arg: str = "", *, user_id: int | None = None
     ) -> TelegramMessageResult:
-        if not self.is_authorized(chat_id):
+        if not self.is_authorized(chat_id, user_id=user_id):
             return TelegramMessageResult(authorized=False, reply_text="")
+        if len(command) + len(arg) > MAX_TEXT_CHARS:
+            return TelegramMessageResult(
+                authorized=True,
+                reply_text=f"Commande trop longue (max {MAX_TEXT_CHARS} caracteres).",
+            )
 
         cmd = command.lstrip("/").split("@", 1)[0].lower()
         if cmd not in TELEGRAM_SUPPORTED_COMMANDS:
@@ -195,21 +229,39 @@ class TelegramGateway:
             )
         return TelegramMessageResult(authorized=True, reply_text=f"Commande /{cmd} recue.")
 
-    async def handle_text(self, chat_id: int, text: str) -> TelegramMessageResult:
-        if not self.is_authorized(chat_id):
+    async def handle_text(
+        self, chat_id: int, text: str, *, user_id: int | None = None
+    ) -> TelegramMessageResult:
+        if not self.is_authorized(chat_id, user_id=user_id):
             return TelegramMessageResult(authorized=False, reply_text="")
-        stripped = text.strip()
+        stripped = (text or "").strip()
+        if len(stripped) > MAX_TEXT_CHARS:
+            return TelegramMessageResult(
+                authorized=True,
+                reply_text=f"Message trop long (max {MAX_TEXT_CHARS} caracteres).",
+            )
         if stripped.startswith("/"):
             parts = stripped.split(maxsplit=1)
-            return await self.handle_command(chat_id, parts[0], parts[1] if len(parts) > 1 else "")
+            return await self.handle_command(
+                chat_id,
+                parts[0],
+                parts[1] if len(parts) > 1 else "",
+                user_id=user_id,
+            )
         if self.on_text:
             reply = await self.on_text(stripped)
             return TelegramMessageResult(authorized=True, reply_text=reply)
         return TelegramMessageResult(authorized=True, reply_text=f"Recu : {stripped}")
 
-    async def handle_voice(self, chat_id: int, audio_bytes: bytes) -> TelegramMessageResult:
-        if not self.is_authorized(chat_id):
+    async def handle_voice(
+        self, chat_id: int, audio_bytes: bytes, *, user_id: int | None = None
+    ) -> TelegramMessageResult:
+        if not self.is_authorized(chat_id, user_id=user_id):
             return TelegramMessageResult(authorized=False, reply_text="")
+        if len(audio_bytes) > MAX_MEDIA_BYTES:
+            return TelegramMessageResult(
+                authorized=True, reply_text="Fichier audio trop volumineux (max 15 Mo)."
+            )
         if self.on_voice:
             reply_text, ogg_bytes = await self.on_voice(audio_bytes)
             return TelegramMessageResult(
@@ -218,22 +270,31 @@ class TelegramGateway:
         return TelegramMessageResult(authorized=True, reply_text="Message vocal recu.")
 
     async def handle_photo(
-        self, chat_id: int, image_bytes: bytes, caption: str = ""
+        self, chat_id: int, image_bytes: bytes, caption: str = "", *, user_id: int | None = None
     ) -> TelegramMessageResult:
-        if not self.is_authorized(chat_id):
+        if not self.is_authorized(chat_id, user_id=user_id):
             return TelegramMessageResult(authorized=False, reply_text="")
+        if len(image_bytes) > MAX_MEDIA_BYTES:
+            return TelegramMessageResult(
+                authorized=True, reply_text="Image trop volumineuse (max 15 Mo)."
+            )
+        safe_caption = (caption or "").strip()[:MAX_CAPTION_CHARS]
         if self.on_photo:
-            reply = await self.on_photo(image_bytes, caption)
+            reply = await self.on_photo(image_bytes, safe_caption)
             return TelegramMessageResult(authorized=True, reply_text=reply)
         return TelegramMessageResult(
             authorized=True, reply_text="Photo transmise au module vision."
         )
 
-    async def handle_callback(self, chat_id: int, callback_data: str) -> TelegramMessageResult:
-        if not self.is_authorized(chat_id):
+    async def handle_callback(
+        self, chat_id: int, callback_data: str, *, user_id: int | None = None
+    ) -> TelegramMessageResult:
+        if not self.is_authorized(chat_id, user_id=user_id):
             return TelegramMessageResult(authorized=False, reply_text="")
+        if len(callback_data or "") > MAX_CALLBACK_DATA_CHARS:
+            return TelegramMessageResult(authorized=True, reply_text="Action inline invalide.")
         parts = callback_data.split(":")
-        if len(parts) == 3 and parts[0] == "approve":
+        if len(parts) == 3 and parts[0] == "approve" and parts[2] in ("yes", "no"):
             approved = parts[2] == "yes"
             if self.on_approval:
                 reply = await self.on_approval(parts[1], approved)
@@ -297,12 +358,15 @@ class TelegramGateway:
 
         @dp.message(F.text)
         async def _on_text(message: Message) -> None:
+            sender_id = getattr(message.from_user, "id", None)
+            if not self.is_authorized(message.chat.id, user_id=sender_id):
+                return
             text = message.text or ""
             wants_voice = text.lower().startswith("/vocal") or any(
                 w in text.lower() for w in ("vocal", "en audio", "à l'oral", "parle", "dis-le")
             )
             clean_text = text[6:].strip() if text.lower().startswith("/vocal") else text
-            res = await self.handle_text(message.chat.id, clean_text)
+            res = await self.handle_text(message.chat.id, clean_text, user_id=sender_id)
             if res.authorized and res.reply_text:
                 if wants_voice or res.voice_ogg:
                     voice_bytes = res.voice_ogg or await asyncio.to_thread(
@@ -311,30 +375,39 @@ class TelegramGateway:
                     if voice_bytes:
                         await message.answer_voice(
                             BufferedInputFile(voice_bytes, filename="jarvis.mp3"),
-                            caption=res.reply_text[:1024],
+                            caption=_cap_telegram_text(res.reply_text, 1024),
+                            parse_mode=None,
                             reply_markup=_to_markup(res.inline_keyboard),
                         )
                         return
-                await message.answer(res.reply_text, reply_markup=_to_markup(res.inline_keyboard))
-
-        max_media_bytes = 15 * 1024 * 1024
+                await message.answer(
+                    _cap_telegram_text(res.reply_text),
+                    parse_mode=None,
+                    reply_markup=_to_markup(res.inline_keyboard),
+                )
 
         @dp.message(F.voice | F.audio)
         async def _on_voice(message: Message) -> None:
-            if not self.is_authorized(message.chat.id):
+            sender_id = getattr(message.from_user, "id", None)
+            if not self.is_authorized(message.chat.id, user_id=sender_id):
                 return
             voice_item = message.voice or message.audio
             if not voice_item:
                 return
             file_size = int(getattr(voice_item, "file_size", 0) or 0)
-            if file_size > max_media_bytes:
-                await message.answer("Fichier audio trop volumineux (max 15 Mo).")
+            if file_size > MAX_MEDIA_BYTES:
+                await message.answer("Fichier audio trop volumineux (max 15 Mo).", parse_mode=None)
                 return
             try:
                 dest = io.BytesIO()
                 await bot.download(voice_item, destination=dest)
                 audio_bytes = dest.getvalue()
-                res = await self.handle_voice(message.chat.id, audio_bytes)
+                if len(audio_bytes) > MAX_MEDIA_BYTES:
+                    await message.answer(
+                        "Fichier audio trop volumineux (max 15 Mo).", parse_mode=None
+                    )
+                    return
+                res = await self.handle_voice(message.chat.id, audio_bytes, user_id=sender_id)
                 if res.authorized and res.reply_text:
                     voice_bytes = res.voice_ogg or await asyncio.to_thread(
                         self.synthesize_voice, res.reply_text
@@ -342,44 +415,66 @@ class TelegramGateway:
                     if voice_bytes:
                         await message.answer_voice(
                             BufferedInputFile(voice_bytes, filename="jarvis.mp3"),
-                            caption=res.reply_text[:1024],
+                            caption=_cap_telegram_text(res.reply_text, 1024),
+                            parse_mode=None,
                             reply_markup=_to_markup(res.inline_keyboard),
                         )
                         return
                     await message.answer(
-                        res.reply_text, reply_markup=_to_markup(res.inline_keyboard)
+                        _cap_telegram_text(res.reply_text),
+                        parse_mode=None,
+                        reply_markup=_to_markup(res.inline_keyboard),
                     )
             except Exception as exc:
-                logger.exception("Erreur traitement audio Telegram: %s", exc)
-                await message.answer("Erreur interne lors du traitement du message audio.")
+                logger.error(
+                    "Erreur traitement audio Telegram: %s",
+                    redact_telegram_secrets(str(exc), self.bot_token),
+                )
+                await message.answer(
+                    "Erreur interne lors du traitement du message audio.", parse_mode=None
+                )
 
         @dp.message(F.photo)
         async def _on_photo(message: Message) -> None:
-            if not self.is_authorized(message.chat.id):
+            sender_id = getattr(message.from_user, "id", None)
+            if not self.is_authorized(message.chat.id, user_id=sender_id):
                 return
             if not message.photo:
                 return
             photo_item = message.photo[-1]
             file_size = int(getattr(photo_item, "file_size", 0) or 0)
-            if file_size > max_media_bytes:
-                await message.answer("Image trop volumineuse (max 15 Mo).")
+            if file_size > MAX_MEDIA_BYTES:
+                await message.answer("Image trop volumineuse (max 15 Mo).", parse_mode=None)
                 return
             try:
                 dest = io.BytesIO()
                 await bot.download(photo_item, destination=dest)
                 img_bytes = dest.getvalue()
-                res = await self.handle_photo(message.chat.id, img_bytes, message.caption or "")
+                if len(img_bytes) > MAX_MEDIA_BYTES:
+                    await message.answer("Image trop volumineuse (max 15 Mo).", parse_mode=None)
+                    return
+                res = await self.handle_photo(
+                    message.chat.id, img_bytes, message.caption or "", user_id=sender_id
+                )
                 if res.authorized and res.reply_text:
-                    await message.answer(res.reply_text)
+                    await message.answer(_cap_telegram_text(res.reply_text), parse_mode=None)
             except Exception as exc:
-                logger.exception("Erreur photo Telegram: %s", exc)
-                await message.answer("Erreur interne lors du traitement de l'image.")
+                logger.error(
+                    "Erreur photo Telegram: %s",
+                    redact_telegram_secrets(str(exc), self.bot_token),
+                )
+                await message.answer(
+                    "Erreur interne lors du traitement de l'image.", parse_mode=None
+                )
 
         @dp.callback_query()
         async def _on_cb(query: CallbackQuery) -> None:
             if not query.message:
                 return
-            res = await self.handle_callback(query.message.chat.id, query.data or "")
+            sender_id = getattr(query.from_user, "id", None)
+            res = await self.handle_callback(
+                query.message.chat.id, query.data or "", user_id=sender_id
+            )
             if res.authorized:
                 await query.answer(res.reply_text[:180])
                 try:

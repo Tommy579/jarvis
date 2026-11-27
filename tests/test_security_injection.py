@@ -541,3 +541,107 @@ async def test_browser_cdp_loopback_url_controls_and_download_confinement(
         assert res_trav["ok"] is False
         res_nul = await tk.browser_screenshot(BrowserScreenshotArgs(save_path="shot\x00.png"))
         assert res_nul["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_strict_auth_size_limits_parse_mode_and_log_redaction(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from unittest.mock import AsyncMock
+
+    from jarvis_core.channels.telegram import MAX_MEDIA_BYTES, MAX_TEXT_CHARS, TelegramGateway
+    from jarvis_core.runtime import _TelegramSender
+
+    triggered: list[str] = []
+
+    async def _on_text(t: str) -> str:
+        triggered.append(f"text:{len(t)}")
+        return "<b>HTML injecte</b> " + ("x" * 5000)
+
+    async def _on_voice(b: bytes) -> tuple[str, bytes | None]:
+        triggered.append(f"voice:{len(b)}")
+        return ("ok", None)
+
+    async def _on_photo(b: bytes, cap: str) -> str:
+        triggered.append(f"photo:{len(b)}")
+        return "ok"
+
+    async def _on_approval(aid: str, ok: bool) -> str:
+        triggered.append(f"approve:{aid}:{ok}")
+        return "ok"
+
+    token = "123456:SECRET_TG_TOKEN_ABC_987654321"
+    gw = TelegramGateway(
+        bot_token=token,
+        allowed_chat_id=12345,
+        on_text=_on_text,
+        on_voice=_on_voice,
+        on_photo=_on_photo,
+        on_approval=_on_approval,
+    )
+
+    # 1. Compte non autorise ne declenche rien, et callback d'un autre user_id refuse
+    assert (await gw.handle_text(99999, "bonjour")).authorized is False
+    assert (await gw.handle_command(99999, "/status")).authorized is False
+    assert (await gw.handle_voice(99999, b"abc")).authorized is False
+    assert (await gw.handle_photo(99999, b"abc")).authorized is False
+    assert (await gw.handle_callback(99999, "approve:r1:yes")).authorized is False
+    assert (await gw.handle_callback(12345, "approve:r1:yes", user_id=77777)).authorized is False
+    assert triggered == []
+
+    # 2. Limites de taille sur texte, media et callback_data
+    huge_text_res = await gw.handle_text(12345, "A" * (MAX_TEXT_CHARS + 100))
+    assert huge_text_res.authorized is True
+    assert "trop long" in huge_text_res.reply_text.lower()
+    assert triggered == []
+
+    huge_voice_res = await gw.handle_voice(12345, b"\x00" * (MAX_MEDIA_BYTES + 1))
+    assert huge_voice_res.authorized is True
+    assert "trop volumineux" in huge_voice_res.reply_text.lower()
+
+    huge_photo_res = await gw.handle_photo(12345, b"\x00" * (MAX_MEDIA_BYTES + 1))
+    assert huge_photo_res.authorized is True
+    assert "trop volumineuse" in huge_photo_res.reply_text.lower()
+
+    huge_cb = await gw.handle_callback(12345, "approve:" + ("x" * 200) + ":yes")
+    assert "invalide" in huge_cb.reply_text.lower() or "non reconnue" in huge_cb.reply_text.lower()
+    assert triggered == []
+
+    # 3. blocked_attempts borne en memoire (pas de fuite memoire sur flood)
+    for cid in range(1000, 1700):
+        gw.is_authorized(cid)
+    assert len(gw.blocked_attempts) <= 500
+
+    # 4. _TelegramSender force parse_mode=None et tronque les reponses > 4096 caracteres
+    sent_kwargs: list[dict] = []
+
+    class _FakeBot:
+        def __init__(self, token: str) -> None:
+            self.session = type("Sess", (), {"close": AsyncMock()})()
+
+        async def send_message(self, **kwargs):
+            sent_kwargs.append(kwargs)
+            return {"ok": True}
+
+    import aiogram
+
+    orig_bot = aiogram.Bot
+    aiogram.Bot = _FakeBot  # type: ignore[misc]
+    try:
+        sender = _TelegramSender(gw)
+        await sender.send("<b>bold</b> " + ("Z" * 5000), urgency=1)
+    finally:
+        aiogram.Bot = orig_bot  # type: ignore[misc]
+    assert len(sent_kwargs) == 1
+    assert sent_kwargs[0]["parse_mode"] is None
+    assert len(sent_kwargs[0]["text"]) <= 4096
+
+    # 5. Le redacteur masque le jeton Telegram meme si present dans l'exception HTTP
+    from jarvis_core.channels.telegram import redact_telegram_secrets
+
+    raw_err = f"ClientError on https://api.telegram.org/file/bot{token}/voice/file_1.oga"
+    with caplog.at_level(logging.ERROR):
+        cleaned_err = redact_telegram_secrets(raw_err, token)
+    assert token not in cleaned_err
+    assert "SECRET_TG_TOKEN" not in cleaned_err
