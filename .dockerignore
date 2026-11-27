@@ -1,13 +1,30 @@
-# Secrets et donnees personnelles : ne jamais les envoyer au contexte de build
+# Secrets et donnees personnelles : ne jamais les envoyer au contexte de build.
+# Les motifs sans "**/" ne visent que la racine : web/.env ou packages/**/x.db
+# seraient sinon copies par "COPY web/" ou "COPY packages".
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
 *.db
 *.sqlite
 *.sqlite3
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/*.pem
+**/*.key
+**/secrets.enc
+**/.npmrc
+**/.pypirc
+**/jarvis_profile.json
 jarvis_profile.json
 jarvis-data/
+**/jarvis-data/
 *.log
+**/*.log
 
 # Environnements et caches locaux
 .venv/
