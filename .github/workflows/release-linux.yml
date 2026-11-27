@@ -1,0 +1,50 @@
+name: Release Linux (archive)
+
+# Archive de distribution autonome : interface deja compilee, aucune dependance Node
+# pour l'utilisateur final. Se declenche manuellement ou sur un tag v* (l'archive est
+# alors attachee a la release GitHub).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Construire l'archive
+        run: bash packaging/build_release.sh
+
+      - name: Verifier le contenu de l'archive
+        run: |
+          ls -lh dist/*.tar.gz
+          tar -tzf dist/*.tar.gz | grep -q 'web/dist/index.html'
+          tar -tzf dist/*.tar.gz | grep -q 'packages/core/jarvis_core/api/server.py'
+          tar -tzf dist/*.tar.gz | grep -q 'install_linux.sh'
+          tar -tzf dist/*.tar.gz | grep -q 'uv.lock'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: Attacher l'archive a la release (tags uniquement)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true

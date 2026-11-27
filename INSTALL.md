@@ -30,6 +30,20 @@ système `portaudio` doit être présent (le script d'installation s'en occupe).
 
 ## 2. Installation guidée sur Linux (recommandé)
 
+### Option rapide — archive précompilée (sans git ni Node)
+
+```bash
+# depuis la page Releases du dépôt GitHub
+tar -xzf jarvis-2.0.0-linux-x86_64.tar.gz
+cd jarvis-2.0.0
+bash install_linux.sh
+```
+
+L'interface web est déjà compilée dans l'archive : seuls Python 3.12 et `uv` sont nécessaires.
+Pour forcer une recompilation depuis les sources : `JARVIS_FORCE_WEB_BUILD=1 bash install_linux.sh`.
+
+### Option complète — depuis les sources
+
 ### Étape 1 — Récupérer le projet
 
 ```bash

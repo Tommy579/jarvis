@@ -1,6 +1,6 @@
 # Makefile pour JARVIS 2.0 (Open Mind Interface)
 
-.PHONY: install install-full run dev-core dev-web test test-e2e test-browser lint format codegen-types clean
+.PHONY: install install-full run dev-core dev-web test test-e2e test-browser lint format codegen-types release clean
 
 ifeq ($(OS),Windows_NT)
 VENV_BIN := .venv\Scripts
@@ -55,6 +55,10 @@ test-e2e:
 test-browser:
 	@echo "Test bout-en-bout du pilotage navigateur (Chromium requis)..."
 	JARVIS_BROWSER_E2E=1 PYTHONPATH=packages/shared:packages/core:packages/desktop:. $(PYTHON) -m pytest tests/test_browser_cdp_e2e.py -q
+
+release:
+	@echo "Construction de l'archive de distribution Linux..."
+	bash packaging/build_release.sh
 
 lint:
 	@echo "Verification ruff sur packages/, tests/ et evals/..."
