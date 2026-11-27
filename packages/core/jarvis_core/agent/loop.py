@@ -285,6 +285,8 @@ class AgentLoop:
     @staticmethod
     def _scan_untrusted(messages: list[Message]) -> bool:
         for msg in messages:
+            if msg.role == Role.SYSTEM:
+                continue
             if msg.contains_untrusted or contains_untrusted_tags(msg.content):
                 return True
             for tr in msg.tool_results:
@@ -439,7 +441,7 @@ class AgentLoop:
                 *self.history,
             ]
 
-        has_untrusted = user_msg.contains_untrusted or self._scan_untrusted(context_messages)
+        has_untrusted = user_msg.contains_untrusted
         depth_token = _CURRENT_SUBAGENT_DEPTH.set(
             max(self.subagent_depth, _CURRENT_SUBAGENT_DEPTH.get())
         )

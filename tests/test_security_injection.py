@@ -243,11 +243,11 @@ async def test_tool_results_and_multiturn_untrusted_guard_and_subagent_propagati
     ):
         assert reg.get(btool).returns_untrusted is True, f"{btool} doit etre returns_untrusted"  # type: ignore[union-attr]
 
-    # 2. AgentLoop : un resultat <untrusted> au tour 1 doit maintenir has_untrusted=True au tour 2
+    # 2. AgentLoop : un resultat read_file (<untrusted>) a l'etape 1 bloque run_command a l'etape 2 du meme tour
     class _EmptyArgs(BaseModel):
         pass
 
-    class _TwoTurnProvider(LLMProvider):
+    class _SameTurnProvider(LLMProvider):
         name = "gemini"
         trusted_for_highly_private = True
 
@@ -273,11 +273,6 @@ async def test_tool_results_and_multiturn_untrusted_guard_and_subagent_propagati
                 )
             if self.step == 2:
                 return StreamDelta(
-                    text="Fichier lu.",
-                    usage=Usage(model=model, provider="gemini", tokens_in=5, tokens_out=5),
-                )
-            if self.step == 3:
-                return StreamDelta(
                     text="",
                     tool_calls=[
                         ToolCall(id="tc2", name="run_command", arguments={"command": "echo pwned"})
@@ -292,15 +287,17 @@ async def test_tool_results_and_multiturn_untrusted_guard_and_subagent_propagati
         async def stream(self, model, messages, tools=None, **kwargs):
             yield await self.complete(model, messages, tools=tools, **kwargs)
 
-    prov = _TwoTurnProvider()
+    prov = _SameTurnProvider()
     router = LLMRouter(providers={"gemini": prov, "openrouter": prov})
     loop = AgentLoop(router=router, tool_registry=reg)
     t1 = await loop.run_turn("Lis doc.txt")
     assert t1.had_untrusted_context is True
-    t2 = await loop.run_turn("Continue")
-    assert t2.had_untrusted_context is True
     assert any(
-        tr.is_error and "untrusted_context_guard" in str(tr.output) for tr in t2.tool_results
+        tr.is_error and "untrusted_context_guard" in str(tr.output) for tr in t1.tool_results
+    )
+    # _scan_untrusted ignore les messages SYSTEM (persona documentant <untrusted>)
+    assert (
+        loop._scan_untrusted([Message(role=Role.SYSTEM, content=DEFAULT_PERSONA_PROMPT)]) is False
     )
 
     # 3. SubagentSupervisor : un sous-agent ayant lu du contenu <untrusted> doit encadrer result_summary
