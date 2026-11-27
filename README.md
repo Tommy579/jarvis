@@ -84,6 +84,7 @@ PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m 
     --cov=jarvis_core --cov=jarvis_shared --cov=jarvis_desktop --cov-report=term --cov-fail-under=65
 env -u PYTHONPATH .venv/bin/python -m ruff check packages tests evals
 env -u PYTHONPATH .venv/bin/python -m ruff format --check packages tests evals
+PYTHONPATH=packages/shared:packages/core:packages/desktop:. .venv/bin/python -m mypy
 cd web && npm run build && npx vitest run && npx playwright test
 ```
 

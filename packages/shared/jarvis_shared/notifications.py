@@ -11,6 +11,11 @@ from .models import utc_now_iso
 
 UrgencyLiteral = Literal[0, 1, 2, 3, 4]
 HighRiskLiteral = Literal[2, 3]
+NotificationChannel = Literal["ntfy", "telegram", "sms", "call"]
+
+
+def _default_channel_ladder() -> list[NotificationChannel]:
+    return ["ntfy", "telegram", "sms", "call"]
 
 
 class NotificationPolicy(BaseModel):
@@ -34,9 +39,7 @@ class NotificationPolicy(BaseModel):
     min_seconds_between_calls: int = 1800
 
     # Canaux autorises, dans l'ordre de l'echelle
-    channel_ladder: list[Literal["ntfy", "telegram", "sms", "call"]] = Field(
-        default_factory=lambda: ["ntfy", "telegram", "sms", "call"]
-    )
+    channel_ladder: list[NotificationChannel] = Field(default_factory=_default_channel_ladder)
     escalation_seconds: dict[str, int] = Field(
         default_factory=lambda: {"ntfy": 120, "telegram": 300, "sms": 300}
     )

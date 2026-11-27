@@ -13,6 +13,7 @@ dependencies = [
 [dependency-groups]
 # Installe par `uv sync` : sans ce groupe, une synchronisation retire pytest et ruff du venv.
 dev = [
+    "mypy>=2.4.1",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=7.1.0",
@@ -57,3 +58,20 @@ source = ["jarvis_core", "jarvis_shared", "jarvis_desktop"]
 fail_under = 65
 skip_covered = true
 show_missing = false
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+# Les modules hors perimetre sont analyses mais leurs erreurs ne sont pas remontees : le
+# perimetre reste explicite et identique en local et en CI (install editable).
+follow_imports = "silent"
+# Perimetre progressif : on ajoute des fichiers au fur et a mesure, sans bloquer sur l'existant.
+files = [
+    "packages/shared/jarvis_shared",
+    "packages/core/jarvis_core/backup.py",
+    "packages/core/jarvis_core/doctor.py",
+    "packages/core/jarvis_core/updates.py",
+    "packages/core/jarvis_core/scheduler/routines.py",
+    "packages/core/jarvis_core/cli.py",
+]
