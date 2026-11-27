@@ -5,7 +5,6 @@ import { apiClient } from "./api/client";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { Icon, type IconName } from "./components/Icon";
 import { JarvisLogo } from "./components/JarvisLogo";
-import { VisualArtifactWindow } from "./components/VisualArtifactWindow";
 import { ErrorBanner, Skeleton, Toaster } from "./components/ui";
 import { describeApiError } from "./lib/apiErrors";
 import { setSchemePreference, useColorScheme } from "./lib/colorScheme";
@@ -41,6 +40,12 @@ const MemoryOnboardingPage = lazy(() =>
 );
 const NotFoundPage = lazy(() =>
   import("./pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage }))
+);
+// three.js ne doit pas entrer dans le bundle initial : la fenetre n'est chargee qu'a l'usage.
+const VisualArtifactWindow = lazy(() =>
+  import("./components/VisualArtifactWindow").then((m) => ({
+    default: m.VisualArtifactWindow,
+  }))
 );
 
 type AppRoute = "/" | "/conversation" | "/goals" | "/alerts" | "/memory" | "/config" | "/not-found";
@@ -178,6 +183,7 @@ export function App() {
   const { resolved: resolvedScheme, system: systemScheme } = useColorScheme();
 
   const wsConnected = useJarvisStore((s) => s.wsConnected);
+  const activeArtifact = useJarvisStore((s) => s.activeArtifact);
   const sphereState = useJarvisStore((s) => s.sphereState);
   const activeModel = useJarvisStore((s) => s.activeModel);
   const wakeWordEnabled = useJarvisStore((s) => s.wakeWordEnabled);
@@ -1313,7 +1319,11 @@ export function App() {
           </AnimatePresence>
         </main>
 
-        <VisualArtifactWindow audioEngine={audioEngine} />
+        {activeArtifact && (
+          <Suspense fallback={null}>
+            <VisualArtifactWindow audioEngine={audioEngine} />
+          </Suspense>
+        )}
         <CommandPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
