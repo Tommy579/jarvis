@@ -1,6 +1,6 @@
 # Makefile pour JARVIS 2.0 (Open Mind Interface)
 
-.PHONY: install install-full run dev-core dev-web test test-e2e test-browser lint format codegen-types release clean
+.PHONY: install install-full run dev-core dev-web test test-cov test-e2e test-browser lint format codegen-types release clean
 
 ifeq ($(OS),Windows_NT)
 VENV_BIN := .venv\Scripts
@@ -47,6 +47,12 @@ test:
 	@echo "Lancement des tests Python..."
 	PYTHONPATH=packages/shared:packages/core:packages/desktop:. $(PYTHON) -m pytest tests
 	@if [ -d web ] && [ -f web/package.json ]; then echo "Lancement des tests Vitest..." && cd web && npm test; fi
+
+test-cov:
+	@echo "Tests Python avec mesure de couverture (plancher 65 %)..."
+	PYTHONPATH=packages/shared:packages/core:packages/desktop:. $(PYTHON) -m pytest tests -q \
+		--cov=jarvis_core --cov=jarvis_shared --cov=jarvis_desktop \
+		--cov-report=term --cov-fail-under=65
 
 test-e2e:
 	@echo "Tests bout-en-bout Playwright (mock + jarvis-core reel)..."
