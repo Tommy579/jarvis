@@ -1,0 +1,57 @@
+name: Rapport de bug
+description: Signaler un comportement reproductible (pas une faille de sécurité)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Pour une **vulnérabilité**, n'ouvrez pas d'issue : voir [SECURITY.md](../blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Sortie de `GET /api/version` ou `jarvis --version`
+      placeholder: "2.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Système
+      options:
+        - Linux (X11)
+        - Linux (Wayland)
+        - Windows
+        - Docker
+        - Autre
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Étapes de reproduction
+      placeholder: |
+        1. Lancer `./scripts/launch_jarvis_v2.sh`
+        2. Ouvrir Configuration > ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Comportement attendu
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Comportement observé
+      description: Collez l'erreur exacte et, si possible, la fin de `~/.local/state/jarvis/jarvis.log`
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostic
+      description: Sortie de `jarvis doctor`
+      render: text

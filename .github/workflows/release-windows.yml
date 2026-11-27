@@ -69,23 +69,33 @@ jobs:
           if (-not $ok) { throw "Le binaire jarvis.exe ne repond pas sur /api/health" }
           Write-Host "jarvis.exe repond correctement."
 
+      - name: Empreinte SHA-256 de l'archive Windows
+        shell: powershell
+        run: |
+          $zip = Get-Item "dist\JARVIS-windows-x64.zip"
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Set-Content -Encoding ascii "dist\SHA256SUMS.txt"
+          Get-Content "dist\SHA256SUMS.txt"
+
       - name: Publier l'artefact
         uses: actions/upload-artifact@v4
         with:
           name: JARVIS-windows-x64
-          path: dist/JARVIS-windows-x64.zip
+          path: |
+            dist/JARVIS-windows-x64.zip
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Creer la release (tag)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" --generate-notes --title "JARVIS 2.0 ${{ github.ref_name }}"
+        run: gh release create "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" "dist/SHA256SUMS.txt" --generate-notes --title "JARVIS ${{ github.ref_name }}"
         continue-on-error: true
 
       - name: Joindre a la release existante (tag)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" --clobber
+        run: gh release upload "${{ github.ref_name }}" "dist/JARVIS-windows-x64.zip" "dist/SHA256SUMS.txt" --clobber
         continue-on-error: true

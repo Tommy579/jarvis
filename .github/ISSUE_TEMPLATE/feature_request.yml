@@ -1,0 +1,34 @@
+name: Demande de fonctionnalité
+description: Proposer une capacité ou une amélioration
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problème à résoudre
+      description: Décrivez la situation concrète, pas la solution technique.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposition
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Périmètre
+      options:
+        - Interface web
+        - Backend / outils
+        - Voix et audio
+        - Intégrations (Gmail, Telegram, MCP...)
+        - Installation, packaging, mises à jour
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives envisagées

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Vulnérabilité de sécurité
+    url: https://github.com/Tommy579/jarvis/security/advisories/new
+    about: Ne pas ouvrir d'issue publique pour une faille ; utiliser les advisories privées.
+  - name: Documentation et dépannage
+    url: https://github.com/Tommy579/jarvis/blob/main/docs/FAQ.md
+    about: Installation, jeton d'API, port 8765, sauvegardes, Docker.

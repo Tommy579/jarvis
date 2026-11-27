@@ -93,6 +93,23 @@ La CI ajoute un job d'installation propre : les paquets sont installes dans un v
 leurs seules dependances declarees, puis `jarvis_core.api.server` doit s'importer. Un job
 `docker` construit l'image de production et verifie `/api/health`.
 
+## État du produit
+
+| Domaine | État | Détail |
+| --- | --- | --- |
+| Installation Linux | prêt | archive précompilée + script, `GET /api/health` vérifié dans la CI |
+| Installation Windows | prêt | exécutable PyInstaller, démarrage réel testé dans le workflow |
+| Mises à jour | notifiées, non automatiques | `/api/updates/check` + carte « Version et sauvegardes » |
+| Sauvegardes | prêt | API `sqlite3.backup`, rotation, restauration refusée sous un serveur actif |
+| Diagnostic | prêt | `jarvis doctor`, rotation des journaux, `/api/version` |
+| Sécurité | auditée | 28 constats corrigés, CI `security` (bandit, pip-audit, npm audit) |
+| Intégrité des releases | SHA-256 | `SHA256SUMS` joint à chaque release, vérifié à l'installation |
+| Conteneur | prêt | image non-root, healthcheck, compose loopback |
+| macOS | non supporté | ni build ni test |
+| Signature des binaires | non | aucune clé de signature de release |
+| Interface multilingue | non | français uniquement |
+| Télémétrie / rapport de plantage | non | aucune donnée envoyée par défaut |
+
 ## Sécurité
 
 Les audits par périmètre sont dans `docs/security/` (`carbon-report.md`, `neon-report.md`,

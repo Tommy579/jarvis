@@ -10,6 +10,8 @@ Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
   rapports dans `docs/security/` et 28 constats corrigés, chacun couvert par un test.
 - CI `security` : bandit (sévérité moyenne et plus), `pip-audit`, `npm audit` ; cible `make security`.
 - Parsing RSS via `defusedxml` (XXE / entités) et révision épinglée du modèle WeSpeaker.
+- Empreinte `SHA256SUMS` jointe aux releases Linux et Windows, vérifiée à l'installation.
+- Gouvernance du dépôt : `SECURITY.md`, `CONTRIBUTING.md`, modèles d'issue et de PR, Dependabot.
 
 - Documentation : captures d'ecran reelles (accueil, conversation, configuration, mobile), FAQ de
   depannage (`docs/FAQ.md`) et script de capture reproductible (`web/scripts/capture-screenshots.mjs`).

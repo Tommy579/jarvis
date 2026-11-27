@@ -33,11 +33,15 @@ système `portaudio` doit être présent (le script d'installation s'en occupe).
 ### Option rapide — archive précompilée (sans git ni Node)
 
 ```bash
-# depuis la page Releases du dépôt GitHub
-tar -xzf jarvis-2.0.0-linux-x86_64.tar.gz
-cd jarvis-2.0.0
+# depuis la page Releases du dépôt GitHub, télécharger l'archive ET SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing   # doit afficher « OK »
+tar -xzf jarvis-2.0.1-linux-x86_64.tar.gz
+cd jarvis-2.0.1
 bash install_linux.sh
 ```
+
+Si `sha256sum` n'affiche pas `OK`, ne pas installer l'archive : retélécharger ou signaler le
+problème (voir `SECURITY.md`).
 
 L'interface web est déjà compilée dans l'archive : seuls Python 3.12 et `uv` sont nécessaires.
 Pour forcer une recompilation depuis les sources : `JARVIS_FORCE_WEB_BUILD=1 bash install_linux.sh`.

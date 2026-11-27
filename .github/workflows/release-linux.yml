@@ -36,15 +36,26 @@ jobs:
           tar -tzf dist/*.tar.gz | grep -q 'install_linux.sh'
           tar -tzf dist/*.tar.gz | grep -q 'uv.lock'
 
+      - name: Empreinte SHA-256 de l'archive
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-linux-x86_64
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           if-no-files-found: error
 
-      - name: Attacher l'archive a la release (tags uniquement)
+      - name: Attacher l'archive et l'empreinte a la release (tags uniquement)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           fail_on_unmatched_files: true
