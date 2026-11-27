@@ -12,7 +12,7 @@ from jarvis_core.llm.router import LLMRouter
 from jarvis_core.tools.approvals import ApprovalManager
 from jarvis_core.tools.registry import ToolRegistry, ToolSpec, extract_ask_flag
 from jarvis_core.tools.standard import RunCommandArgs
-from jarvis_shared.models import Message, RiskLevel, Role, StreamDelta, ToolCall, Usage
+from jarvis_shared.models import Message, RiskLevel, StreamDelta, ToolCall, Usage
 
 
 def test_extract_ask_flag_variants() -> None:
@@ -38,7 +38,10 @@ def test_run_command_without_ask_allows_all_risk_levels() -> None:
             description="Terminal",
             risk=RiskLevel.SENSITIVE,
             args_model=RunCommandArgs,
-            handler=lambda command, **_: (executed.append(command), {"ok": True, "command": command})[1],
+            handler=lambda command, **_: (
+                executed.append(command),
+                {"ok": True, "command": command},
+            )[1],
         )
     )
 
@@ -73,7 +76,10 @@ def test_run_command_with_ask_notifies_only_from_level_3() -> None:
             description="Terminal",
             risk=RiskLevel.SENSITIVE,
             args_model=RunCommandArgs,
-            handler=lambda command, **_: (executed.append(command), {"ok": True, "command": command})[1],
+            handler=lambda command, **_: (
+                executed.append(command),
+                {"ok": True, "command": command},
+            )[1],
         )
     )
 
@@ -250,7 +256,11 @@ def test_telegram_ask_command_and_minimal_alerts() -> None:
 
 
 def test_telegram_persistent_ask_and_auto_mode(tmp_path: Any) -> None:
-    from jarvis_core.api.server import JarvisCoreState, execute_telegram_command, execute_telegram_text
+    from jarvis_core.api.server import (
+        JarvisCoreState,
+        execute_telegram_command,
+        execute_telegram_text,
+    )
 
     state = JarvisCoreState(data_dir=tmp_path / "data")
     captured: list[str] = []

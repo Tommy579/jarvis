@@ -1,0 +1,42 @@
+# Secrets et donnees personnelles : ne jamais les envoyer au contexte de build
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+jarvis_profile.json
+jarvis-data/
+*.log
+
+# Environnements et caches locaux
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.hermes/
+node_modules/
+web/node_modules/
+web/test-results/
+web/playwright-report/
+web/tsconfig.tsbuildinfo
+web/dist/
+
+# Artefacts de build et de compilation
+build/
+dist/
+*.egg-info/
+src-rust/target/
+*.spec
+
+# VCS, tests et documentation (inutiles dans l'image)
+.git/
+.gitignore
+.github/
+tests/
+web/tests/
+evals/latest.json
+docs/

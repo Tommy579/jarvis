@@ -375,7 +375,11 @@ class ToolRegistry:
         )
 
         auto_approved = False
-        if effective_risk >= RiskLevel.SENSITIVE and not pre_approved and not skip_run_command_approval:
+        if (
+            effective_risk >= RiskLevel.SENSITIVE
+            and not pre_approved
+            and not skip_run_command_approval
+        ):
             if self.autonomy_policy.should_auto_approve(
                 spec.name, effective_risk, autonomous_run=autonomous_run
             ):

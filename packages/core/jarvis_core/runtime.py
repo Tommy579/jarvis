@@ -147,7 +147,9 @@ class _TelegramSender:
             )
             if int(urgency) >= 3:
                 try:
-                    voice_bytes = await asyncio.to_thread(self.gateway.synthesize_voice, clean_message)
+                    voice_bytes = await asyncio.to_thread(
+                        self.gateway.synthesize_voice, clean_message
+                    )
                     if voice_bytes:
                         await bot.send_voice(
                             chat_id=self.gateway.allowed_chat_id,

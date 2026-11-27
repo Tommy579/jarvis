@@ -5,7 +5,6 @@ from __future__ import annotations
 import glob
 import os
 import time
-from pathlib import Path
 from typing import Any
 
 import psutil

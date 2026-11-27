@@ -122,9 +122,7 @@ def test_no_process_no_logs_returns_not_running(
     assert isinstance(result["timestamp"], float)
 
 
-def test_no_process_but_recent_log_is_idle(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_no_process_but_recent_log_is_idle(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Pas de processus mais un log tres recent (< 60s) : statut idle."""
     _patch_processes(monkeypatch, [])
     _write_log(log_dir / "agy.log", "recent activity\n", age_seconds=5)
@@ -137,9 +135,7 @@ def test_no_process_but_recent_log_is_idle(
     assert "recent activity" in result["snippet"]
 
 
-def test_no_process_old_log_is_not_running(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_no_process_old_log_is_not_running(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Pas de processus et log ancien (> 60s) : statut not_running."""
     _patch_processes(monkeypatch, [])
     _write_log(log_dir / "agy.log", "old activity\n", age_seconds=600)
@@ -193,9 +189,7 @@ def test_active_process_medium_log_age_is_responded(
     assert result["status"] == "responded"
 
 
-def test_active_process_old_log_is_idle(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_active_process_old_log_is_idle(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Processus agy, log > 120s : statut idle."""
     _patch_processes(monkeypatch, [FakeProcess(pid=5046, cpu=0.0)])
     _write_log(log_dir / "agy.log", "stale\n", age_seconds=900)
@@ -240,9 +234,7 @@ def test_snippet_keeps_last_ten_significant_lines(
     assert parts[-1] == "line-20"
 
 
-def test_snippet_ignores_blank_lines(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_snippet_ignores_blank_lines(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Les lignes vides ou blanches sont filtrees du snippet."""
     _patch_processes(monkeypatch, [FakeProcess(pid=5046, cpu=0.0)])
     _write_log(log_dir / "agy.log", "alpha\n\n   \nbeta\n\n", age_seconds=1)
@@ -252,9 +244,7 @@ def test_snippet_ignores_blank_lines(
     assert result["snippet"] == "alpha | beta"
 
 
-def test_empty_log_file_gives_empty_snippet(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_empty_log_file_gives_empty_snippet(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Un log vide ne produit pas de snippet mais reste un log valide."""
     _patch_processes(monkeypatch, [FakeProcess(pid=5046, cpu=0.0)])
     _write_log(log_dir / "agy.log", "", age_seconds=1)
@@ -287,9 +277,7 @@ def test_process_iter_exceptions_are_skipped(
     assert result["status"] == "reflecting"
 
 
-def test_cpu_percent_error_does_not_crash(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_cpu_percent_error_does_not_crash(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Une erreur de lecture CPU est avalee : le pid reste detecte."""
     proc = FakeProcess(pid=5046, cpu_error=psutil.AccessDenied(pid=5046))
     _patch_processes(monkeypatch, [proc])
@@ -302,9 +290,7 @@ def test_cpu_percent_error_does_not_crash(
     assert result["status"] == "reflecting"
 
 
-def test_process_detected_via_cmdline(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_process_detected_via_cmdline(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Un processus dont le nom differe mais dont la cmdline contient 'agy' est detecte."""
     proc = FakeProcess(pid=7777, name="node", cmdline=["node", "/usr/bin/agy", "--serve"], cpu=0.0)
     _patch_processes(monkeypatch, [proc])
@@ -315,9 +301,7 @@ def test_process_detected_via_cmdline(
     assert result["pid"] == 7777
 
 
-def test_unrelated_processes_are_ignored(
-    monkeypatch: pytest.MonkeyPatch, log_dir: Path
-) -> None:
+def test_unrelated_processes_are_ignored(monkeypatch: pytest.MonkeyPatch, log_dir: Path) -> None:
     """Un processus sans 'agy' dans le nom ni la cmdline n'est pas retenu."""
     procs = [
         FakeProcess(pid=11, name="bash", cmdline=["bash", "-l"], cpu=0.0),

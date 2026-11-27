@@ -351,7 +351,9 @@ class JarvisCoreState:
         if raw_roles:
             try:
                 saved_roles = [
-                    RoleModelConfig.model_validate(item) for item in json.loads(raw_roles)
+                    RoleModelConfig.model_validate(item)
+                    for item in json.loads(raw_roles)
+                    if isinstance(item, dict) and item.get("role") != "voice_realtime"
                 ]
                 for item in saved_roles:
                     if (
@@ -1169,7 +1171,7 @@ class JarvisCoreState:
         default_provider = str(raw.get("defaults", {}).get("provider", "openrouter"))
         items: list[RoleModelConfig] = []
         for role_name, cfg in roles_raw.items():
-            if not isinstance(cfg, dict):
+            if not isinstance(cfg, dict) or role_name == "voice_realtime":
                 continue
             model_id = str(cfg.get("model", ""))
             provider = str(cfg.get("provider", default_provider))
@@ -1185,7 +1187,7 @@ class JarvisCoreState:
                         cfg.get("thinking_mode") or cfg.get("reasoning")
                     ),  # type: ignore[arg-type]
                     supports_vision=supports_vision,
-                    supports_tools=role_name != "voice_realtime",
+                    supports_tools=True,
                 )
             )
         return items
@@ -1363,6 +1365,10 @@ def _check_token(request_token: str | None) -> None:
 
 class DailyBudgetUpdate(BaseModel):
     daily_budget_usd: float = Field(ge=0.0, le=1000.0)
+
+
+class UpdateThinkingModeRequest(BaseModel):
+    mode: str = "auto"
 
 
 class WorkspaceResolveRequest(BaseModel):
@@ -1652,8 +1658,7 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
             core_state.update_role_model("agent", default_model)
             core_state.db.set_setting("telegram_terminal_mode", "auto")
             return (
-                f"Mode Auto activé (modèle : {default_model}, "
-                "commandes terminal sans approbation)."
+                f"Mode Auto activé (modèle : {default_model}, commandes terminal sans approbation)."
             )
         rt = core_state.ensure_runtime()
         if not rt.task_manager:
@@ -1751,8 +1756,8 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
             return "Orchestrateur d'objectifs indisponible."
         try:
             tg_mode = (
-                core_state.db.get_setting("telegram_terminal_mode") or "auto"
-            ).strip().lower()
+                (core_state.db.get_setting("telegram_terminal_mode") or "auto").strip().lower()
+            )
             effective_goal = (
                 f"/ask {arg}"
                 if tg_mode == "ask" and not arg.lstrip().lower().startswith("/ask")
@@ -2338,9 +2343,6 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         if agent_route and agent_route.thinking_mode != "auto":
             return {"mode": agent_route.thinking_mode}
         return {"mode": runtime.router.thinking_mode}
-
-    class UpdateThinkingModeRequest(BaseModel):
-        mode: str = "auto"
 
     @application.put("/api/models/thinking")
     def update_thinking_mode(payload: UpdateThinkingModeRequest) -> dict[str, str]:
@@ -3319,11 +3321,12 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         assert runtime.mcp_manager is not None
         return await runtime.mcp_manager.connect_enabled_servers()
 
-
     @application.get("/api/antigravity/status")
     def get_antigravity_status_endpoint() -> dict[str, Any]:
         from ..tools.antigravity_status import get_antigravity_status
+
         return get_antigravity_status()
+
     # === WebSocket ===
 
     @application.websocket("/ws")
