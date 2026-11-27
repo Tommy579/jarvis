@@ -645,3 +645,30 @@ async def test_telegram_strict_auth_size_limits_parse_mode_and_log_redaction(
         cleaned_err = redact_telegram_secrets(raw_err, token)
     assert token not in cleaned_err
     assert "SECRET_TG_TOKEN" not in cleaned_err
+
+
+def test_tts_sends_api_key_in_header_and_never_logs_secrets(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import httpx
+    from jarvis_core.tts import synthesize_gemini_tts_wav
+
+    secret_key = "AIzaSySecretKeyLeakTest987654321"
+    captured_calls: list[dict] = []
+
+    def _fake_post(url: str, **kwargs):
+        captured_calls.append({"url": url, **kwargs})
+        raise httpx.ConnectError(f"Connection failed for {url}?key={secret_key}")
+
+    monkeypatch.setattr("jarvis_core.tts.httpx.post", _fake_post)
+
+    with caplog.at_level(logging.DEBUG, logger="jarvis.tts"):
+        out = synthesize_gemini_tts_wav("Bonjour", api_key=secret_key)
+
+    assert out is None
+    assert len(captured_calls) == 1
+    assert "params" not in captured_calls[0] or "key" not in (captured_calls[0].get("params") or {})
+    assert (captured_calls[0].get("headers") or {}).get("x-goog-api-key") == secret_key
+    assert secret_key not in caplog.text
