@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +18,7 @@ from jarvis_core.backup import (
     list_backups,
     restore_database,
 )
-from jarvis_core.doctor import collect_checks, worst_status
+from jarvis_core.doctor import collect_checks, is_service_running, worst_status
 from jarvis_core.scheduler.routines import RoutineScheduler
 from jarvis_core.updates import is_newer
 from jarvis_shared.version import app_version
@@ -169,3 +170,30 @@ def test_version_comparison() -> None:
     assert not is_newer("2.0.0", "2.0.0")
     assert not is_newer("1.9.9", "2.0.0")
     assert not is_newer("", "2.0.0")
+
+
+def test_is_service_running_detects_listener() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = int(server.getsockname()[1])
+        assert is_service_running(port) is True
+    assert is_service_running(port) is False
+
+
+def test_restore_refuses_while_service_runs(tmp_path: Path, monkeypatch) -> None:
+    from jarvis_core import cli as cli_module
+    from jarvis_core import doctor as doctor_module
+
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path))
+    db_path = tmp_path / "jarvis.db"
+    _create_database(db_path, "ancien")
+    target = backup_database(db_path, tmp_path / "backups")
+    _create_database(db_path, "nouveau")
+
+    monkeypatch.setattr(doctor_module, "is_service_running", lambda *args, **kwargs: True)
+    assert cli_module.main(["backup", "restore", target.name, "--yes"]) == 1
+    assert _note(db_path) == "nouveau"
+
+    assert cli_module.main(["backup", "restore", target.name, "--yes", "--force"]) == 0
+    assert _note(db_path) == "ancien"
