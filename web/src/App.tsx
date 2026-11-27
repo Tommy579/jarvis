@@ -1138,6 +1138,9 @@ export function App() {
         data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
         data-sphere-state={sphereState}
       >
+        <a className="skip-link" href="#main-content">
+          Aller au contenu principal
+        </a>
         <aside className="sidebar">
           <div className="sidebar__header">
             <div className="sidebar__top">
@@ -1220,7 +1223,7 @@ export function App() {
           </div>
         </aside>
 
-        <main className="main">
+        <main className="main" id="main-content" tabIndex={-1}>
           {sidebarCollapsed && (
             <button
               type="button"

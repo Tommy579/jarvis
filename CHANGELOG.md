@@ -2,6 +2,16 @@
 
 Format inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/).
 
+## [Non publie]
+
+### Ajoute
+
+- Documentation : captures d'ecran reelles (accueil, conversation, configuration, mobile), FAQ de
+  depannage (`docs/FAQ.md`) et script de capture reproductible (`web/scripts/capture-screenshots.mjs`).
+- Accessibilite : lien d'evitement « Aller au contenu principal » et cible `#main-content`.
+- Serveur de simulation : endpoints `/api/version`, `/api/backups`, `/api/doctor`,
+  `/api/updates/check` et `/api/system/autostart` pour des captures et tests fideles.
+
 ## [2.0.1] - 2026-11-27
 
 ### Ajoute

@@ -300,6 +300,26 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+db.backups = {
+  directory: "/tmp/jarvis-mock/backups",
+  keep: 7,
+  last_backup_at: new Date(Date.now() - 26 * 3600 * 1000).toISOString(),
+  backups: [
+    {
+      name: "jarvis-20261126T032000Z.db",
+      size_bytes: 245760,
+      created_at: new Date(Date.now() - 26 * 3600 * 1000).toISOString(),
+    },
+  ],
+};
+
+db.autostart = {
+  enabled: true,
+  supported: true,
+  desktop_file: "~/.config/autostart/JarvisAssistant.desktop",
+  detail: "Active au demarrage de la session.",
+};
+
 const clients = new Set();
 function broadcast(msg) {
   const raw = JSON.stringify(msg);
@@ -323,6 +343,65 @@ const server = http.createServer(async (req, res) => {
   const p = url.pathname;
 
   if (p === "/api/health") return sendJson(res, 200, { status: "ok", mode: "mock" });
+  if (p === "/api/version" && req.method === "GET") {
+    return sendJson(res, 200, {
+      version: "2.0.1",
+      schema_version: 5,
+      python: "3.12.13",
+      platform: "Linux (mock)",
+      data_dir: "/tmp/jarvis-mock",
+      started_at: new Date(Date.now() - 3_600_000).toISOString(),
+      uptime_seconds: 3600,
+    });
+  }
+  if (p === "/api/updates/check" && req.method === "GET") {
+    return sendJson(res, 200, {
+      current_version: "2.0.1",
+      latest_version: "2.0.1",
+      update_available: false,
+      release_url: null,
+      published_at: null,
+      checked_at: new Date().toISOString(),
+      detail: "",
+    });
+  }
+  if (p === "/api/backups" && req.method === "GET") return sendJson(res, 200, db.backups);
+  if (p === "/api/backups" && req.method === "POST") {
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[-:]/g, "").slice(0, 15);
+    db.backups = {
+      ...db.backups,
+      last_backup_at: now.toISOString(),
+      backups: [
+        { name: `jarvis-${stamp}Z.db`, size_bytes: 262144, created_at: now.toISOString() },
+        ...db.backups.backups,
+      ],
+    };
+    return sendJson(res, 200, db.backups);
+  }
+  if (p === "/api/doctor" && req.method === "GET") {
+    const checks = [
+      { name: "python", status: "ok", detail: "3.12.13" },
+      { name: "environnement", status: "ok", detail: "venv de simulation" },
+      { name: "fichier .env", status: "ok", detail: "present, permissions 600." },
+      { name: "cle LLM", status: "ok", detail: "OPENROUTER_API_KEY" },
+      { name: "donnees", status: "ok", detail: "/tmp/jarvis-mock accessible en ecriture." },
+      { name: "base memoire", status: "ok", detail: "Intege, schema v5." },
+      { name: "sauvegardes", status: "ok", detail: "jarvis-20261126T032000Z.db, il y a 26.0 h." },
+      { name: "interface web", status: "ok", detail: "web/dist compile." },
+      { name: "port 8765", status: "ok", detail: "service actif sur 127.0.0.1:8765." },
+      { name: "espace disque", status: "ok", detail: "42.0 Go libres." },
+    ];
+    return sendJson(res, 200, { status: "ok", report: "", checks });
+  }
+  if (p === "/api/system/autostart" && req.method === "GET") {
+    return sendJson(res, 200, db.autostart);
+  }
+  if (p === "/api/system/autostart" && req.method === "PUT") {
+    const body = await readBody(req);
+    db.autostart = { ...db.autostart, enabled: Boolean(body?.enabled) };
+    return sendJson(res, 200, db.autostart);
+  }
   if (p === "/api/messages" && req.method === "GET") return sendJson(res, 200, db.messages);
   if (p === "/api/facts" && req.method === "GET") {
     const q = (url.searchParams.get("q") || "").toLowerCase();
