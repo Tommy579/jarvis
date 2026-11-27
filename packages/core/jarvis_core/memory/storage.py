@@ -78,9 +78,15 @@ class MemoryStorage:
     def insert_fact(self, fact: Fact, embedding: list[float]) -> Fact:
         blob = _pack_vector(embedding) if embedding else None
         sql = (
-            "INSERT OR REPLACE INTO facts (id, subject, predicate, object, text, category, "
+            "INSERT INTO facts (id, subject, predicate, object, text, category, "
             "confidence, source, sensitivity, embedding_json, embedding, created_at, updated_at, "
-            "last_used_at, superseded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "last_used_at, superseded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET subject = excluded.subject, predicate = excluded.predicate, "
+            "object = excluded.object, text = excluded.text, category = excluded.category, "
+            "confidence = excluded.confidence, source = excluded.source, sensitivity = excluded.sensitivity, "
+            "embedding_json = excluded.embedding_json, embedding = excluded.embedding, "
+            "updated_at = excluded.updated_at, last_used_at = COALESCE(excluded.last_used_at, facts.last_used_at), "
+            "superseded_by = excluded.superseded_by"
         )
         self._exec(
             sql,
@@ -210,21 +216,7 @@ class MemoryStorage:
         return event
 
     def insert_notification(self, notif: NotificationRecord) -> NotificationRecord:
-        self._exec(
-            "INSERT OR REPLACE INTO notifications (id, ts, channel, urgency, message, reason, dedup_key, status, acked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                notif.id,
-                notif.ts,
-                notif.channel,
-                int(notif.urgency),
-                notif.message,
-                notif.reason,
-                notif.dedup_key,
-                notif.status,
-                notif.acked_at,
-            ),
-        )
+        self.db.insert_notification(notif)
         return notif
 
     def log_llm_call(self, role: str, usage: Usage) -> None:
@@ -245,10 +237,16 @@ class MemoryStorage:
             ),
         )
 
-    def get_today_spend_usd(self) -> float:
+    def get_today_spend_usd(self, provider: str | None = None) -> float:
         today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        rows = self._fetchall(
-            "SELECT COALESCE(SUM(cost), 0.0) AS total FROM llm_calls WHERE ts LIKE ?",
-            (f"{today_prefix}%",),
-        )
+        if provider:
+            rows = self._fetchall(
+                "SELECT COALESCE(SUM(cost), 0.0) AS total FROM llm_calls WHERE ts LIKE ? AND provider = ?",
+                (f"{today_prefix}%", provider),
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT COALESCE(SUM(cost), 0.0) AS total FROM llm_calls WHERE ts LIKE ?",
+                (f"{today_prefix}%",),
+            )
         return float(rows[0]["total"] if rows else 0.0)

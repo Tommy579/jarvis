@@ -33,7 +33,7 @@ class WeatherTransportIntegration(BaseIntegration):
         self.connected = True
 
     def tools(self) -> list[str]:
-        return ["weather_forecast", "transport_departures", "rss_headlines"]
+        return []
 
     async def fetch_weather(self) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=10.0) as client:

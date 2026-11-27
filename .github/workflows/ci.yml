@@ -42,8 +42,8 @@ jobs:
           pip install -e packages/shared -e packages/core -e packages/desktop pytest pytest-asyncio ruff
       - name: Lint and format check
         run: |
-          ruff check packages tests packaging
-          ruff format --check packages tests packaging
+          ruff check packages tests packaging evals
+          ruff format --check packages tests packaging evals
       - name: Run pytest
         run: pytest tests -q
       - name: Run eval harness
@@ -74,3 +74,34 @@ jobs:
         run: |
           cd web
           npx playwright test
+
+  # Verifie l'image de production : build multi-etapes, demarrage sans .env
+  # (mode non securise en loopback) et reponse de /api/health.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Construire l'image
+        run: docker build -t jarvis:ci .
+      - name: Demarrer le conteneur et verifier /api/health
+        run: |
+          docker run -d --name jarvis-ci \
+            -e JARVIS_ALLOW_INSECURE=1 \
+            -e JARVIS_DATA_DIR=/tmp/jarvis-data \
+            -p 127.0.0.1:8765:8765 \
+            jarvis:ci
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8765/api/health; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then
+            docker logs jarvis-ci
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8765/api/health
+          echo
+      - name: Journaux en cas d'echec
+        if: failure()
+        run: docker logs jarvis-ci || true

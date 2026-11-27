@@ -1,13 +1,15 @@
 import { useEffect, useRef } from "react";
 import type { MotionValue } from "motion/react";
-import type { JarvisTheme } from "../store/useJarvisStore";
+import { useJarvisStore, type JarvisTheme } from "../store/useJarvisStore";
 import type { SphereState } from "../types/generated";
+import type { AudioEngine } from "./AudioEngine";
 import { getStateVisualConfig } from "./stateVisuals";
 
 interface SphereFallback2DProps {
   sphereState: SphereState;
   theme: JarvisTheme;
   amplitude: number;
+  audioEngine?: AudioEngine;
   reducedMotion: boolean;
   pointerX?: MotionValue<number>;
   pointerY?: MotionValue<number>;
@@ -17,11 +19,30 @@ export function SphereFallback2D({
   sphereState,
   theme,
   amplitude,
+  audioEngine,
   reducedMotion,
   pointerX,
   pointerY,
 }: SphereFallback2DProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const propsRef = useRef({
+    sphereState,
+    theme,
+    amplitude,
+    audioEngine,
+    reducedMotion,
+    pointerX,
+    pointerY,
+  });
+  propsRef.current = {
+    sphereState,
+    theme,
+    amplitude,
+    audioEngine,
+    reducedMotion,
+    pointerX,
+    pointerY,
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -30,11 +51,27 @@ export function SphereFallback2D({
     if (!ctx) return;
 
     let rafId = 0;
+    let isVisible = true;
     const start = performance.now();
+    let lastNow = start;
 
     const draw = (now: number) => {
+      const {
+        sphereState: curState,
+        theme: curTheme,
+        amplitude: propAmp,
+        audioEngine: engine,
+        reducedMotion: reduced,
+        pointerX: ptrX,
+        pointerY: ptrY,
+      } = propsRef.current;
+      const dtMs = Math.min(100, Math.max(0, now - lastNow));
+      lastNow = now;
+      const curAmplitude = engine
+        ? engine.sample(dtMs, useJarvisStore.getState().micLevel).amplitude
+        : propAmp;
       const elapsed = (now - start) / 1000;
-      const cfg = getStateVisualConfig(sphereState, theme);
+      const cfg = getStateVisualConfig(curState, curTheme);
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = canvas.clientWidth || 320;
       const h = canvas.clientHeight || 320;
@@ -47,13 +84,13 @@ export function SphereFallback2D({
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, w, h);
 
-      const motionMul = reducedMotion || sphereState === "offline" ? 0 : 1;
-      const px = motionMul ? (pointerX?.get() ?? 0) : 0;
-      const py = motionMul ? (pointerY?.get() ?? 0) : 0;
+      const motionMul = reduced || curState === "offline" ? 0 : 1;
+      const px = motionMul ? (ptrX?.get() ?? 0) : 0;
+      const py = motionMul ? (ptrY?.get() ?? 0) : 0;
 
-      const isSpeaking = sphereState === "speaking";
+      const isSpeaking = curState === "speaking";
       const speechVibe = isSpeaking
-        ? (Math.sin(elapsed * 42.0) * 0.04 + (amplitude || 0.35) * 0.1) * motionMul
+        ? (Math.sin(elapsed * 42.0) * 0.04 + (curAmplitude || 0.35) * 0.1) * motionMul
         : 0;
 
       const cx = w / 2 + px * 2.5;
@@ -61,7 +98,7 @@ export function SphereFallback2D({
       const pulse =
         motionMul *
         (Math.sin(elapsed * cfg.noiseSpeed * 2.2) * 5 +
-          amplitude * 22 +
+          curAmplitude * 22 +
           speechVibe * 60 +
           (isSpeaking ? Math.sin(elapsed * 28.0) * 7 : 0));
       const baseRadius = Math.min(w, h) * 0.34 + pulse;
@@ -112,25 +149,39 @@ export function SphereFallback2D({
       }
 
       ctx.restore();
-      if (!document.hidden && !reducedMotion) {
+      if (!document.hidden && isVisible && !reduced) {
+        rafId = requestAnimationFrame(draw);
+      }
+    };
+
+    const restartLoop = () => {
+      cancelAnimationFrame(rafId);
+      if (!document.hidden && isVisible && !propsRef.current.reducedMotion) {
+        lastNow = performance.now();
         rafId = requestAnimationFrame(draw);
       }
     };
 
     rafId = requestAnimationFrame(draw);
-    const onVisibility = () => {
-      if (!document.hidden && !reducedMotion) {
-        cancelAnimationFrame(rafId);
-        rafId = requestAnimationFrame(draw);
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
+    document.addEventListener("visibilitychange", restartLoop);
+    let observer: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== "undefined") {
+      observer = new IntersectionObserver(
+        ([entry]) => {
+          isVisible = entry ? entry.isIntersecting : true;
+          restartLoop();
+        },
+        { threshold: 0.01 }
+      );
+      observer.observe(canvas);
+    }
 
     return () => {
       cancelAnimationFrame(rafId);
-      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("visibilitychange", restartLoop);
+      observer?.disconnect();
     };
-  }, [sphereState, theme, amplitude, reducedMotion, pointerX, pointerY]);
+  }, []);
 
   return (
     <canvas

@@ -25,7 +25,7 @@ class RoutineScheduler:
     ) -> None:
         self.scheduler.add_job(
             morning_briefing,
-            CronTrigger(hour=7, minute=30, timezone=self.timezone),
+            CronTrigger(hour=8, minute=5, timezone=self.timezone),
             id="morning_briefing",
             replace_existing=True,
         )

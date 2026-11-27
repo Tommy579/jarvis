@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Literal
 
@@ -100,11 +101,16 @@ class IntegrationToolkit:
             return {"ok": False, "error": "Aucun compte mail connecte (Gmail ou Outlook)."}
         if isinstance(connector, GmailIntegration):
             raw = await connector.list_messages(query=args.query, max_results=args.max_results)
-            detailed = [
-                await connector.get_message(m["id"]) for m in raw[: args.max_results] if m.get("id")
-            ]
-            return {"ok": True, "provider": prov, "messages": detailed}
-        raw = await connector.list_messages(max_results=args.max_results)
+            sem = asyncio.Semaphore(5)
+
+            async def _fetch_one(msg_id: str) -> dict[str, Any]:
+                async with sem:
+                    return await connector.get_message(msg_id)
+
+            ids = [str(m["id"]) for m in raw[: args.max_results] if m.get("id")]
+            detailed = await asyncio.gather(*(_fetch_one(mid) for mid in ids)) if ids else []
+            return {"ok": True, "provider": prov, "messages": list(detailed)}
+        raw = await connector.list_messages(max_results=args.max_results, query=args.query)
         return {"ok": True, "provider": prov, "messages": raw}
 
     async def mail_draft(self, args: MailComposeArgs) -> dict[str, Any]:
@@ -123,29 +129,49 @@ class IntegrationToolkit:
 
     async def calendar_list_events(self, args: CalendarListArgs) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
+        errors: dict[str, str] = {}
         g_tok = self._google_token()
         m_tok = self._microsoft_token()
         a_url = self._apple_ics_url()
 
+        requested_available = False
         if args.provider in ("auto", "google") and g_tok:
-            items = await GoogleCalendarIntegration(
-                access_token=g_tok, enabled=True
-            ).list_upcoming_events(max_results=args.max_results)
-            events.extend({"provider": "google", **ev} for ev in items)
+            requested_available = True
+            try:
+                items = await GoogleCalendarIntegration(
+                    access_token=g_tok, enabled=True
+                ).list_upcoming_events(max_results=args.max_results)
+                events.extend({"provider": "google", **ev} for ev in items)
+            except Exception as exc:
+                errors["google"] = str(exc)
         if args.provider in ("auto", "outlook") and m_tok:
-            items = await OutlookCalendarIntegration(
-                access_token=m_tok, enabled=True
-            ).list_upcoming_events(max_results=args.max_results)
-            events.extend({"provider": "outlook", **ev} for ev in items)
+            requested_available = True
+            try:
+                items = await OutlookCalendarIntegration(
+                    access_token=m_tok, enabled=True
+                ).list_upcoming_events(max_results=args.max_results)
+                events.extend({"provider": "outlook", **ev} for ev in items)
+            except Exception as exc:
+                errors["outlook"] = str(exc)
         if args.provider in ("auto", "apple") and a_url:
-            items = await AppleCalendarIntegration(
-                ics_url=a_url, enabled=True
-            ).list_upcoming_events(max_results=args.max_results)
-            events.extend({"provider": "apple", **ev} for ev in items)
+            requested_available = True
+            try:
+                items = await AppleCalendarIntegration(
+                    ics_url=a_url, enabled=True
+                ).list_upcoming_events(max_results=args.max_results)
+                events.extend({"provider": "apple", **ev} for ev in items)
+            except Exception as exc:
+                errors["apple"] = str(exc)
 
-        if not (g_tok or m_tok or a_url):
-            return {"ok": False, "error": "Aucun agenda connecte (Google, Outlook ou Apple)."}
-        return {"ok": True, "events": events[: args.max_results]}
+        if not requested_available:
+            label = args.provider if args.provider != "auto" else "Google, Outlook ou Apple"
+            return {"ok": False, "error": f"Aucun agenda connecte ({label})."}
+
+        events.sort(key=lambda ev: str(ev.get("start") or ""))
+        out: dict[str, Any] = {"ok": True, "events": events[: args.max_results]}
+        if errors:
+            out["partial_errors"] = errors
+        return out
 
     async def calendar_create_event(self, args: CalendarCreateArgs) -> dict[str, Any]:
         g_tok = self._google_token()
@@ -168,7 +194,8 @@ class IntegrationToolkit:
 
     async def trading_status(self, args: TradingStatusArgs) -> dict[str, Any]:
         """Lit l'etat du TraderBot (positions, equite, historique des cycles et audit)."""
-        return read_trading_status(
+        return await asyncio.to_thread(
+            read_trading_status,
             history_limit=args.history_limit,
             audit_limit=args.audit_limit,
         )
@@ -232,22 +259,15 @@ class IntegrationToolkit:
             ),
         ]
         for name, desc, args_model, handler, risk, returns_untrusted, untrusted_source in specs:
-
-            def _make(h: Any, model: type[BaseModel]) -> Any:
-                async def _w(**kwargs: Any) -> dict[str, Any]:
-                    parsed = kwargs if isinstance(kwargs, model) else model.model_validate(kwargs)
-                    return await h(parsed)
-
-                return _w
-
             registry.register(
                 ToolSpec(
                     name=name,
                     description=desc,
-                    handler=_make(handler, args_model),
+                    handler=handler,
                     args_model=args_model,
                     risk=risk,
                     returns_untrusted=returns_untrusted,
                     untrusted_source=untrusted_source,
+                    pass_model=True,
                 )
             )

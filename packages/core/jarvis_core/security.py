@@ -1,44 +1,71 @@
-"""Securite reseau, gestion des secrets, jetons d'action et sauvegardes restic."""
+"""Securite reseau (SSRF), balisage anti-injection, secrets, jetons d'action et rate-limiting."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import ipaddress
-import json
 import os
-import secrets
-import subprocess
+import re
+import socket
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any
+from urllib.parse import urlparse
 
-TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+_UNTRUSTED_TAG_RE = re.compile(r"</?\s*untrusted\b[^>]*>", re.IGNORECASE)
 
 
-def is_allowed_bind_or_peer_ip(host: str) -> bool:
-    """Autorise uniquement localhost et les adresses Tailscale (100.64.0.0/10)."""
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return True
+def wrap_untrusted_content(source: str, content: str) -> str:
+    """Encadre tout contenu externe (mail, web, OCR ecran, audio) dans une balise <untrusted>."""
+    safe_source = re.sub(r"[^a-zA-Z0-9_.\-:]", "_", source or "external")
+    sanitized = _UNTRUSTED_TAG_RE.sub(
+        lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"),
+        str(content),
+    )
+    return f'<untrusted source="{safe_source}">\n{sanitized}\n</untrusted>'
+
+
+def is_forbidden_ip_address(ip_str: str, *, allow_private: bool = False) -> bool:
+    """Retourne True si l'adresse IP cible loopback, link-local, metadata, multicast ou prive."""
     try:
-        addr = ipaddress.ip_address(host)
-        if addr.is_loopback:
-            return True
-        if isinstance(addr, ipaddress.IPv4Address) and addr in TAILSCALE_NETWORK:
-            return True
+        ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        pass
+        return True
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+        return True
+    if not allow_private and ip.is_private:
+        return True
     return False
 
 
-def get_allowed_bind_hosts(extra_tailscale_ip: str | None = None) -> list[str]:
-    """Retourne la liste des adresses d'ecoute autorisees pour jarvis-core."""
-    hosts = ["127.0.0.1"]
-    if extra_tailscale_ip and is_allowed_bind_or_peer_ip(extra_tailscale_ip):
-        if extra_tailscale_ip not in hosts:
-            hosts.append(extra_tailscale_ip)
-    return hosts
+def validate_http_target_host(url: str, *, allow_private: bool = False) -> tuple[bool, str | None]:
+    """Valide qu'une URL HTTP(S) ne resout pas vers une adresse IP locale ou interdite (SSRF)."""
+    cleaned = _CTRL_CHARS_RE.sub("", (url or "")).strip()
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False, "Seules les URLs http:// ou https:// valides sont autorisees."
+    host = parsed.hostname.strip().lower().strip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False, f"Hote local interdit ({host})."
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if is_forbidden_ip_address(host, allow_private=allow_private):
+            return False, f"Adresse IP locale ou reservee interdite ({host})."
+        return True, None
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror:
+        return True, None
+    for info in infos:
+        addr = info[4][0]
+        if is_forbidden_ip_address(str(addr), allow_private=allow_private):
+            return False, f"Resolution DNS vers adresse IP locale/interdite ({host} -> {addr})."
+    return True, None
 
 
 class SecretStore:
@@ -51,7 +78,6 @@ class SecretStore:
         )
 
     def get_secret(self, name: str, default: str = "") -> str:
-        # 1. systemd-creds
         cred_file = self.credentials_dir / name
         if cred_file.is_file():
             try:
@@ -59,7 +85,6 @@ class SecretStore:
             except OSError:
                 pass
 
-        # 2. Trousseau systeme (keyring / KWallet)
         try:
             import keyring  # type: ignore
 
@@ -69,7 +94,6 @@ class SecretStore:
         except Exception:
             pass
 
-        # 3. Variable d'environnement (.env en developpement)
         return os.environ.get(name, default).strip()
 
     def set_secret(self, name: str, value: str) -> bool:
@@ -83,66 +107,6 @@ class SecretStore:
             return False
 
 
-class TokenAuthManager:
-    """Appairage d'appareils (desktop, web, PWA mobile) par jeton hashé SHA-256."""
-
-    def __init__(self, storage_path: Path | None = None):
-        self.storage_path = storage_path
-        self._tokens: dict[str, dict[str, Any]] = {}
-        if self.storage_path and self.storage_path.exists():
-            self._load()
-
-    def _hash(self, raw_token: str) -> str:
-        return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-
-    def _load(self) -> None:
-        if not self.storage_path or not self.storage_path.exists():
-            return
-        try:
-            self._tokens = json.loads(self.storage_path.read_text(encoding="utf-8"))
-        except Exception:
-            self._tokens = {}
-
-    def _save(self) -> None:
-        if not self.storage_path:
-            return
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        self.storage_path.write_text(json.dumps(self._tokens, indent=2), encoding="utf-8")
-
-    def issue_token(self, device_name: str, scopes: list[str] | None = None) -> str:
-        raw_token = f"jarvis_{secrets.token_urlsafe(32)}"
-        token_hash = self._hash(raw_token)
-        self._tokens[token_hash] = {
-            "device_name": device_name,
-            "scopes": scopes or ["ws", "rest"],
-            "created_at": time.time(),
-            "revoked": False,
-        }
-        self._save()
-        return raw_token
-
-    def verify_token(self, raw_token: str | None, required_scope: str | None = None) -> bool:
-        if not raw_token:
-            return False
-        token_hash = self._hash(raw_token)
-        record = self._tokens.get(token_hash)
-        if not record or record.get("revoked"):
-            return False
-        if required_scope and required_scope not in record.get("scopes", []):
-            return False
-        return True
-
-    def revoke_device(self, device_name: str) -> int:
-        count = 0
-        for rec in self._tokens.values():
-            if rec.get("device_name") == device_name and not rec.get("revoked"):
-                rec["revoked"] = True
-                count += 1
-        if count:
-            self._save()
-        return count
-
-
 def sign_action_token(secret: str, approval_id: str, action: str, ttl: int = 900) -> str:
     """Signe un jeton d'action HMAC (ex. approbation par SMS/ntfy) avec TTL."""
     expires_at = int(time.time()) + ttl
@@ -152,7 +116,7 @@ def sign_action_token(secret: str, approval_id: str, action: str, ttl: int = 900
 
 
 def verify_action_token(secret: str, token: str) -> tuple[str, str] | None:
-    """Vérifie un jeton d'action. Retourne (approval_id, action) ou None si invalide ou expiré."""
+    """Verifie un jeton d'action. Retourne (approval_id, action) ou None si invalide ou expire."""
     if not secret or not token:
         return None
     parts = token.split(":")
@@ -192,50 +156,3 @@ class SlidingWindowRateLimiter:
             return False
         q.append(ts)
         return True
-
-
-class ResticBackupManager:
-    """Sauvegarde quotidienne chiffree de ~/jarvis-data vers un depot restic."""
-
-    def __init__(
-        self, data_dir: Path, repo_url: str, password_secret_name: str = "RESTIC_PASSWORD"
-    ):
-        self.data_dir = data_dir
-        self.repo_url = repo_url
-        self.password_secret_name = password_secret_name
-
-    def build_backup_command(self) -> list[str]:
-        return [
-            "restic",
-            "-r",
-            self.repo_url,
-            "backup",
-            str(self.data_dir),
-            "--tag",
-            "jarvis-daily",
-            "--exclude",
-            "*.tmp",
-        ]
-
-    def run_backup(self, secret_store: SecretStore, timeout: int = 300) -> dict[str, Any]:
-        password = secret_store.get_secret(self.password_secret_name)
-        if not password:
-            return {"ok": False, "error": "Mot de passe restic introuvable dans SecretStore."}
-        env = os.environ.copy()
-        env["RESTIC_PASSWORD"] = password
-        try:
-            proc = subprocess.run(
-                self.build_backup_command(),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return {
-                "ok": proc.returncode == 0,
-                "exit_code": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}

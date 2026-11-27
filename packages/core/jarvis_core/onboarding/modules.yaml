@@ -154,7 +154,7 @@ modules:
 
   - id: regles_jarvis
     title: Regles pour Jarvis
-    description: Seuils d'appel, ton de reponse et limites strictes.
+    description: Seuils d'alerte critique, ton de reponse et limites strictes.
     questions:
       - id: tone_preference
         field_key: tone_preference
@@ -166,5 +166,5 @@ modules:
         field_key: call_triggers
         category: regles
         sensitivity: normal
-        prompt: Quelles situations justifient un appel telephonique immediat ?
+        prompt: Quelles situations justifient une interruption ou alerte critique immediate (meme la nuit) ?
         placeholder: Panne serveur en production, urgence familiale

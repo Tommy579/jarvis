@@ -245,7 +245,7 @@ class SubagentStatusPayload(BaseModel):
     role_profile: str = "general"
     status: str
     iterations: int = 0
-    max_iterations: int = 20
+    max_iterations: int = 0
     cost_usd: float = 0.0
     last_tool: str = ""
     error: str | None = None

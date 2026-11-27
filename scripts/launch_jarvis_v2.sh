@@ -53,6 +53,7 @@ if [ -z "$TOKEN" ]; then
     TOKEN="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(32))')" ||
         fail "Generation du jeton impossible."
     touch "$ENV_FILE" || fail "Impossible d'ecrire dans $ENV_FILE."
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
     if grep -qE '^JARVIS_API_TOKEN=' "$ENV_FILE"; then
         sed -i "s|^JARVIS_API_TOKEN=.*|JARVIS_API_TOKEN=${TOKEN}|" "$ENV_FILE"
     else
@@ -91,7 +92,10 @@ if [[ "${1:-}" == "--backend-only" ]]; then
     exit 0
 fi
 
-if command -v chromium >/dev/null 2>&1; then
+if [ -x /usr/lib/chromium/chromium ]; then
+    exec /usr/lib/chromium/chromium --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/chromium-jarvis" \
+        --app="$APP_URL" --window-size="$JARVIS_WINDOW_SIZE"
+elif command -v chromium >/dev/null 2>&1; then
     exec chromium --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/chromium-jarvis" \
         --app="$APP_URL" --window-size="$JARVIS_WINDOW_SIZE"
 elif command -v google-chrome-stable >/dev/null 2>&1; then

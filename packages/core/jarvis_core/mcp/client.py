@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,59 @@ from jarvis_shared.models import RiskLevel
 from pydantic import BaseModel, ConfigDict, create_model
 
 from jarvis_core.tools.registry import ToolRegistry, ToolSpec
+
+_MCP_SAFE_ENV_KEYS: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "NODE_PATH",
+    "NPM_CONFIG_CACHE",
+)
+
+_MAX_MCP_MESSAGE_BYTES = 16 * 1024 * 1024
+
+_DANGEROUS_PLAYWRIGHT_FRAGMENTS: tuple[str, ...] = (
+    "eval",
+    "run_code",
+    "exec",
+    "script",
+    "upload",
+    "file",
+    "install",
+    "download",
+    "shell",
+    "command",
+)
+
+
+def _is_safe_playwright_ui_tool(raw_name: str) -> bool:
+    low = (raw_name or "").strip().lower()
+    if not low:
+        return False
+    return not any(frag in low for frag in _DANGEROUS_PLAYWRIGHT_FRAGMENTS)
+
+
+_PYDANTIC_RESERVED_ATTRS: frozenset[str] = frozenset(dir(BaseModel)) | {
+    "model_config",
+    "model_fields",
+    "model_computed_fields",
+    "model_extra",
+    "model_fields_set",
+}
 
 
 @dataclass
@@ -39,18 +93,36 @@ class MCPStdioConnection:
         self.config = config
         self.timeout_seconds = timeout_seconds
         self._proc: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_ring: deque[str] = deque(maxlen=50)
         self._lock = asyncio.Lock()
         self._next_id = 1
         self.connected = False
         self.last_error: str | None = None
 
+    async def _drain_stderr(self, stream: asyncio.StreamReader) -> None:
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    self._stderr_ring.append(text[:500])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
     async def start(self) -> None:
         if not self.config.command:
             raise RuntimeError(f"Commande manquante pour le serveur MCP '{self.config.name}'.")
-        proc_env = os.environ.copy()
+        # N'expose jamais les secrets JARVIS de os.environ aux sous-processus MCP
+        proc_env = {k: os.environ[k] for k in _MCP_SAFE_ENV_KEYS if k in os.environ}
         for k, v in self.config.env.items():
             proc_env[str(k)] = str(v)
 
+        self._stderr_ring.clear()
         self._proc = await asyncio.create_subprocess_exec(
             self.config.command,
             *self.config.args,
@@ -58,7 +130,10 @@ class MCPStdioConnection:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=proc_env,
+            limit=_MAX_MCP_MESSAGE_BYTES,
         )
+        if self._proc.stderr is not None:
+            self._stderr_task = asyncio.create_task(self._drain_stderr(self._proc.stderr))
         init_res = await self.request(
             "initialize",
             {
@@ -74,6 +149,13 @@ class MCPStdioConnection:
 
     async def stop(self) -> None:
         self.connected = False
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._stderr_task = None
         proc = self._proc
         self._proc = None
         if proc is None:
@@ -92,28 +174,28 @@ class MCPStdioConnection:
                 await proc.wait()
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        if not self._proc or not self._proc.stdin:
-            raise RuntimeError(f"Serveur MCP '{self.config.name}' non connecte.")
-        msg = {"jsonrpc": "2.0", "method": method, "params": params or {}}
-        line = (json.dumps(msg) + "\n").encode("utf-8")
-        self._proc.stdin.write(line)
-        await self._proc.stdin.drain()
+        async with self._lock:
+            if not self._proc or not self._proc.stdin:
+                raise RuntimeError(f"Serveur MCP '{self.config.name}' non connecte.")
+            msg = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+            line = (json.dumps(msg) + "\n").encode("utf-8")
+            self._proc.stdin.write(line)
+            await self._proc.stdin.drain()
 
-    async def _read_message(self) -> dict[str, Any]:
+    async def _read_message(self, deadline: float) -> dict[str, Any]:
         if not self._proc or not self._proc.stdout:
+            self.connected = False
             raise RuntimeError(f"Serveur MCP '{self.config.name}' ferme.")
+        loop = asyncio.get_running_loop()
         while True:
-            raw_line = await asyncio.wait_for(
-                self._proc.stdout.readline(), timeout=self.timeout_seconds
-            )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                self.connected = False
+                raise TimeoutError(f"Delai depasse en lecture MCP '{self.config.name}'.")
+            raw_line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=remaining)
             if not raw_line:
-                stderr_hint = ""
-                if self._proc.stderr:
-                    try:
-                        err_b = await asyncio.wait_for(self._proc.stderr.read(1024), timeout=0.2)
-                        stderr_hint = err_b.decode("utf-8", errors="replace").strip()
-                    except Exception:
-                        pass
+                self.connected = False
+                stderr_hint = " | ".join(list(self._stderr_ring)[-3:])
                 raise RuntimeError(
                     f"Flux MCP '{self.config.name}' ferme.{f' ({stderr_hint})' if stderr_hint else ''}"
                 )
@@ -122,22 +204,42 @@ class MCPStdioConnection:
                 continue
             # Support optionnel de l'en-tete Content-Length (LSP/MCP)
             if text.lower().startswith("content-length:"):
-                length = int(text.split(":", 1)[1].strip())
+                try:
+                    length = int(text.split(":", 1)[1].strip())
+                except ValueError as exc:
+                    self.connected = False
+                    raise RuntimeError(f"Content-Length MCP invalide : {text}") from exc
+                if length <= 0 or length > _MAX_MCP_MESSAGE_BYTES:
+                    self.connected = False
+                    raise RuntimeError(f"Message MCP hors limite ({length} octets).")
                 while True:
-                    hdr = await asyncio.wait_for(
-                        self._proc.stdout.readline(), timeout=self.timeout_seconds
-                    )
+                    rem_hdr = deadline - loop.time()
+                    if rem_hdr <= 0:
+                        self.connected = False
+                        raise TimeoutError(f"Delai depasse sur en-tetes MCP '{self.config.name}'.")
+                    hdr = await asyncio.wait_for(self._proc.stdout.readline(), timeout=rem_hdr)
                     if not hdr or hdr.strip() == b"":
                         break
+                rem_body = deadline - loop.time()
+                if rem_body <= 0:
+                    self.connected = False
+                    raise TimeoutError(f"Delai depasse sur corps MCP '{self.config.name}'.")
                 body = await asyncio.wait_for(
-                    self._proc.stdout.readexactly(length), timeout=self.timeout_seconds
+                    self._proc.stdout.readexactly(length), timeout=rem_body
                 )
                 return json.loads(body.decode("utf-8", errors="replace"))
-            return json.loads(text)
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Ignorer d'eventuelles bannieres texte non-JSON sur stdout
+                continue
+            if isinstance(parsed, dict):
+                return parsed
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         async with self._lock:
             if not self._proc or not self._proc.stdin:
+                self.connected = False
                 raise RuntimeError(f"Serveur MCP '{self.config.name}' non connecte.")
             req_id = self._next_id
             self._next_id += 1
@@ -150,8 +252,9 @@ class MCPStdioConnection:
             self._proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
             await self._proc.stdin.drain()
 
+            deadline = asyncio.get_running_loop().time() + self.timeout_seconds
             while True:
-                msg = await self._read_message()
+                msg = await self._read_message(deadline)
                 # Ignorer les notifications intercalees du serveur
                 if "id" not in msg:
                     continue
@@ -261,6 +364,10 @@ class MCPClientManager:
         for conn in list(self.connections.values()):
             await conn.stop()
         self.connections.clear()
+        for tool_names in list(self.imported_by_server.values()):
+            for fq_name in tool_names:
+                self.registry.unregister(fq_name)
+        self.imported_by_server.clear()
 
     def status_summary(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -293,32 +400,61 @@ class MCPClientManager:
         imported: list[str] = []
         is_ui_server = server_name.lower() in {"playwright", "browser", "puppeteer"}
 
+        def _make_invoker(srv: str, tool: str) -> Any:
+            async def _invoke(parsed: BaseModel) -> Any:
+                # N'envoie que les champs explicitement fournis, en excluant tout champ interne prefixe '_'
+                payload = {
+                    k: v
+                    for k, v in parsed.model_dump(exclude_unset=True).items()
+                    if not str(k).startswith("_")
+                }
+                res = caller(srv, tool, payload)
+                if asyncio.iscoroutine(res):
+                    return await res
+                return res
+
+            return _invoke
+
         for tdef in tool_definitions:
-            raw_name = tdef.get("name") or "tool"
+            raw_name = str(tdef.get("name") or "tool")
             fq_name = f"mcp_{server_name}_{raw_name}"
             desc = tdef.get("description") or f"Outil MCP {raw_name} ({server_name})"
             risk = overrides.get(raw_name, server_cfg.default_risk)
 
-            props = (tdef.get("inputSchema") or {}).get("properties") or {}
+            raw_schema = (
+                tdef.get("inputSchema") if isinstance(tdef.get("inputSchema"), dict) else None
+            )
+            props = (raw_schema or {}).get("properties") or {}
             fields_spec: dict[str, Any] = {}
             for prop_name in props:
-                fields_spec[prop_name] = (Any, None)
-            args_model = create_model(
-                f"MCP_{server_name}_{raw_name}_Args", __base__=DynamicMCPArgs, **fields_spec
+                if (
+                    isinstance(prop_name, str)
+                    and prop_name.isidentifier()
+                    and not prop_name.startswith("_")
+                    and prop_name not in _PYDANTIC_RESERVED_ATTRS
+                ):
+                    fields_spec[prop_name] = (Any, None)
+            args_model = (
+                create_model(
+                    f"MCP_{server_name}_{raw_name}_Args", __base__=DynamicMCPArgs, **fields_spec
+                )
+                if fields_spec
+                else DynamicMCPArgs
             )
 
-            async def _invoke(_srv: str = server_name, _tool: str = raw_name, **kwargs: Any) -> Any:
-                return await caller(_srv, _tool, kwargs)
+            is_safe_ui_tool = is_ui_server and _is_safe_playwright_ui_tool(raw_name)
 
             spec = ToolSpec(
                 name=fq_name,
                 description=desc,
-                handler=_invoke,
+                handler=_make_invoker(server_name, raw_name),
                 args_model=args_model,
                 risk=risk,
                 returns_untrusted=True,
                 untrusted_source=f"mcp:{server_name}:{raw_name}",
-                is_interactive_ui=is_ui_server,
+                is_interactive_ui=is_safe_ui_tool,
+                pass_model=True,
+                raw_input_schema=raw_schema,
             )
             self.registry.register(spec)
             imported.append(fq_name)

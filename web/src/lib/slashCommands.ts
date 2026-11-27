@@ -56,6 +56,12 @@ export const SLASH_COMMANDS: SlashCommandDef[] = [
     type: "immediate",
   },
   {
+    cmd: "/ask",
+    arg: "<demande>",
+    desc: "Notifier pour les commandes terminal à partir du niveau 3",
+    type: "route",
+  },
+  {
     cmd: "/status",
     arg: "",
     desc: "Vérifier l'état de jarvis-core, WebSocket, capteurs et MCP",

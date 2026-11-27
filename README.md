@@ -11,7 +11,6 @@ Assistant personnel local compose d'un service central Python (`jarvis-core`), d
 - `packages/desktop/` : integration bureau Linux/Windows, capture camera/ecran et pipeline vocal.
 - `web/` : application React/Vite avec sphere vocale 3D (`VoiceSphere` en chargement differe) et repli Canvas 2D.
 - `evals/` : banc d'essai reproductible (`EvalHarness`).
-- `legacy/` : reference historique conservee hors du flux principal.
 
 ## Installation
 

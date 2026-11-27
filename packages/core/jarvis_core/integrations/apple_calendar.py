@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 import httpx
 
 from ..memory.schema import MemoryDatabase
+from ..security import validate_http_target_host
 from .base import BaseIntegration
 
 
+def _ics_sort_key(start_raw: str) -> str:
+    digits = "".join(ch for ch in start_raw if ch.isdigit())
+    return digits.ljust(14, "0") if digits else "99999999999999"
+
+
 def parse_ics_events(ics_text: str, max_results: int = 10) -> list[dict[str, str]]:
-    """Extrait les evenements VEVENT (summary, start) depuis un flux iCalendar (.ics)."""
+    """Extrait, trie chronologiquement et conserve le TZID des VEVENT depuis un flux .ics."""
     unfolded = (
         ics_text.replace("\r\n ", "").replace("\r\n\t", "").replace("\n ", "").replace("\n\t", "")
     )
@@ -31,19 +39,25 @@ def parse_ics_events(ics_text: str, max_results: int = 10) -> list[dict[str, str
                         "start": current.get("start", ""),
                     }
                 )
-                if len(events) >= max_results:
-                    break
             current = None
             continue
         if current is None or ":" not in line:
             continue
         key_part, value = line.split(":", 1)
-        prop = key_part.split(";", 1)[0].upper()
+        parts = key_part.split(";")
+        prop = parts[0].upper()
         if prop == "SUMMARY":
             current["summary"] = value.replace("\\,", ",").replace("\\;", ";")
         elif prop == "DTSTART":
             current["start"] = value
-    return events
+            for param in parts[1:]:
+                if param.upper().startswith("TZID="):
+                    current["tzid"] = param.split("=", 1)[1].strip()
+    events.sort(key=lambda e: _ics_sort_key(e.get("start", "")))
+    now_key = datetime.now(timezone.utc).strftime("%Y%m%d000000")
+    upcoming = [e for e in events if _ics_sort_key(e.get("start", "")) >= now_key]
+    selected = upcoming if upcoming else events
+    return selected[:max_results]
 
 
 class AppleCalendarIntegration(BaseIntegration):
@@ -59,7 +73,7 @@ class AppleCalendarIntegration(BaseIntegration):
         self.connected = bool(self.ics_url)
 
     def tools(self) -> list[str]:
-        return ["apple_calendar_list_events"]
+        return ["calendar_list_events"]
 
     def get_authorize_url(self) -> str | None:
         return "https://www.icloud.com/calendar/"
@@ -73,7 +87,10 @@ class AppleCalendarIntegration(BaseIntegration):
         url = self._normalized_url()
         if not url:
             return []
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        ok_host, reason = await asyncio.to_thread(validate_http_target_host, url)
+        if not ok_host:
+            raise ValueError(reason or "URL .ics interdite.")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             return parse_ics_events(resp.text, max_results=max_results)

@@ -9,8 +9,10 @@ import io
 import math
 import mimetypes
 import os
+import re
 import time
 import wave
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,6 @@ from jarvis_shared.models import (
 )
 
 from .base import LLMProvider, ProviderError, RateLimitError
-from .openrouter import OpenRouterProvider
 
 DEFAULT_KNOWN_GEMINI_MODELS: dict[str, ModelCapabilities] = {
     "gemini-3.5-flash-lite": ModelCapabilities(
@@ -141,7 +142,7 @@ class GeminiProvider(LLMProvider):
         )
         self.trusted_for_highly_private = trusted_for_highly_private
         self._client: Any = None
-        self._thought_signatures: dict[str, bytes] = {}
+        self._thought_signatures: OrderedDict[str, bytes] = OrderedDict()
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -331,7 +332,11 @@ class GeminiProvider(LLMProvider):
                         }
                     )
             if parts:
-                contents.append({"role": role, "parts": parts})
+                # Fusionner deux tours consecutifs de meme role pour respecter l'alternance Gemini
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"].extend(parts)
+                else:
+                    contents.append({"role": role, "parts": parts})
 
         def _resolve_vertex_model(raw_model: str) -> str:
             cleaned = raw_model.removeprefix("models/").removeprefix("google/")
@@ -339,7 +344,7 @@ class GeminiProvider(LLMProvider):
                 return "gemini-3.5-flash-lite"
             return cleaned
 
-        def _invoke() -> Any:
+        def _invoke() -> tuple[Any, str]:
             client = self._get_client()
             config: dict[str, Any] = {"temperature": temperature}
             if system_instruction:
@@ -361,25 +366,31 @@ class GeminiProvider(LLMProvider):
                 }
             effective_model = _resolve_vertex_model(model) if self.vertexai else model
             try:
-                return client.models.generate_content(
-                    model=effective_model,
-                    contents=contents,
-                    config=config,
+                return (
+                    client.models.generate_content(
+                        model=effective_model,
+                        contents=contents,
+                        config=config,
+                    ),
+                    effective_model,
                 )
             except Exception as exc:
                 err_msg = str(exc).lower()
                 if (
                     "404" in err_msg or "not_found" in err_msg
                 ) and effective_model != "gemini-3.5-flash-lite":
-                    return client.models.generate_content(
-                        model="gemini-3.5-flash-lite",
-                        contents=contents,
-                        config=config,
+                    return (
+                        client.models.generate_content(
+                            model="gemini-3.5-flash-lite",
+                            contents=contents,
+                            config=config,
+                        ),
+                        "gemini-3.5-flash-lite",
                     )
                 raise
 
         try:
-            response = await asyncio.to_thread(_invoke)
+            response, used_model = await asyncio.to_thread(_invoke)
         except Exception as e:
             err_str = str(e).lower()
             if "429" in err_str or "resource_exhausted" in err_str or "quota" in err_str:
@@ -402,6 +413,8 @@ class GeminiProvider(LLMProvider):
                     sig = getattr(part, "thought_signature", None)
                     if isinstance(sig, bytes):
                         self._thought_signatures[tc.id] = sig
+                        while len(self._thought_signatures) > 256:
+                            self._thought_signatures.popitem(last=False)
                     tool_calls.append(tc)
 
         if not text_parts and not tool_calls and getattr(response, "text", None):
@@ -412,9 +425,9 @@ class GeminiProvider(LLMProvider):
         tokens_out = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
         cached = int(getattr(usage_meta, "cached_content_token_count", 0) or 0)
 
-        lookup_model = model.removeprefix("models/").removeprefix("google/")
+        lookup_model = used_model.removeprefix("models/").removeprefix("google/")
         cap = DEFAULT_KNOWN_GEMINI_MODELS.get(lookup_model) or DEFAULT_KNOWN_GEMINI_MODELS.get(
-            model
+            used_model
         )
         cost_usd = 0.0
         if cap is not None:
@@ -428,7 +441,7 @@ class GeminiProvider(LLMProvider):
             tool_calls=tool_calls,
             finish_reason="stop",
             usage=Usage(
-                model=model,
+                model=used_model,
                 provider=self.name,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
@@ -447,30 +460,15 @@ class GeminiProvider(LLMProvider):
         temperature: float = 0.2,
         thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
-        delta = await self.complete(
+        async for chunk in self._stream_via_complete(
             model=model,
             messages=messages,
             tools=tools,
             fallback_models=fallback_models,
             temperature=temperature,
             thinking_mode=thinking_mode,
-        )
-        if delta.text:
-            sentences = OpenRouterProvider.split_into_sentences(delta.text)
-            for idx, sentence in enumerate(sentences):
-                is_last = idx == len(sentences) - 1 and not delta.tool_calls
-                yield StreamDelta(
-                    text=sentence,
-                    usage=delta.usage if is_last else None,
-                    finish_reason=delta.finish_reason if is_last else None,
-                )
-        if delta.tool_calls or not delta.text:
-            yield StreamDelta(
-                text="",
-                tool_calls=delta.tool_calls,
-                usage=delta.usage,
-                finish_reason=delta.finish_reason,
-            )
+        ):
+            yield chunk
 
     async def transcribe_audio(self, audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
         """Transcrit un segment audio via Gemini Flash (retourne '' si silence)."""
@@ -509,7 +507,8 @@ class GeminiProvider(LLMProvider):
             config=types.GenerateContentConfig(temperature=0.0),
         )
         raw = (getattr(response, "text", None) or "").strip()
-        if not raw or "SILENCE" in raw.upper():
+        # Ne rejeter que le marqueur exact SILENCE (pas une phrase contenant le mot "silence")
+        if not raw or re.sub(r"[^a-zA-Z]+", "", raw).upper() == "SILENCE":
             return ""
         return raw
 

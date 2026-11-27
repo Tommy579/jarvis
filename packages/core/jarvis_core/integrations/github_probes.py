@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
+import asyncio
 from typing import Any, Literal
 
 import httpx
 
 from ..memory.schema import MemoryDatabase
+from ..security import validate_http_target_host
 from .base import BaseIntegration
-
-
-def verify_github_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
-    if not secret or not signature_header or not signature_header.startswith("sha256="):
-        return False
-    digest = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(digest, signature_header.strip())
 
 
 class GitHubProbesIntegration(BaseIntegration):
@@ -32,12 +25,18 @@ class GitHubProbesIntegration(BaseIntegration):
         self.connected = True
 
     def tools(self) -> list[str]:
-        return ["probe_check_urls", "github_recent_events"]
+        return []
 
     async def check_probes(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
             for url in self.probe_urls:
+                ok_host, reason = await asyncio.to_thread(
+                    validate_http_target_host, url, allow_private=True
+                )
+                if not ok_host:
+                    results.append({"url": url, "ok": False, "error": reason or "URL interdite."})
+                    continue
                 try:
                     resp = await client.get(url)
                     ok = 200 <= resp.status_code < 400

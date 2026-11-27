@@ -28,14 +28,16 @@ class RateLimitError(ProviderError):
 class BudgetExceededError(ProviderError):
     """Coupe-circuit declenche lorsque le plafond journalier de couts est depasse."""
 
-    def __init__(self, spent_usd: float, limit_usd: float):
+    def __init__(self, spent_usd: float, limit_usd: float, provider: str | None = None):
+        scope = f" pour {provider}" if provider else ""
         super().__init__(
-            f"Plafond journalier LLM atteint ({spent_usd:.4f} USD >= {limit_usd:.4f} USD).",
+            f"Plafond journalier LLM{scope} atteint ({spent_usd:.4f} USD >= {limit_usd:.4f} USD).",
             status_code=402,
             retryable=False,
         )
         self.spent_usd = spent_usd
         self.limit_usd = limit_usd
+        self.provider = provider
 
 
 class LLMProvider(ABC):
@@ -71,3 +73,51 @@ class LLMProvider(ABC):
         thinking_mode: str | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """Appel en streaming SSE retournant des fragments de texte, tool_calls et l'usage final."""
+
+    @staticmethod
+    def split_into_sentences(text: str) -> list[str]:
+        """Decoupe un texte en phrases completes pour la synthese vocale basse latence."""
+        chunks: list[str] = []
+        buf = ""
+        for ch in text:
+            buf += ch
+            if ch in ".!?\n" and len(buf.strip()) >= 12:
+                chunks.append(buf)
+                buf = ""
+        if buf:
+            chunks.append(buf)
+        return chunks
+
+    async def _stream_via_complete(
+        self,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        fallback_models: list[str] | None = None,
+        temperature: float = 0.2,
+        thinking_mode: str | None = None,
+    ) -> AsyncIterator[StreamDelta]:
+        delta = await self.complete(
+            model=model,
+            messages=messages,
+            tools=tools,
+            fallback_models=fallback_models,
+            temperature=temperature,
+            thinking_mode=thinking_mode,
+        )
+        if delta.text:
+            sentences = self.split_into_sentences(delta.text)
+            for idx, sentence in enumerate(sentences):
+                is_last = idx == len(sentences) - 1 and not delta.tool_calls
+                yield StreamDelta(
+                    text=sentence,
+                    usage=delta.usage if is_last else None,
+                    finish_reason=delta.finish_reason if is_last else None,
+                )
+        if delta.tool_calls or not delta.text:
+            yield StreamDelta(
+                text="",
+                tool_calls=delta.tool_calls,
+                usage=delta.usage,
+                finish_reason=delta.finish_reason,
+            )

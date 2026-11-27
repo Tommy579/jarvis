@@ -188,7 +188,10 @@ export function GoalTrackerCard({ goal, compact = false, onOpenGoals }: GoalTrac
                   <span>Tentative {sub.attempt}/{sub.max_attempts}</span>
                   {live && (
                     <span>
-                      Itération {live.iterations}/{live.max_iterations}
+                      Itération{" "}
+                      {live.max_iterations > 0
+                        ? `${live.iterations}/${live.max_iterations}`
+                        : live.iterations}
                       {live.last_tool ? ` · outil: ${live.last_tool}` : ""}
                     </span>
                   )}

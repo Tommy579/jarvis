@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import secrets as _secrets
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,6 +125,7 @@ class _TelegramSender:
         from aiogram import Bot
         from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
+        clean_message = _strip_suite_marker(message)
         bot = Bot(token=self.gateway.bot_token)
         try:
             markup = None
@@ -138,18 +141,20 @@ class _TelegramSender:
                 )
             sent = await bot.send_message(
                 chat_id=self.gateway.allowed_chat_id,
-                text=message,
+                text=clean_message,
                 disable_notification=int(urgency) <= 1,
                 reply_markup=markup,
             )
             if int(urgency) >= 3:
                 try:
-                    voice_bytes = await asyncio.to_thread(self.gateway.synthesize_voice, message)
+                    voice_bytes = await asyncio.to_thread(
+                        self.gateway.synthesize_voice, clean_message
+                    )
                     if voice_bytes:
                         await bot.send_voice(
                             chat_id=self.gateway.allowed_chat_id,
                             voice=BufferedInputFile(voice_bytes, filename="alerte.mp3"),
-                            caption="🚨 Alerte vocale Jarvis",
+                            caption="Alerte vocale Jarvis",
                         )
                 except Exception:
                     pass
@@ -181,6 +186,7 @@ class JarvisRuntime:
     mcp_manager: MCPClientManager | None = None
     browser_toolkit: BrowserToolkit | None = None
     scheduler: Any = None
+    action_token_secret: str = ""
 
 
 # Canaux qui correspondent a une surface d'affichage locale (UI web, voix de la sphere,
@@ -191,14 +197,18 @@ class JarvisRuntime:
 UI_CHANNELS = frozenset({"sphere", "sphere_alert", "toast", "web", "desktop", "voice"})
 
 
+def _strip_suite_marker(text: str) -> str:
+    return re.sub(r"\s*(?:\.\.\.\s*)?\[suite\]\s*$", "", text or "", flags=re.IGNORECASE).strip()
+
+
 def _format_alert_telegram_message(notif: NotificationRecord, decision: AttentionDecision) -> str:
-    """Formate une alerte Telegram en precisant la raison de l'etat d'alerte."""
-    reason = (decision.reason or notif.reason or "").strip()
-    msg = (notif.message or "").strip()
-    if reason and reason.lower() not in msg.lower():
-        return f"🚨 Alerte JARVIS : {reason}\n{msg}" if msg else f"🚨 Alerte JARVIS : {reason}"
-    detail = msg or reason or "État d'alerte déclenché"
-    return detail if detail.startswith("🚨") else f"🚨 Alerte JARVIS : {detail}"
+    """Formate une alerte Telegram minimale sans emoji ni troncature [suite]."""
+    reason = _strip_suite_marker((decision.reason or notif.reason or "").strip())
+    msg = _strip_suite_marker((notif.message or "").strip())
+    if reason and msg and reason.lower() not in msg.lower():
+        return f"Alerte : {reason}\n{msg}"
+    detail = msg or reason or "Alerte JARVIS"
+    return detail if detail.lower().startswith("alerte") else f"Alerte : {detail}"
 
 
 def build_notification_dispatcher(
@@ -259,9 +269,7 @@ def _load_roles(config_dir: Path) -> dict[str, RoleRoute]:
             model=str(cfg.get("model", "")),
             provider=str(cfg.get("provider", default_provider)),
             fallback=[str(f) for f in cfg.get("fallback", [])],
-            thinking_mode=normalize_thinking_mode(
-                cfg.get("thinking_mode") or cfg.get("reasoning")
-            ),
+            thinking_mode=normalize_thinking_mode(cfg.get("thinking_mode") or cfg.get("reasoning")),
         )
     return roles or DEFAULT_ROLE_ROUTES
 
@@ -276,6 +284,17 @@ def _build_channels(store: SecretStore, database: MemoryDatabase | None = None) 
         senders["telegram_silent"] = tg_sender
 
     return senders
+
+
+def _parse_hour(raw: str, default: int) -> int:
+    try:
+        part = raw.split(":", 1)[0].strip()
+        val = int(part)
+        if 0 <= val <= 23:
+            return val
+    except (ValueError, AttributeError):
+        pass
+    return default
 
 
 def build_runtime(
@@ -293,7 +312,8 @@ def build_runtime(
 ) -> JarvisRuntime:
     from dotenv import load_dotenv
 
-    load_dotenv(override=False)
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        load_dotenv(override=False)
     store = secrets or SecretStore()
     active_providers: dict[str, LLMProvider] = dict(providers) if providers is not None else {}
     if not active_providers:
@@ -329,25 +349,29 @@ def build_runtime(
     policy = policy_store.get()
 
     raw_budget = db.get_setting("daily_budget_usd")
-    daily_budget = float(raw_budget) if raw_budget is not None else 5.0
+    daily_budget = float(raw_budget) if raw_budget is not None else 10.0
     router = LLMRouter(
         providers=active_providers,
         roles=_load_roles(config_dir),
         daily_budget_usd=daily_budget,
         usage_logger=lambda role, usage: storage.log_llm_call(role, usage),
         daily_spend_getter=storage.get_today_spend_usd,
+        daily_provider_spend_getter=storage.get_today_spend_usd,
     )
 
     senders = _build_channels(store, database=db)
     if channels:
         senders.update(channels)
 
+    action_token_secret = (
+        store.get_secret("ACTION_TOKEN_SECRET") or ""
+    ).strip() or _secrets.token_urlsafe(32)
     dispatcher = ChannelDispatcher(
         db=db,
         secret_store=store,
         public_base_url=store.get_secret("PUBLIC_WEBHOOK_BASE_URL"),
         telegram_sender=senders.get("telegram"),
-        action_token_secret=store.get_secret("ACTION_TOKEN_SECRET"),
+        action_token_secret=action_token_secret,
     )
 
     approval_queue: asyncio.Queue[ApprovalRequest] = asyncio.Queue()
@@ -396,8 +420,8 @@ def build_runtime(
         autonomy_policy=autonomy_policy,
         audit_recorder=_record_db_audit,
     )
-    StandardToolkit(database=db).register_all(registry)
-    NotificationToolkit(database=db).register_all(registry)
+    StandardToolkit(database=db, autonomy_policy=autonomy_policy).register_all(registry)
+    NotificationToolkit(database=db, policy_store=policy_store).register_all(registry)
     IntegrationToolkit().register_all(registry)
     DesktopA11yToolkit().register_all(registry)
     CLIAgentToolkit().register_all(registry)
@@ -441,8 +465,8 @@ def build_runtime(
 
     dispatch_notification = build_notification_dispatcher(senders, alert_queue, _schedule_send)
 
-    q_start_h = int(policy.quiet_start.split(":")[0]) if ":" in policy.quiet_start else 23
-    q_end_h = int(policy.quiet_end.split(":")[0]) if ":" in policy.quiet_end else 8
+    q_start_h = _parse_hour(policy.quiet_start, 23)
+    q_end_h = _parse_hour(policy.quiet_end, 8)
     attention = AttentionEngine(
         presence=PresenceDetector(quiet_start_hour=q_start_h, quiet_end_hour=q_end_h),
         storage=db,
@@ -453,10 +477,20 @@ def build_runtime(
 
     from .memory.engine import DEFAULT_PERSONA_PROMPT
 
+    persona_file = config_dir / "persona.md"
+    persona_prompt = DEFAULT_PERSONA_PROMPT
+    if persona_file.is_file():
+        try:
+            custom_persona = persona_file.read_text(encoding="utf-8").strip()
+            if custom_persona:
+                persona_prompt = f"{custom_persona}\n\n{DEFAULT_PERSONA_PROMPT}"
+        except OSError:
+            pass
+
     memory_engine = MemoryEngine(
         storage=storage,
         wiki=wiki,
-        persona_prompt=DEFAULT_PERSONA_PROMPT,
+        persona_prompt=persona_prompt,
     )
     task_manager = AutonomousTaskManager(
         router=router,
@@ -511,4 +545,5 @@ def build_runtime(
         goal_manager=goal_manager,
         mcp_manager=mcp_manager,
         browser_toolkit=browser_toolkit,
+        action_token_secret=action_token_secret,
     )

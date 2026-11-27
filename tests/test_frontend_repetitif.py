@@ -142,7 +142,7 @@ def test_memory_schema_crud_search_and_legacy_import(tmp_path: Path) -> None:
     # Pas de doublons au second import
     assert import_legacy_profile(profile_path, db, wiki_dir) == 0
     assert (wiki_dir / "moi.md").exists()
-    assert (wiki_dir / "regles.md").exists()
+    assert (wiki_dir / "rules.md").exists()
     assert db.delete_fact(created.id) is True
 
 
@@ -725,25 +725,57 @@ def test_run_command_auto_and_write_file_permissions(tmp_path: Path) -> None:
         allow_offline=True,
     )
 
-    # Normal command runs without pre_approved
+    # run_command est de niveau 2 (SENSITIVE) : execute avec pre_approved=True
+    run_spec = rt.tool_registry.get("run_command")
+    assert run_spec is not None
+    assert int(run_spec.risk) == 2
+
     ok_cmd = asyncio.run(
         rt.tool_registry.execute(
-            ToolCall(id="tc-echo", name="run_command", arguments={"command": "echo hello"})
+            ToolCall(id="tc-echo", name="run_command", arguments={"command": "echo hello"}),
+            pre_approved=True,
         )
     )
     assert ok_cmd.is_error is False
     assert ok_cmd.output["ok"] is True
     assert ok_cmd.output["stdout"].strip() == "hello"
 
-    # Dangerous commands are blocked
+    # Sans /ask, les commandes terminal sont autorisees sans approbation
+    ok_no_ask = asyncio.run(
+        rt.tool_registry.execute(
+            ToolCall(id="tc-echo-no-ask", name="run_command", arguments={"command": "echo auto"}),
+            ask_terminal_approval=False,
+        )
+    )
+    assert ok_no_ask.is_error is False
+    assert ok_no_ask.output["ok"] is True
+    assert ok_no_ask.output["stdout"].strip() == "auto"
+
+    # Avec /ask (ask_terminal_approval=True), les commandes de niveau < 3 passent sans notification,
+    # tandis que les commandes de niveau 3 (DANGEROUS) declenchent une demande d'approbation.
+    ok_ask_l2 = asyncio.run(
+        rt.tool_registry.execute(
+            ToolCall(id="tc-echo-ask", name="run_command", arguments={"command": "echo ask-l2"}),
+            ask_terminal_approval=True,
+        )
+    )
+    assert ok_ask_l2.is_error is False
+    assert ok_ask_l2.output["stdout"].strip() == "ask-l2"
+    assert rt.approval_queue.empty()
+
     for bad in ("rm -rf /", "mkfs.ext4 /dev/sda1", "shutdown -h now"):
         bad_res = asyncio.run(
             rt.tool_registry.execute(
-                ToolCall(id="tc-bad", name="run_command", arguments={"command": bad})
+                ToolCall(id="tc-bad", name="run_command", arguments={"command": bad}),
+                ask_terminal_approval=True,
+                approval_timeout=0.01,
             )
         )
-        assert bad_res.output["ok"] is False
-        assert "dangereuse" in bad_res.output["error"].lower()
+        assert bad_res.is_error is True
+        assert "approbation requise" in bad_res.output["error"].lower()
+        req = rt.approval_queue.get_nowait()
+        assert int(req.risk) == 3
+        assert req.exact_command == bad
 
     # write_file works on normal paths without pre_approved
     target = tmp_path / "sub" / "note.txt"

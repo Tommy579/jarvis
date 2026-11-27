@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { apiClient } from "./api/client";
 import { CommandPalette, type CommandItem } from "./components/CommandPalette";
 import { Icon, type IconName } from "./components/Icon";
 import { JarvisLogo } from "./components/JarvisLogo";
-import { Toaster } from "./components/ui";
+import { ErrorBanner, Skeleton, Toaster } from "./components/ui";
+import { describeApiError } from "./lib/apiErrors";
 import { setSchemePreference, useColorScheme } from "./lib/colorScheme";
 import { getAuthToken } from "./lib/authToken";
 import { formatModelLabel } from "./lib/modelLabels";
@@ -15,18 +16,31 @@ import {
   isStopRecordCommand,
   shouldAutoStopVoiceRecord,
 } from "./lib/voiceCommands";
-import { AlertsApprovalsPage } from "./pages/AlertsApprovalsPage";
-import { ConfigPage } from "./pages/ConfigPage";
-import { ConversationPage } from "./pages/ConversationPage";
-import { GoalsPage } from "./pages/GoalsPage";
 import { HomePage } from "./pages/HomePage";
-import { MemoryOnboardingPage } from "./pages/MemoryOnboardingPage";
-import { NotFoundPage } from "./pages/NotFoundPage";
 import { AudioEngine } from "./sphere/AudioEngine";
 import { useJarvisStore, type ThinkingMode } from "./store/useJarvisStore";
 import { toast } from "./store/useToastStore";
 import type { SensorName } from "./types/generated";
 import { JarvisWsClient } from "./ws/client";
+
+const AlertsApprovalsPage = lazy(() =>
+  import("./pages/AlertsApprovalsPage").then((m) => ({ default: m.AlertsApprovalsPage }))
+);
+const ConfigPage = lazy(() =>
+  import("./pages/ConfigPage").then((m) => ({ default: m.ConfigPage }))
+);
+const ConversationPage = lazy(() =>
+  import("./pages/ConversationPage").then((m) => ({ default: m.ConversationPage }))
+);
+const GoalsPage = lazy(() =>
+  import("./pages/GoalsPage").then((m) => ({ default: m.GoalsPage }))
+);
+const MemoryOnboardingPage = lazy(() =>
+  import("./pages/MemoryOnboardingPage").then((m) => ({ default: m.MemoryOnboardingPage }))
+);
+const NotFoundPage = lazy(() =>
+  import("./pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage }))
+);
 
 type AppRoute = "/" | "/conversation" | "/goals" | "/alerts" | "/memory" | "/config" | "/not-found";
 
@@ -85,6 +99,45 @@ const ROUTES: RouteMeta[] = [
 
 const SENSOR_LABELS: Record<string, string> = { screen: "écran", mic: "micro", camera: "caméra" };
 
+/**
+ * Sections chargees au montage. Chacune dispose de son propre etat d'erreur :
+ * une panne reseau sur une section n'empeche plus les autres de s'afficher et
+ * ne se traduit plus par une liste vide silencieuse.
+ */
+type BootstrapSection = "approvals" | "alerts" | "sensors" | "models" | "goals";
+
+const BOOTSTRAP_SECTIONS: BootstrapSection[] = [
+  "approvals",
+  "alerts",
+  "sensors",
+  "models",
+  "goals",
+];
+
+const SECTION_ERROR_FALLBACKS: Record<BootstrapSection, string> = {
+  approvals: "Impossible de charger les approbations en attente.",
+  alerts: "Impossible de charger le journal des alertes.",
+  sensors: "Impossible de charger l'état des capteurs.",
+  models: "Impossible de charger la configuration des modèles.",
+  goals: "Impossible de charger les objectifs autonomes.",
+};
+
+/**
+ * Pages qui consomment la section SANS requete propre : le bandeau de section
+ * n'apparait que la. Les pages qui interrogent elles-memes l'API (Objectifs,
+ * Alertes, Configuration) affichent leur propre bandeau via QueryErrorBanner,
+ * ce qui evite tout doublon.
+ */
+const SECTION_ROUTES: Record<BootstrapSection, AppRoute[]> = {
+  approvals: [],
+  alerts: [],
+  sensors: ["/"],
+  models: ["/"],
+  goals: ["/", "/conversation"],
+};
+
+type SectionErrors = Partial<Record<BootstrapSection, string>>;
+
 function resolveRoute(pathname: string): AppRoute {
   const clean = pathname !== "/" && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   if (clean === "" || clean === "/") return "/";
@@ -131,6 +184,7 @@ export function App() {
   const theme = useJarvisStore((s) => s.theme);
   const sensors = useJarvisStore((s) => s.sensors);
   const approvals = useJarvisStore((s) => s.approvals);
+  const goals = useJarvisStore((s) => s.goals);
   const lastError = useJarvisStore((s) => s.lastError);
 
   const micSensor = sensors.find((s) => s.sensor === "mic");
@@ -161,6 +215,11 @@ export function App() {
   const handleServerEvent = useJarvisStore((s) => s.handleServerEvent);
 
   const pendingApprovalsCount = approvals.filter((a) => a.status === "pending").length;
+  const activeGoalsCount = Object.values(goals).filter((g) =>
+    ["planning", "running", "verifying", "waiting_user", "waiting_approval", "paused_budget"].includes(
+      g.status
+    )
+  ).length;
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("jarvis_sidebar_collapsed") === "1";
@@ -185,6 +244,100 @@ export function App() {
     window.scrollTo({ top: 0 });
   }, []);
 
+  // Erreurs de chargement isolees par section : une panne reseau sur une section
+  // n'efface plus les autres et ne produit plus de liste vide trompeuse.
+  const [sectionErrors, setSectionErrors] = useState<SectionErrors>({});
+  const [retryingSections, setRetryingSections] = useState<
+    Partial<Record<BootstrapSection, boolean>>
+  >({});
+  const bootstrapActiveRef = useRef(true);
+
+  const loadBootstrapSection = useCallback(
+    async (section: BootstrapSection): Promise<void> => {
+      setRetryingSections((prev) => ({ ...prev, [section]: true }));
+      try {
+        switch (section) {
+          case "approvals": {
+            const list = await apiClient.getApprovals();
+            if (!bootstrapActiveRef.current) return;
+            if (useJarvisStore.getState().approvals.length === 0) {
+              setApprovals(list);
+            }
+            break;
+          }
+          case "alerts": {
+            const list = await apiClient.getAlerts();
+            if (!bootstrapActiveRef.current) return;
+            if (useJarvisStore.getState().alerts.length === 0) {
+              setAlerts(list);
+            }
+            break;
+          }
+          case "sensors": {
+            const cfg = await apiClient.getSensorsBlacklist();
+            if (!bootstrapActiveRef.current) return;
+            if (cfg.sensors.length > 0) {
+              setSensors(cfg.sensors);
+            }
+            break;
+          }
+          case "models": {
+            const roles = await apiClient.getModels();
+            if (!bootstrapActiveRef.current) return;
+            const agentCfg = roles.find((m) => m.role === "agent") ?? roles[0];
+            if (agentCfg?.model) {
+              setActiveModel(agentCfg.model);
+            }
+            if (agentCfg?.thinking_mode) {
+              setThinkingMode(agentCfg.thinking_mode);
+            }
+            break;
+          }
+          case "goals": {
+            const list = await apiClient.getGoals(30);
+            if (!bootstrapActiveRef.current) return;
+            useJarvisStore.getState().setGoals(list);
+            break;
+          }
+        }
+        if (!bootstrapActiveRef.current) return;
+        setSectionErrors((prev) => {
+          if (!(section in prev)) return prev;
+          const next = { ...prev };
+          delete next[section];
+          return next;
+        });
+      } catch (err) {
+        if (!bootstrapActiveRef.current) return;
+        setSectionErrors((prev) => ({
+          ...prev,
+          [section]: describeApiError(err, SECTION_ERROR_FALLBACKS[section]),
+        }));
+      } finally {
+        if (bootstrapActiveRef.current) {
+          setRetryingSections((prev) => ({ ...prev, [section]: false }));
+        }
+      }
+    },
+    [setActiveModel, setAlerts, setApprovals, setSensors, setThinkingMode]
+  );
+
+  const retrySection = useCallback(
+    (section: BootstrapSection) => {
+      void loadBootstrapSection(section);
+    },
+    [loadBootstrapSection]
+  );
+
+  /** Sections en erreur qui concernent reellement la page affichee. */
+  const visibleSectionErrors = useMemo(
+    () =>
+      BOOTSTRAP_SECTIONS.filter(
+        (section) => Boolean(sectionErrors[section]) && SECTION_ROUTES[section].includes(route)
+      ).map((section) => ({ section, message: sectionErrors[section] as string })),
+    [route, sectionErrors]
+  );
+
   useEffect(() => {
     const onPopState = () => {
       setRoute(resolveRoute(window.location.pathname));
@@ -207,6 +360,7 @@ export function App() {
 
   useEffect(() => {
     let active = true;
+    bootstrapActiveRef.current = true;
     const token = getAuthToken() || undefined;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const envWs = import.meta.env.VITE_WS_URL as string | undefined;
@@ -272,47 +426,23 @@ export function App() {
     wsClientRef.current = client;
     client.connect();
 
-    Promise.allSettled([
-      apiClient.getApprovals(),
-      apiClient.getAlerts(),
-      apiClient.getSensorsBlacklist(),
-      apiClient.getModels(),
-      apiClient.getGoals(30),
-    ]).then(([apprRes, alertsRes, blacklistRes, modelsRes, goalsRes]) => {
-      if (!active) return;
-      if (apprRes.status === "fulfilled" && useJarvisStore.getState().approvals.length === 0) {
-        setApprovals(apprRes.value);
-      }
-      if (alertsRes.status === "fulfilled" && useJarvisStore.getState().alerts.length === 0) {
-        setAlerts(alertsRes.value);
-      }
-      if (blacklistRes.status === "fulfilled" && blacklistRes.value.sensors.length > 0) {
-        setSensors(blacklistRes.value.sensors);
-      }
-      if (modelsRes.status === "fulfilled") {
-        const agentCfg = modelsRes.value.find((m) => m.role === "agent") ?? modelsRes.value[0];
-        if (agentCfg?.model) {
-          setActiveModel(agentCfg.model);
-        }
-        if (agentCfg?.thinking_mode) {
-          setThinkingMode(agentCfg.thinking_mode);
-        }
-      }
-      if (goalsRes.status === "fulfilled") {
-        useJarvisStore.getState().setGoals(goalsRes.value);
-      }
-    });
+    // Chargement initial : chaque section gere son propre echec. allSettled reste
+    // la ceinture de securite si un loader laissait echapper une exception.
+    void Promise.allSettled(
+      BOOTSTRAP_SECTIONS.map((section) => loadBootstrapSection(section))
+    );
 
     return () => {
       active = false;
+      bootstrapActiveRef.current = false;
       client.disconnect();
       wsClientRef.current = null;
-      audioEngine.stopMicrophone();
-      audioEngine.stopPlayback();
+      audioEngine.dispose();
     };
   }, [
     audioEngine,
     handleServerEvent,
+    loadBootstrapSection,
     setActiveModel,
     setAlerts,
     setApprovals,
@@ -440,6 +570,17 @@ export function App() {
             return;
           }
           outgoingText = cleanArg;
+        } else if (cleanCmd === "/ask") {
+          if (!cleanArg) {
+            store.appendSystemMessage(
+              "Usage : `/ask <demande>` — active les notifications d'approbation pour les commandes terminal à partir du niveau 3."
+            );
+            return;
+          }
+          if (/^\/goal(?:\s+|$)/i.test(cleanArg)) {
+            const goalRest = cleanArg.replace(/^\/goal\s*/i, "").trim();
+            outgoingText = goalRest ? `/goal /ask ${goalRest}` : "/goal";
+          }
         } else if (cleanCmd === "/auto") {
           let defaultModel = "deepseek/deepseek-v4.1-flash-1017";
           try {
@@ -565,12 +706,16 @@ export function App() {
 
       appendUserMessage(outgoingText, overwrite);
 
+      const isAskMode = useJarvisStore.getState().terminalMode === "ask";
       const isSlashGoal = /^\/goal(?:\s+|$)/i.test(outgoingText);
       if (isSlashGoal || useJarvisStore.getState().goalMode) {
-        const goalPrompt = isSlashGoal ? outgoingText.replace(/^\/goal\s*/i, "").trim() : outgoingText;
+        let goalPrompt = isSlashGoal ? outgoingText.replace(/^\/goal\s*/i, "").trim() : outgoingText;
         if (!goalPrompt) {
           setError("Précise l'objectif à lancer après /goal.");
           return;
+        }
+        if (isAskMode && !/^\/ask(?:\s|$)/i.test(goalPrompt)) {
+          goalPrompt = `/ask ${goalPrompt}`;
         }
         try {
           const created = await apiClient.createGoal({
@@ -585,9 +730,12 @@ export function App() {
         }
       }
 
-      const payloadText = store.workspace
-        ? `[Workspace actif : ${store.workspace}]\n${outgoingText}`
-        : outgoingText;
+      const activeWorkspace = useJarvisStore.getState().workspace;
+      const effectiveOutgoing =
+        isAskMode && !/^\/ask(?:\s|$)/i.test(outgoingText) ? `/ask ${outgoingText}` : outgoingText;
+      const payloadText = activeWorkspace
+        ? `[Workspace actif : ${activeWorkspace}]\n${effectiveOutgoing}`
+        : effectiveOutgoing;
 
       if (wsClientRef.current && useJarvisStore.getState().wsConnected) {
         wsClientRef.current.send({ type: "user.text", payload: { text: payloadText } });
@@ -808,7 +956,7 @@ export function App() {
     };
     const restoreOnUnload = () => {
       if (audioEngine.isPlaying()) {
-        void apiClient.setAudioDucking(false).catch(() => undefined);
+        void apiClient.setAudioDucking(false, 0.22, { keepalive: true }).catch(() => undefined);
       }
     };
     window.addEventListener("beforeunload", restoreOnUnload);
@@ -889,10 +1037,10 @@ export function App() {
   const handleAckAlert = useCallback(
     async (id: string, tooNoisy = false) => {
       ackAlertLocal(id, tooNoisy);
-      wsClientRef.current?.send({ type: "alert.ack", payload: { id } });
       if (tooNoisy) {
         await apiClient.markAlertTooNoisy(id).catch(() => undefined);
       } else {
+        wsClientRef.current?.send({ type: "alert.ack", payload: { id } });
         await apiClient.ackAlert(id).catch(() => undefined);
       }
     },
@@ -901,6 +1049,16 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.shiftKey && e.key === "Tab") {
+        e.preventDefault();
+        const nextMode = useJarvisStore.getState().toggleTerminalMode();
+        toast.ok(
+          nextMode === "ask"
+            ? "Mode Ask activé (approbation terminal niveau 3+)."
+            : "Mode Auto activé (commandes terminal sans approbation)."
+        );
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((prev) => !prev);
@@ -1028,6 +1186,15 @@ export function App() {
                 >
                   <Icon name={item.icon} size={20} />
                   <span className="nav__label">{item.label}</span>
+                  {item.path === "/goals" && activeGoalsCount > 0 && (
+                    <span
+                      className="nav__badge nav__badge--accent"
+                      data-testid="nav-active-goals-count"
+                      aria-label={`${activeGoalsCount} objectif(s) actif(s)`}
+                    >
+                      {activeGoalsCount}
+                    </span>
+                  )}
                   {item.path === "/alerts" && pendingApprovalsCount > 0 && (
                     <span
                       className="nav__badge"
@@ -1065,17 +1232,24 @@ export function App() {
               <Icon name="panelLeft" size={18} />
             </button>
           )}
-          {lastError && (
-            <div className="banner" role="alert" style={{ maxWidth: 1080, margin: "0 auto 16px" }}>
-              <span>{lastError}</span>
-              <button
-                type="button"
-                className="icon-btn icon-btn--sm"
-                aria-label="Masquer l'erreur"
-                onClick={() => setError(null)}
-              >
-                <Icon name="x" size={14} />
-              </button>
+          {(lastError || visibleSectionErrors.length > 0) && (
+            <div className="app__banners" style={{ maxWidth: 1080, margin: "0 auto 16px" }}>
+              {lastError && (
+                <ErrorBanner
+                  message={lastError}
+                  onDismiss={() => setError(null)}
+                  testId="global-error-banner"
+                />
+              )}
+              {visibleSectionErrors.map(({ section, message }) => (
+                <ErrorBanner
+                  key={section}
+                  message={message}
+                  onRetry={() => retrySection(section)}
+                  retrying={Boolean(retryingSections[section])}
+                  testId={`section-error-${section}`}
+                />
+              ))}
             </div>
           )}
 
@@ -1087,33 +1261,43 @@ export function App() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
             >
-              {route === "/" && (
-                <HomePage
-                  audioEngine={audioEngine}
-                  onSendText={handleSendText}
-                  onToggleSensor={handleToggleSensor}
-                  onSelectModel={handleSelectModel}
-                  onSelectThinking={handleSelectThinking}
-                  onInterrupt={handleInterrupt}
-                  onOpenGoals={() => navigate("/goals")}
-                />
-              )}
-              {route === "/conversation" && (
-                <ConversationPage
-                  onSendText={handleSendText}
-                  onOpenGoals={() => navigate("/goals")}
-                />
-              )}
-              {route === "/goals" && <GoalsPage />}
-              {route === "/alerts" && (
-                <AlertsApprovalsPage
-                  onApproveAction={handleApproveAction}
-                  onAckAlert={handleAckAlert}
-                />
-              )}
-              {route === "/memory" && <MemoryOnboardingPage />}
-              {route === "/config" && <ConfigPage />}
-              {route === "/not-found" && <NotFoundPage onGoHome={() => navigate("/")} />}
+              <Suspense
+                fallback={
+                  <section className="page">
+                    <div className="card">
+                      <Skeleton lines={5} />
+                    </div>
+                  </section>
+                }
+              >
+                {route === "/" && (
+                  <HomePage
+                    audioEngine={audioEngine}
+                    onSendText={handleSendText}
+                    onToggleSensor={handleToggleSensor}
+                    onSelectModel={handleSelectModel}
+                    onSelectThinking={handleSelectThinking}
+                    onInterrupt={handleInterrupt}
+                    onOpenGoals={() => navigate("/goals")}
+                  />
+                )}
+                {route === "/conversation" && (
+                  <ConversationPage
+                    onSendText={handleSendText}
+                    onOpenGoals={() => navigate("/goals")}
+                  />
+                )}
+                {route === "/goals" && <GoalsPage />}
+                {route === "/alerts" && (
+                  <AlertsApprovalsPage
+                    onApproveAction={handleApproveAction}
+                    onAckAlert={handleAckAlert}
+                  />
+                )}
+                {route === "/memory" && <MemoryOnboardingPage />}
+                {route === "/config" && <ConfigPage />}
+                {route === "/not-found" && <NotFoundPage onGoHome={() => navigate("/")} />}
+              </Suspense>
             </motion.div>
           </AnimatePresence>
         </main>

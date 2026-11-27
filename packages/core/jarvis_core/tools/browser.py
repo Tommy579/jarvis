@@ -6,19 +6,22 @@ import asyncio
 import base64
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 import websockets
 from jarvis_shared.models import RiskLevel
 from pydantic import BaseModel, Field
 
-from .autonomy import AutonomyPolicy
+from .autonomy import AutonomyPolicy, extract_domain, validate_http_target_host
 from .registry import TOOL_USAGE_KEY
 from .registry import ToolSpec as RegistryToolSpec
 
@@ -91,6 +94,16 @@ UPLOAD_FORBIDDEN_DIRS: tuple[str, ...] = (
     ".password-store",
     ".local/share/keyrings",
     ".config",
+    ".mozilla",
+    "jarvis-data",
+    "jarvis-browser",
+)
+UPLOAD_FORBIDDEN_PREFIXES: tuple[str, ...] = (
+    "/proc",
+    "/sys",
+    "/dev",
+    "/etc",
+    "/root",
 )
 UPLOAD_FORBIDDEN_SUFFIXES: tuple[str, ...] = (
     ".pem",
@@ -108,6 +121,14 @@ UPLOAD_FORBIDDEN_NAMES: tuple[str, ...] = (
     "id_ed25519",
     "id_ecdsa",
     "netrc",
+    ".netrc",
+    ".git-credentials",
+    ".bash_history",
+    ".zsh_history",
+    ".npmrc",
+    ".pypirc",
+    "secrets.enc",
+    "jarvis.db",
     "shadow",
     "passwd",
 )
@@ -127,6 +148,11 @@ def validate_upload_path(raw_path: str) -> tuple[Path | None, str | None]:
         return None, f"Pas un fichier regulier : {path}"
     if path.stat().st_size > 100 * 1024 * 1024:
         return None, f"Fichier trop volumineux (> 100 Mo) : {path}"
+    if os.name != "nt":
+        for prefix in UPLOAD_FORBIDDEN_PREFIXES:
+            p = Path(prefix)
+            if path == p or path.is_relative_to(p):
+                return None, f"Repertoire systeme interdit a l'upload : {prefix}"
     # On raisonne sur les segments du chemin absolu (les symlinks sont deja resolus par
     # Path.resolve), donc ~/.ssh/id_rsa comme /etc/ssh/ssh_host_rsa_key sont couverts.
     parts = {part.lower() for part in path.parts}
@@ -186,13 +212,16 @@ def format_ax_tree(
 
     ref_map: dict[str, int] = {}
     lines: list[str] = []
+    line_refs: list[str | None] = []
+    visited: set[str] = set()
     ref_counter = 1
     total_chars = 0
 
     def _visit(nid: str, depth: int) -> None:
         nonlocal ref_counter, total_chars
-        if total_chars >= MAX_SNAPSHOT_BUILD_CHARS:
+        if total_chars >= MAX_SNAPSHOT_BUILD_CHARS or nid in visited:
             return
+        visited.add(nid)
         node = by_id.get(nid)
         if not node:
             return
@@ -237,11 +266,13 @@ def format_ax_tree(
         if should_emit:
             indent = "  " * min(depth, 8)
             prefix = ""
+            emitted_ref: str | None = None
             if is_interactive:
                 base_key = f"e{ref_counter}"
                 ref_counter += 1
                 ref_key = f"{base_key}@{generation}" if generation else base_key
                 ref_map[ref_key] = int(backend_id)
+                emitted_ref = ref_key
                 prefix = f"[{ref_key}] "
 
             label_part = f' "{name[:160]}"' if name else ""
@@ -265,6 +296,7 @@ def format_ax_tree(
             if total_chars >= MAX_SNAPSHOT_BUILD_CHARS:
                 return
             lines.append(line)
+            line_refs.append(emitted_ref)
             total_chars += len(line) + 1
             next_depth = depth + 1
 
@@ -327,7 +359,11 @@ def format_ax_tree(
             f"\n... [snapshot tronque : {remaining} caracteres restants, rappelle "
             f"browser_snapshot avec offset={next_offset} pour la suite]"
         )
-    visible_refs = {key: value for key, value in ref_map.items() if f"[{key}]" in text_out}
+    visible_refs = {
+        key: ref_map[key]
+        for key in line_refs[start_index:end_index]
+        if key is not None and key in ref_map
+    }
     return (text_out, visible_refs, next_offset)
 
 
@@ -355,12 +391,20 @@ class _CDPSession:
             max_size=16 * 1024 * 1024,
             open_timeout=self.timeout_seconds,
         )
-        if self.auto_dismiss_beforeunload:
+        try:
+            if self.auto_dismiss_beforeunload:
+                try:
+                    await self._send_raw("Page.enable", {}, wait_timeout=3.0)
+                    self._page_enabled = True
+                except Exception:
+                    pass
+        except BaseException:
             try:
-                await self._send_raw("Page.enable", {}, wait_timeout=3.0)
-                self._page_enabled = True
+                await self._ws.close()
             except Exception:
                 pass
+            self._ws = None
+            raise
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -418,11 +462,18 @@ class _CDPSession:
 
         return await asyncio.wait_for(_wait_reply(), timeout=wait_timeout)
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def call(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        wait_timeout: float | None = None,
+    ) -> dict[str, Any]:
         if method == "Page.enable" and self._page_enabled:
             return {}
+        effective_timeout = wait_timeout if wait_timeout is not None else self.timeout_seconds
         try:
-            return await self._send_raw(method, params or {}, wait_timeout=self.timeout_seconds)
+            return await self._send_raw(method, params or {}, wait_timeout=effective_timeout)
         except (TimeoutError, asyncio.TimeoutError):
             # Si un dialogue beforeunload deja ouvert avant la connexion bloque le renderer, on le rejette et retente une fois
             if self.auto_dismiss_beforeunload and method != "Page.handleJavaScriptDialog":
@@ -434,7 +485,7 @@ class _CDPSession:
                     )
                     self.dismissed_beforeunload = True
                     return await self._send_raw(
-                        method, params or {}, wait_timeout=self.timeout_seconds
+                        method, params or {}, wait_timeout=effective_timeout
                     )
                 except Exception:
                     pass
@@ -447,6 +498,14 @@ class BrowserStatusArgs(BaseModel):
 
 class BrowserLaunchArgs(BaseModel):
     url: str | None = Field(default=None, description="URL optionnelle a ouvrir au lancement.")
+    app: str | None = Field(
+        default=None,
+        description="Nom d'une application web (raccourci .desktop sur le PC, ex: 'Apple Music', 'Marges', 'Gemini') a lancer dans sa fenetre dediee.",
+    )
+    app_mode: bool = Field(
+        default=False,
+        description="Ouvrir l'URL en fenetre d'application web (--app=URL) sans barre d'onglets.",
+    )
     port: int = Field(default=9222, ge=1024, le=65535)
     headless: bool = Field(default=False, description="Lancer sans fenetre visible.")
 
@@ -602,6 +661,58 @@ class BrowserAnalyzeMediaArgs(BaseModel):
     tab_id: str | None = Field(default=None, description="ID de l'onglet cible.")
 
 
+_DESKTOP_FIELD_CODES: frozenset[str] = frozenset({"%u", "%U", "%f", "%F", "%i", "%c", "%k"})
+_DESKTOP_CHROME_DOMAIN_RE = re.compile(r"^chrome-(?P<domain>[a-zA-Z0-9.-]+?)__")
+
+
+@dataclass(slots=True)
+class _WebAppShortcut:
+    desktop_path: Path
+    desktop_id: str
+    name: str
+    exec_cmd: list[str]
+    app_url: str | None
+    app_id: str | None
+    domain: str
+    wm_class: str | None
+
+
+def _sync_default_profile_session(dst_root: Path, src_root: Path | None = None) -> None:
+    """Copie la session Chromium Default (cookies, preferences, storage) vers dst_root."""
+    source_root = src_root or (Path.home() / ".config" / "chromium")
+    src_def = source_root / "Default"
+    if not src_def.is_dir():
+        return
+    dst_def = dst_root / "Default"
+    dst_def.mkdir(parents=True, exist_ok=True)
+    for fname in ("Local State",):
+        src_file = source_root / fname
+        if src_file.is_file():
+            try:
+                shutil.copy2(src_file, dst_root / fname)
+            except OSError:
+                pass
+    for fname in ("Cookies", "Preferences", "Secure Preferences"):
+        src_file = src_def / fname
+        if src_file.is_file():
+            try:
+                shutil.copy2(src_file, dst_def / fname)
+            except OSError:
+                pass
+    for dname in ("Local Storage", "Session Storage"):
+        src_dir = src_def / dname
+        if src_dir.is_dir():
+            try:
+                shutil.copytree(
+                    src_dir,
+                    dst_def / dname,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("LOCK", "*.lock"),
+                )
+            except OSError:
+                pass
+
+
 class BrowserToolkit:
     """Controle autonome du navigateur Chrome/Chromium via CDP et arbre d'accessibilite."""
 
@@ -610,12 +721,14 @@ class BrowserToolkit:
         cdp_url: str | None = None,
         autonomy_policy: AutonomyPolicy | None = None,
         timeout_seconds: float = 10.0,
+        apps_dir: Path | None = None,
     ) -> None:
         self.cdp_url = (
             cdp_url or os.environ.get("JARVIS_CDP_URL", "http://127.0.0.1:9222")
         ).rstrip("/")
         self.autonomy_policy = autonomy_policy
         self.timeout_seconds = timeout_seconds
+        self.apps_dir: Path = apps_dir or (Path.home() / ".local" / "share" / "applications")
         self._ref_maps: dict[str, dict[str, int]] = {}
         self._ref_gens: dict[str, int] = {}
         self._active_tab_id: str | None = None
@@ -735,6 +848,28 @@ class BrowserToolkit:
         ok, reason = self.autonomy_policy.check_url_allowed(tab_url)
         return None if ok else (reason or "Domaine bloque.")
 
+    @staticmethod
+    def _validate_http_url(url: str) -> str | None:
+        cleaned = (url or "").strip()
+        parsed = urlparse(cleaned)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return "Seules les URLs http:// ou https:// valides sont autorisees."
+        return None
+
+    def close(self) -> None:
+        """Termine proprement le processus Chromium eventuellement lance par ce toolkit."""
+        proc = self._launched_proc
+        self._launched_proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
     async def browser_status(self, args: BrowserStatusArgs) -> dict[str, Any]:
         _ = args
         try:
@@ -755,24 +890,9 @@ class BrowserToolkit:
                 "hint": "Lancez chromium --remote-debugging-port=9222 ou appelez browser_launch.",
             }
 
-    async def browser_launch(self, args: BrowserLaunchArgs) -> dict[str, Any]:
-        try:
-            tabs = await self._fetch_tabs()
-            return {
-                "ok": True,
-                "already_running": True,
-                "cdp_url": self.cdp_url,
-                "tabs_count": len(tabs),
-            }
-        except Exception:
-            pass
-
-        if args.url and self.autonomy_policy:
-            ok, reason = self.autonomy_policy.check_url_allowed(args.url)
-            if not ok:
-                return {"ok": False, "error": reason}
-
-        browser_bin = (
+    @staticmethod
+    def _find_browser_binary() -> str | None:
+        return (
             shutil.which("chromium")
             or shutil.which("google-chrome")
             or shutil.which("google-chrome-stable")
@@ -785,11 +905,312 @@ class BrowserToolkit:
             or shutil.which("microsoft-edge-stable")
             or shutil.which("edge")
         )
+
+    def _discover_webapp_shortcuts(self) -> list[_WebAppShortcut]:
+        if not self.apps_dir.is_dir():
+            return []
+        shortcuts: list[_WebAppShortcut] = []
+        for path in sorted(self.apps_dir.glob("*.desktop")):
+            if path.name in {"jarvis.desktop", "moa.desktop"}:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            name = ""
+            exec_raw = ""
+            wm_class: str | None = None
+            in_desktop_entry = False
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("["):
+                    in_desktop_entry = line == "[Desktop Entry]"
+                    continue
+                if not in_desktop_entry or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                if key == "Name" and not name:
+                    name = val
+                elif key == "Exec" and not exec_raw:
+                    exec_raw = val
+                elif key == "StartupWMClass" and not wm_class:
+                    wm_class = val
+            if not exec_raw:
+                continue
+            try:
+                tokens = [tok for tok in shlex.split(exec_raw) if tok not in _DESKTOP_FIELD_CODES]
+            except ValueError:
+                continue
+            if not tokens:
+                continue
+            app_url: str | None = None
+            app_id: str | None = None
+            for tok in tokens:
+                if tok.startswith("--app="):
+                    app_url = tok.split("=", 1)[1].strip()
+                elif tok.startswith("--app-id="):
+                    app_id = tok.split("=", 1)[1].strip()
+            if not app_url and not app_id:
+                continue
+            domain = extract_domain(app_url) if app_url else ""
+            if not domain:
+                m = _DESKTOP_CHROME_DOMAIN_RE.match(path.stem)
+                if m:
+                    domain = extract_domain(m.group("domain"))
+            if domain in {"localhost", "127.0.0.1"}:
+                continue
+            shortcuts.append(
+                _WebAppShortcut(
+                    desktop_path=path,
+                    desktop_id=path.name,
+                    name=name or path.stem,
+                    exec_cmd=tokens,
+                    app_url=app_url,
+                    app_id=app_id,
+                    domain=domain,
+                    wm_class=wm_class,
+                )
+            )
+        return shortcuts
+
+    def _find_webapp_shortcut(
+        self, *, url: str | None = None, app: str | None = None
+    ) -> _WebAppShortcut | None:
+        shortcuts = self._discover_webapp_shortcuts()
+        if not shortcuts:
+            return None
+        if app:
+            needle = app.strip().lower()
+            for sc in shortcuts:
+                if sc.name.lower() == needle or sc.desktop_id.lower() == needle:
+                    return sc
+            for sc in shortcuts:
+                if needle in sc.name.lower() or (sc.domain and needle in sc.domain.lower()):
+                    return sc
+        if url:
+            target_domain = extract_domain(url)
+            if target_domain:
+                for sc in shortcuts:
+                    if not sc.domain:
+                        continue
+                    if (
+                        target_domain == sc.domain
+                        or target_domain.endswith(f".{sc.domain}")
+                        or sc.domain.endswith(f".{target_domain}")
+                    ):
+                        return sc
+        return None
+
+    @staticmethod
+    def _tab_matches_domain(tab_url: str, domain: str) -> bool:
+        if not domain:
+            return False
+        tab_dom = extract_domain(tab_url)
+        return bool(
+            tab_dom
+            and (
+                tab_dom == domain
+                or tab_dom.endswith(f".{domain}")
+                or domain.endswith(f".{tab_dom}")
+            )
+        )
+
+    async def _wait_tab_stable(self, tab: dict[str, Any]) -> bool:
+        ws_url = tab.get("webSocketDebuggerUrl")
+        if not ws_url:
+            return False
+        for _ in range(3):
+            try:
+                async with _CDPSession(str(ws_url), self.timeout_seconds) as cdp:
+                    return await self._safe_wait_dom_stable(cdp, timeout=8.0)
+            except Exception:
+                await asyncio.sleep(0.3)
+        return False
+
+    async def _open_or_activate_webapp(
+        self,
+        shortcut: _WebAppShortcut,
+        *,
+        requested_url: str | None = None,
+        port: int = 9222,
+    ) -> dict[str, Any]:
+        target_url = (requested_url or shortcut.app_url or "").strip()
+        if target_url:
+            scheme_err = self._validate_http_url(target_url)
+            if scheme_err:
+                return {"ok": False, "error": scheme_err}
+            if self.autonomy_policy:
+                ok, reason = self.autonomy_policy.check_url_allowed(target_url)
+                if not ok:
+                    return {"ok": False, "error": reason}
+
+        before_ids: set[str] = set()
+        try:
+            existing_tabs = await self._fetch_tabs()
+            before_ids = {str(t.get("id", "")) for t in existing_tabs}
+            for tab in existing_tabs:
+                if self._tab_matches_domain(str(tab.get("url", "")), shortcut.domain):
+                    tid = str(tab.get("id", ""))
+                    self._active_tab_id = tid
+                    try:
+                        async with httpx.AsyncClient(timeout=3.0) as client:
+                            await client.get(f"{self.cdp_url}/json/activate/{tid}")
+                    except Exception:
+                        pass
+                    return {
+                        "ok": True,
+                        "already_open": True,
+                        "tab_id": tid,
+                        "url": tab.get("url", ""),
+                        "title": tab.get("title", ""),
+                        "web_app": shortcut.name,
+                        "desktop_file": shortcut.desktop_id,
+                    }
+        except Exception:
+            existing_tabs = []
+
+        # Lancer d'abord via la commande du raccourci .desktop
+        cmd = list(shortcut.exec_cmd)
+        if not any(tok.startswith("--remote-debugging-port") for tok in cmd):
+            cmd.insert(1, f"--remote-debugging-port={port}")
+        if not any(tok.startswith("--window-size") for tok in cmd):
+            cmd.append("--window-size=1280,820")
+
+        self._launched_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        if not before_ids:
+            self.cdp_url = f"http://127.0.0.1:{port}"
+
+        matched_tab: dict[str, Any] | None = None
+        for _ in range(14):
+            await asyncio.sleep(0.25)
+            try:
+                tabs = await self._fetch_tabs()
+            except Exception:
+                continue
+            for tab in tabs:
+                if self._tab_matches_domain(str(tab.get("url", "")), shortcut.domain):
+                    matched_tab = tab
+                    break
+            if matched_tab is None and before_ids:
+                for tab in tabs:
+                    if str(tab.get("id", "")) not in before_ids:
+                        matched_tab = tab
+                        break
+            if matched_tab is not None:
+                break
+
+        # Repli si ~/.config/chromium est deja verrouille par un Chromium sans CDP
+        if matched_tab is None and (shortcut.app_url or target_url):
+            browser_bin = self._find_browser_binary()
+            if browser_bin:
+                app_url = shortcut.app_url or target_url
+                profile_dir = Path.home() / ".local" / "share" / "jarvis-browser"
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(_sync_default_profile_session, profile_dir)
+                fallback_port = port if not before_ids else (port + 1 if port < 65535 else port - 1)
+                fallback_cmd = [
+                    browser_bin,
+                    f"--remote-debugging-port={fallback_port}",
+                    f"--user-data-dir={profile_dir}",
+                    "--profile-directory=Default",
+                    "--window-size=1280,820",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ]
+                if shortcut.wm_class:
+                    fallback_cmd.append(f"--class={shortcut.wm_class}")
+                fallback_cmd.append(f"--app={app_url}")
+                self._launched_proc = subprocess.Popen(
+                    fallback_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                self.cdp_url = f"http://127.0.0.1:{fallback_port}"
+                for _ in range(24):
+                    await asyncio.sleep(0.25)
+                    try:
+                        tabs = await self._fetch_tabs()
+                    except Exception:
+                        continue
+                    for tab in tabs:
+                        if self._tab_matches_domain(str(tab.get("url", "")), shortcut.domain):
+                            matched_tab = tab
+                            break
+                    if matched_tab is None and tabs:
+                        matched_tab = tabs[0]
+                    if matched_tab is not None:
+                        break
+
+        if matched_tab is None:
+            return {
+                "ok": False,
+                "error": (
+                    f"Application web '{shortcut.name}' lancee mais inaccessible via CDP sur {self.cdp_url}."
+                ),
+                "web_app": shortcut.name,
+                "desktop_file": shortcut.desktop_id,
+            }
+
+        tid = str(matched_tab.get("id", ""))
+        self._active_tab_id = tid
+        load_stable = await self._wait_tab_stable(matched_tab)
+        return {
+            "ok": True,
+            "launched": True,
+            "tab_id": tid,
+            "url": matched_tab.get("url", target_url),
+            "title": matched_tab.get("title", ""),
+            "web_app": shortcut.name,
+            "desktop_file": shortcut.desktop_id,
+            "load_stable": load_stable,
+        }
+
+    async def browser_launch(self, args: BrowserLaunchArgs) -> dict[str, Any]:
+        shortcut = self._find_webapp_shortcut(url=args.url, app=args.app)
+        if shortcut is not None:
+            return await self._open_or_activate_webapp(
+                shortcut, requested_url=args.url, port=args.port
+            )
+
+        try:
+            tabs = await self._fetch_tabs()
+            return {
+                "ok": True,
+                "already_running": True,
+                "cdp_url": self.cdp_url,
+                "tabs_count": len(tabs),
+            }
+        except Exception:
+            pass
+
+        if args.url:
+            scheme_err = self._validate_http_url(args.url)
+            if scheme_err:
+                return {"ok": False, "error": scheme_err}
+            if self.autonomy_policy:
+                ok, reason = self.autonomy_policy.check_url_allowed(args.url)
+                if not ok:
+                    return {"ok": False, "error": reason}
+
+        browser_bin = self._find_browser_binary()
         if not browser_bin:
             return {"ok": False, "error": "Aucun binaire Chromium/Chrome trouve dans PATH."}
 
+        self.close()
         profile_dir = Path.home() / ".local" / "share" / "jarvis-browser"
         profile_dir.mkdir(parents=True, exist_ok=True)
+        if not args.headless:
+            await asyncio.to_thread(_sync_default_profile_session, profile_dir)
         cmd = [
             browser_bin,
             f"--remote-debugging-port={args.port}",
@@ -800,7 +1221,10 @@ class BrowserToolkit:
         if args.headless:
             cmd.append("--headless=new")
         if args.url:
-            cmd.append(args.url)
+            if args.app_mode:
+                cmd.append(f"--app={args.url.strip()}")
+            else:
+                cmd.extend(["--", args.url.strip()])
 
         self._launched_proc = subprocess.Popen(
             cmd,
@@ -822,6 +1246,7 @@ class BrowserToolkit:
                 }
             except Exception:
                 continue
+        self.close()
         return {
             "ok": False,
             "error": f"Navigateur lance mais port CDP {args.port} inaccessible apres 5s.",
@@ -845,10 +1270,16 @@ class BrowserToolkit:
         return {"ok": True, "count": len(items), "tabs": items}
 
     async def browser_open_tab(self, args: BrowserOpenTabArgs) -> dict[str, Any]:
+        scheme_err = self._validate_http_url(args.url)
+        if scheme_err:
+            return {"ok": False, "error": scheme_err}
         if self.autonomy_policy:
             ok, reason = self.autonomy_policy.check_url_allowed(args.url)
             if not ok:
                 return {"ok": False, "error": reason}
+        shortcut = self._find_webapp_shortcut(url=args.url)
+        if shortcut is not None:
+            return await self._open_or_activate_webapp(shortcut, requested_url=args.url)
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             resp = await client.put(f"{self.cdp_url}/json/new?{quote(args.url, safe=':/?&=')}")
             resp.raise_for_status()
@@ -856,16 +1287,7 @@ class BrowserToolkit:
         self._active_tab_id = str(tab.get("id", ""))
         # /json/new rend la main avant le chargement : sans cette attente le premier
         # browser_snapshot lit un arbre vide et le modele croit la page inutilisable.
-        load_stable = False
-        ws_url = tab.get("webSocketDebuggerUrl")
-        if ws_url:
-            for _ in range(3):
-                try:
-                    async with _CDPSession(str(ws_url), self.timeout_seconds) as cdp:
-                        load_stable = await self._safe_wait_dom_stable(cdp, timeout=8.0)
-                    break
-                except Exception:
-                    await asyncio.sleep(0.3)
+        load_stable = await self._wait_tab_stable(tab)
         return {
             "ok": True,
             "tab_id": self._active_tab_id,
@@ -877,14 +1299,15 @@ class BrowserToolkit:
     async def browser_close_tab(self, args: BrowserCloseTabArgs) -> dict[str, Any]:
         tab = await self._resolve_tab(args.tab_id)
         tid = str(tab["id"])
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            resp = await client.get(f"{self.cdp_url}/json/close/{tid}")
-            resp.raise_for_status()
-        self._ref_maps.pop(tid, None)
-        self._ref_gens.pop(tid, None)
+        async with self._tab_lock(tid):
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resp = await client.get(f"{self.cdp_url}/json/close/{tid}")
+                resp.raise_for_status()
+            self._ref_maps.pop(tid, None)
+            self._ref_gens.pop(tid, None)
+            if self._active_tab_id == tid:
+                self._active_tab_id = None
         self._tab_locks.pop(tid, None)
-        if self._active_tab_id == tid:
-            self._active_tab_id = None
         return {"ok": True, "closed_tab_id": tid}
 
     async def browser_history(self, args: BrowserHistoryArgs) -> dict[str, Any]:
@@ -893,15 +1316,16 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked, "blocked_by": "domain_policy"}
-        async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
-            await cdp.call("Page.enable")
-            await cdp.call(
-                "Runtime.evaluate",
-                {"expression": f"history.{args.direction}()", "returnByValue": True},
-            )
-            stable = await self._safe_wait_dom_stable(cdp, timeout=10.0)
-        self._ref_maps.pop(tid, None)
-        self._ref_gens.pop(tid, None)
+        async with self._tab_lock(tid):
+            async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
+                await cdp.call("Page.enable")
+                await cdp.call(
+                    "Runtime.evaluate",
+                    {"expression": f"history.{args.direction}()", "returnByValue": True},
+                )
+                stable = await self._safe_wait_dom_stable(cdp, timeout=10.0)
+            self._ref_maps.pop(tid, None)
+            self._ref_gens.pop(tid, None)
         return {
             "ok": True,
             "tab_id": tid,
@@ -921,9 +1345,9 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked, "blocked_by": "domain_policy"}
-        backend_id = self._lookup_backend_id(tid, args.ref)
 
         async with self._tab_lock(tid):
+            backend_id = self._lookup_backend_id(tid, args.ref)
             async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
                 await cdp.call("DOM.enable")
                 await cdp.call(
@@ -964,6 +1388,9 @@ class BrowserToolkit:
         }
 
     async def browser_navigate(self, args: BrowserNavigateArgs) -> dict[str, Any]:
+        scheme_err = self._validate_http_url(args.url)
+        if scheme_err:
+            return {"ok": False, "error": scheme_err}
         if self.autonomy_policy:
             ok, reason = self.autonomy_policy.check_url_allowed(args.url)
             if not ok:
@@ -971,12 +1398,13 @@ class BrowserToolkit:
         tab = await self._resolve_tab(args.tab_id)
         tid = str(tab["id"])
         self._active_tab_id = tid
-        async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
-            await cdp.call("Page.enable")
-            res = await cdp.call("Page.navigate", {"url": args.url})
-            stable = await self._safe_wait_dom_stable(cdp, timeout=10.0)
-        self._ref_maps.pop(tid, None)
-        self._ref_gens.pop(tid, None)
+        async with self._tab_lock(tid):
+            async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
+                await cdp.call("Page.enable")
+                res = await cdp.call("Page.navigate", {"url": args.url})
+                stable = await self._safe_wait_dom_stable(cdp, timeout=10.0)
+            self._ref_maps.pop(tid, None)
+            self._ref_gens.pop(tid, None)
         return {
             "ok": True,
             "tab_id": tid,
@@ -1001,58 +1429,59 @@ class BrowserToolkit:
             except Exception:
                 pass
 
-        async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
-            await cdp.call("Accessibility.enable")
-            ax_res = await cdp.call("Accessibility.getFullAXTree")
-            nodes = list(ax_res.get("nodes") or [])
-            try:
-                frame_tree_res = await cdp.call("Page.getFrameTree")
-                child_frame_ids: list[str] = []
+        async with self._tab_lock(tid):
+            async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
+                await cdp.call("Accessibility.enable")
+                ax_res = await cdp.call("Accessibility.getFullAXTree")
+                nodes = list(ax_res.get("nodes") or [])
+                try:
+                    frame_tree_res = await cdp.call("Page.getFrameTree")
+                    child_frame_ids: list[str] = []
 
-                def _collect_frames(ft: dict[str, Any], is_root: bool = True) -> None:
-                    frame = ft.get("frame") or {}
-                    fid = frame.get("id")
-                    if not is_root and fid:
-                        child_frame_ids.append(str(fid))
-                    for ch in ft.get("childFrames") or []:
-                        if isinstance(ch, dict):
-                            _collect_frames(ch, is_root=False)
+                    def _collect_frames(ft: dict[str, Any], is_root: bool = True) -> None:
+                        frame = ft.get("frame") or {}
+                        fid = frame.get("id")
+                        if not is_root and fid:
+                            child_frame_ids.append(str(fid))
+                        for ch in ft.get("childFrames") or []:
+                            if isinstance(ch, dict):
+                                _collect_frames(ch, is_root=False)
 
-                _collect_frames(frame_tree_res.get("frameTree") or {}, is_root=True)
-                for fid in child_frame_ids[:8]:
-                    try:
-                        sub_ax = await cdp.call("Accessibility.getFullAXTree", {"frameId": fid})
-                        for n in sub_ax.get("nodes") or []:
-                            cloned = dict(n)
-                            if cloned.get("nodeId") is not None:
-                                cloned["nodeId"] = f"{fid}:{cloned['nodeId']}"
-                            if cloned.get("childIds"):
-                                cloned["childIds"] = [f"{fid}:{c}" for c in cloned["childIds"]]
-                            nodes.append(cloned)
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-        # offset=0 : nouvelle lecture -> nouvelle generation, table remise a zero.
-        # offset>0 : page suivante de la MEME generation, refs accumulees (sinon les
-        # references de la page precedente deviendraient perimees en pleine lecture).
-        continuing = args.offset > 0 and self._ref_gens.get(tid, 0) > 0
-        if continuing:
-            generation = self._ref_gens[tid]
-        else:
-            generation = self._ref_gens.get(tid, 0) + 1
-            self._ref_gens[tid] = generation
+                    _collect_frames(frame_tree_res.get("frameTree") or {}, is_root=True)
+                    for fid in child_frame_ids[:8]:
+                        try:
+                            sub_ax = await cdp.call("Accessibility.getFullAXTree", {"frameId": fid})
+                            for n in sub_ax.get("nodes") or []:
+                                cloned = dict(n)
+                                if cloned.get("nodeId") is not None:
+                                    cloned["nodeId"] = f"{fid}:{cloned['nodeId']}"
+                                if cloned.get("childIds"):
+                                    cloned["childIds"] = [f"{fid}:{c}" for c in cloned["childIds"]]
+                                nodes.append(cloned)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+            # offset=0 : nouvelle lecture -> nouvelle generation, table remise a zero.
+            # offset>0 : page suivante de la MEME generation, refs accumulees (sinon les
+            # references de la page precedente deviendraient perimees en pleine lecture).
+            continuing = args.offset > 0 and self._ref_gens.get(tid, 0) > 0
+            if continuing:
+                generation = self._ref_gens[tid]
+            else:
+                generation = self._ref_gens.get(tid, 0) + 1
+                self._ref_gens[tid] = generation
 
-        snapshot_text, page_refs, next_offset = format_ax_tree(
-            nodes,
-            max_chars=args.max_chars,
-            generation=generation,
-            offset=args.offset,
-        )
-        if continuing:
-            self._ref_maps.setdefault(tid, {}).update(page_refs)
-        else:
-            self._ref_maps[tid] = dict(page_refs)
+            snapshot_text, page_refs, next_offset = format_ax_tree(
+                nodes,
+                max_chars=args.max_chars,
+                generation=generation,
+                offset=args.offset,
+            )
+            if continuing:
+                self._ref_maps.setdefault(tid, {}).update(page_refs)
+            else:
+                self._ref_maps[tid] = dict(page_refs)
 
         lowered = snapshot_text.lower()
         title_lowered = str(tab.get("title", "")).lower()
@@ -1128,9 +1557,9 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked}
-        backend_id = self._lookup_backend_id(tid, args.ref)
 
         async with self._tab_lock(tid):
+            backend_id = self._lookup_backend_id(tid, args.ref)
             async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
                 await cdp.call("DOM.enable")
                 try:
@@ -1200,9 +1629,9 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked}
-        backend_id = self._lookup_backend_id(tid, args.ref)
 
         async with self._tab_lock(tid):
+            backend_id = self._lookup_backend_id(tid, args.ref)
             async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
                 await cdp.call("DOM.enable")
                 try:
@@ -1307,8 +1736,18 @@ class BrowserToolkit:
                                 "returnByValue": True,
                                 "functionDeclaration": (
                                     "function() { "
+                                    "const win = (this.ownerDocument && this.ownerDocument.defaultView) || window; "
+                                    "const tmce = win.tinymce || (win.parent && win.parent.tinymce) || null; "
+                                    "const edId = (this.dataset && this.dataset.id) || (this.id ? this.id.replace(/_ifr$/, '') : ''); "
+                                    "if (tmce && typeof tmce.get === 'function' && edId && tmce.get(edId)) "
+                                    "  return String(tmce.get(edId).getContent({format: 'text'}) || ''); "
+                                    "if (this.tagName === 'IFRAME' && this.contentDocument && this.contentDocument.body) "
+                                    "  return String(this.contentDocument.body.innerText || ''); "
                                     "if ('value' in this && typeof this.value === 'string') "
                                     "  return this.value; "
+                                    "const cmWrap = this.CodeMirror ? this : (this.closest ? this.closest('.CodeMirror') : null); "
+                                    "if (cmWrap && cmWrap.CodeMirror && typeof cmWrap.CodeMirror.getValue === 'function') "
+                                    "  return String(cmWrap.CodeMirror.getValue() || ''); "
                                     "const ce = this.isContentEditable ? this : "
                                     "  (this.closest ? this.closest('[contenteditable=\"true\"]') : null); "
                                     "if (ce) return String(ce.innerText || ''); "
@@ -1348,9 +1787,9 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked}
-        backend_id = self._lookup_backend_id(tid, args.ref)
 
         async with self._tab_lock(tid):
+            backend_id = self._lookup_backend_id(tid, args.ref)
             async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
                 await cdp.call("DOM.enable")
                 resolved = await cdp.call("DOM.resolveNode", {"backendNodeId": backend_id})
@@ -1424,32 +1863,36 @@ class BrowserToolkit:
     async def browser_scroll(self, args: BrowserScrollArgs) -> dict[str, Any]:
         tab = await self._resolve_tab(args.tab_id)
         tid = str(tab["id"])
-        async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
-            if args.ref:
-                backend_id = self._lookup_backend_id(tid, args.ref)
-                await cdp.call("DOM.enable")
-                await cdp.call("DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend_id})
-                return {"ok": True, "tab_id": tid, "scrolled_to": self._clean_ref(args.ref)}
+        blocked = self._check_tab_domain(str(tab.get("url", "")))
+        if blocked:
+            return {"ok": False, "error": blocked, "blocked_by": "domain_policy"}
+        async with self._tab_lock(tid):
+            async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
+                if args.ref:
+                    backend_id = self._lookup_backend_id(tid, args.ref)
+                    await cdp.call("DOM.enable")
+                    await cdp.call("DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend_id})
+                    return {"ok": True, "tab_id": tid, "scrolled_to": self._clean_ref(args.ref)}
 
-            js_map = {
-                "down": f"window.scrollBy(0, {args.pixels})",
-                "up": f"window.scrollBy(0, -{args.pixels})",
-                "top": "window.scrollTo(0, 0)",
-                "bottom": "window.scrollTo(0, document.body.scrollHeight)",
-            }
-            eval_res = await cdp.call(
-                "Runtime.evaluate",
-                {
-                    "expression": (
-                        f"(() => {{ const before = window.scrollY; {js_map[args.direction]}; "
-                        "const after = window.scrollY; "
-                        "const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight); "
-                        "return {before, after, maxY, at_bottom: after >= maxY - 2}; })()"
-                    ),
-                    "returnByValue": True,
-                },
-            )
-            info = (eval_res.get("result") or {}).get("value") or {}
+                js_map = {
+                    "down": f"window.scrollBy(0, {args.pixels})",
+                    "up": f"window.scrollBy(0, -{args.pixels})",
+                    "top": "window.scrollTo(0, 0)",
+                    "bottom": "window.scrollTo(0, document.body.scrollHeight)",
+                }
+                eval_res = await cdp.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            f"(() => {{ const before = window.scrollY; {js_map[args.direction]}; "
+                            "const after = window.scrollY; "
+                            "const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight); "
+                            "return {before, after, maxY, at_bottom: after >= maxY - 2}; })()"
+                        ),
+                        "returnByValue": True,
+                    },
+                )
+                info = (eval_res.get("result") or {}).get("value") or {}
         out: dict[str, Any] = {
             "ok": True,
             "tab_id": tid,
@@ -1469,10 +1912,10 @@ class BrowserToolkit:
         blocked = self._check_tab_domain(str(tab.get("url", "")))
         if blocked:
             return {"ok": False, "error": blocked}
-        src_backend_id = self._lookup_backend_id(tid, args.source_ref)
-        dst_backend_id = self._lookup_backend_id(tid, args.target_ref)
 
         async with self._tab_lock(tid):
+            src_backend_id = self._lookup_backend_id(tid, args.source_ref)
+            dst_backend_id = self._lookup_backend_id(tid, args.target_ref)
             async with _CDPSession(tab["webSocketDebuggerUrl"], self.timeout_seconds) as cdp:
                 await cdp.call("DOM.enable")
                 src_node = await cdp.call("DOM.resolveNode", {"backendNodeId": src_backend_id})
@@ -1776,7 +2219,7 @@ class BrowserToolkit:
             "method": (
                 "moodle_keyboard"
                 if moodle_method_used
-                else ("mouse+html5" if dragged_via_mouse else "html5")
+                else ("mouse" if dragged_via_mouse else "html5")
             ),
         }
         if moodle_value is not None:
@@ -1803,10 +2246,24 @@ class BrowserToolkit:
                 await cdp.call("Page.handleJavaScriptDialog", params)
         return {"ok": True, "tab_id": tid, "accepted": args.accept}
 
+    @staticmethod
+    def _same_origin(url_a: str, url_b: str) -> bool:
+        pa, pb = urlparse(url_a), urlparse(url_b)
+        if not pa.scheme or not pa.hostname or not pb.scheme or not pb.hostname:
+            return False
+        port_a = pa.port or (443 if pa.scheme.lower() == "https" else 80)
+        port_b = pb.port or (443 if pb.scheme.lower() == "https" else 80)
+        return (
+            pa.scheme.lower() == pb.scheme.lower()
+            and pa.hostname.lower() == pb.hostname.lower()
+            and port_a == port_b
+        )
+
     async def browser_analyze_media(self, args: BrowserAnalyzeMediaArgs) -> dict[str, Any]:
         tab = await self._resolve_tab(args.tab_id)
         tid = str(tab["id"])
-        blocked = self._check_tab_domain(str(tab.get("url", "")))
+        tab_url = str(tab.get("url", ""))
+        blocked = self._check_tab_domain(tab_url)
         if blocked:
             return {"ok": False, "error": blocked}
 
@@ -1820,11 +2277,13 @@ class BrowserToolkit:
           for (const tr of tracks) {{
             if (tr.src) {{
               try {{
-                const r = await fetch(tr.src, {{credentials: 'include'}});
+                const trackUrl = new URL(tr.src, location.href);
+                if (trackUrl.origin !== location.origin) continue;
+                const r = await fetch(trackUrl.href, {{credentials: 'include'}});
                 if (r.ok) {{
                   const txt = await r.text();
                   if (txt && txt.trim().length > 20) {{
-                    return {{ok: true, mode: 'subtitles', url: tr.src, text: txt.slice(0, 24000)}};
+                    return {{ok: true, mode: 'subtitles', url: trackUrl.href, text: txt.slice(0, 24000)}};
                   }}
                 }}
               }} catch (e) {{}}
@@ -1854,32 +2313,57 @@ class BrowserToolkit:
         }})()
         """
 
-        async with _CDPSession(tab["webSocketDebuggerUrl"], max(self.timeout_seconds, 20.0)) as cdp:
-            eval_res = await cdp.call(
-                "Runtime.evaluate",
-                {"expression": js_inspect, "returnByValue": True, "awaitPromise": True},
-            )
-            info = ((eval_res.get("result") or {}).get("value")) or {}
-            if not info.get("ok"):
-                return {
-                    "ok": False,
-                    "tab_id": tid,
-                    "error": info.get("error") or "Echec inspection media.",
-                }
+        async with self._tab_lock(tid):
+            async with _CDPSession(
+                tab["webSocketDebuggerUrl"], max(self.timeout_seconds, 20.0)
+            ) as cdp:
+                eval_res = await cdp.call(
+                    "Runtime.evaluate",
+                    {"expression": js_inspect, "returnByValue": True, "awaitPromise": True},
+                )
+                info = ((eval_res.get("result") or {}).get("value")) or {}
+                if not info.get("ok"):
+                    return {
+                        "ok": False,
+                        "tab_id": tid,
+                        "error": info.get("error") or "Echec inspection media.",
+                    }
 
-            if info.get("mode") == "subtitles":
-                return {
-                    "ok": True,
-                    "tab_id": tid,
-                    "mode": "subtitles",
-                    "analysis": info["text"],
-                }
+                if info.get("mode") == "subtitles":
+                    return {
+                        "ok": True,
+                        "tab_id": tid,
+                        "mode": "subtitles",
+                        "analysis": info["text"],
+                    }
 
-            cookies_res = (
-                await cdp.call("Network.getCookies", {"urls": [info["url"]]})
-                if not info.get("b64")
-                else {}
-            )
+                media_url = str(info.get("url") or "").strip()
+                cookies_res: dict[str, Any] = {}
+                if not info.get("b64"):
+                    # Verifie l'URL media avant toute lecture de cookies ou requete reseau
+                    scheme_err = self._validate_http_url(media_url)
+                    if scheme_err:
+                        return {"ok": False, "tab_id": tid, "error": scheme_err}
+                    blocked_media = self._check_tab_domain(media_url)
+                    if blocked_media:
+                        return {
+                            "ok": False,
+                            "tab_id": tid,
+                            "error": blocked_media,
+                            "blocked_by": "domain_policy",
+                        }
+                    ok_host, host_err = await asyncio.to_thread(
+                        validate_http_target_host, media_url, allow_private=True
+                    )
+                    if not ok_host:
+                        return {
+                            "ok": False,
+                            "tab_id": tid,
+                            "error": host_err or "URL media locale interdite.",
+                        }
+                    # N'attache les cookies CDP que si le media est de la meme origine que l'onglet
+                    if self._same_origin(media_url, tab_url):
+                        cookies_res = await cdp.call("Network.getCookies", {"urls": [media_url]})
 
         from jarvis_core.llm.gemini import GeminiProvider
 
@@ -1891,34 +2375,84 @@ class BrowserToolkit:
 
             mime_type = str(info.get("mime") or "")
             if info.get("b64"):
-                raw_path.write_bytes(base64.b64decode(info["b64"]))
+                decoded = base64.b64decode(info["b64"])
+                await asyncio.to_thread(raw_path.write_bytes, decoded)
             else:
                 cookie_header = "; ".join(
                     f"{c['name']}={c['value']}"
                     for c in (cookies_res.get("cookies") or [])
                     if c.get("name")
                 )
-                headers = {"User-Agent": str(info.get("ua") or "Mozilla/5.0")}
-                if cookie_header:
-                    headers["Cookie"] = cookie_header
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                    async with client.stream("GET", info["url"], headers=headers) as resp:
-                        if resp.status_code >= 400:
+                current_url = str(info["url"]).strip()
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+                    downloaded = False
+                    for _hop in range(6):
+                        scheme_err = self._validate_http_url(current_url)
+                        if scheme_err:
+                            return {"ok": False, "tab_id": tid, "error": scheme_err}
+                        blocked_media = self._check_tab_domain(current_url)
+                        if blocked_media:
                             return {
                                 "ok": False,
                                 "tab_id": tid,
-                                "error": f"HTTP {resp.status_code} lors du telechargement media.",
+                                "error": blocked_media,
+                                "blocked_by": "domain_policy",
                             }
-                        mime_type = (
-                            mime_type or resp.headers.get("content-type", "").split(";")[0].strip()
+                        ok_host, host_err = await asyncio.to_thread(
+                            validate_http_target_host, current_url, allow_private=True
                         )
-                        total = 0
-                        with raw_path.open("wb") as fh:
-                            async for chunk in resp.aiter_bytes(chunk_size=65536):
-                                total += len(chunk)
-                                if total > 150 * 1024 * 1024:
-                                    return {"ok": False, "tab_id": tid, "error": "Media > 150 Mo."}
-                                fh.write(chunk)
+                        if not ok_host:
+                            return {
+                                "ok": False,
+                                "tab_id": tid,
+                                "error": host_err or "Redirection media interdite.",
+                            }
+                        headers = {"User-Agent": str(info.get("ua") or "Mozilla/5.0")}
+                        if cookie_header and self._same_origin(current_url, tab_url):
+                            headers["Cookie"] = cookie_header
+                        async with client.stream("GET", current_url, headers=headers) as resp:
+                            if resp.status_code in {301, 302, 303, 307, 308}:
+                                loc = resp.headers.get("location")
+                                if not loc:
+                                    return {
+                                        "ok": False,
+                                        "tab_id": tid,
+                                        "error": "Redirection media sans Location.",
+                                    }
+                                current_url = urljoin(str(resp.url), loc)
+                                continue
+                            if resp.status_code >= 400:
+                                return {
+                                    "ok": False,
+                                    "tab_id": tid,
+                                    "error": f"HTTP {resp.status_code} lors du telechargement media.",
+                                }
+                            mime_type = (
+                                mime_type
+                                or resp.headers.get("content-type", "").split(";")[0].strip()
+                            )
+                            total = 0
+                            fh = raw_path.open("wb")
+                            try:
+                                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                                    total += len(chunk)
+                                    if total > 150 * 1024 * 1024:
+                                        return {
+                                            "ok": False,
+                                            "tab_id": tid,
+                                            "error": "Media > 150 Mo.",
+                                        }
+                                    await asyncio.to_thread(fh.write, chunk)
+                            finally:
+                                fh.close()
+                            downloaded = True
+                            break
+                    if not downloaded:
+                        return {
+                            "ok": False,
+                            "tab_id": tid,
+                            "error": "Trop de redirections media (> 5).",
+                        }
 
             target_path = raw_path
             target_mime = mime_type or ("audio/mp3" if info.get("mode") == "audio" else "video/mp4")
@@ -1943,7 +2477,15 @@ class BrowserToolkit:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                await proc.wait()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=120.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    proc.kill()
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    proc.kill()
+                    await proc.wait()
+                    raise
                 if proc.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 0:
                     target_path = audio_path
                     target_mime = "audio/mp3"
@@ -2010,7 +2552,7 @@ class BrowserToolkit:
                     except Exception:
                         pass
                     box = await cdp.call("DOM.getBoxModel", {"backendNodeId": backend_id})
-                    model = (box.get("result") or {}).get("model") or {}
+                    model = box.get("model") or {}
                     border = model.get("border") or model.get("content") or []
                     if len(border) >= 8:
                         xs = [border[0], border[2], border[4], border[6]]
@@ -2034,7 +2576,7 @@ class BrowserToolkit:
                     params["captureBeyondViewport"] = True
 
                 shot_res = await cdp.call("Page.captureScreenshot", params, wait_timeout=15.0)
-                b64_data = ((shot_res.get("result") or {}).get("data")) or ""
+                b64_data = str(shot_res.get("data") or "")
                 if not b64_data:
                     return {
                         "ok": False,
@@ -2043,17 +2585,44 @@ class BrowserToolkit:
                     }
 
                 raw_bytes = base64.b64decode(b64_data)
+                shots_dir = (Path(tempfile.gettempdir()) / "jarvis_screenshots").resolve()
+                shots_dir.mkdir(parents=True, exist_ok=True)
+                # Confinement strict : un outil READ_ONLY ne peut jamais ecraser un fichier arbitraire
                 if args.save_path:
-                    dest = Path(args.save_path).expanduser().resolve()
+                    candidate = Path(args.save_path).expanduser()
+                    dest = (
+                        candidate.resolve()
+                        if candidate.is_absolute()
+                        else (shots_dir / candidate).resolve()
+                    )
+                    if not dest.is_relative_to(shots_dir):
+                        return {
+                            "ok": False,
+                            "tab_id": tid,
+                            "error": f"Chemin save_path hors dossier autorise ({shots_dir}).",
+                        }
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(raw_bytes)
+                    await asyncio.to_thread(dest.write_bytes, raw_bytes)
                     saved_path = str(dest)
                 else:
-                    with tempfile.NamedTemporaryFile(
-                        prefix="jarvis_browser_shot_", suffix=".png", delete=False
-                    ) as tmp:
-                        tmp.write(raw_bytes)
-                        saved_path = tmp.name
+
+                    def _write_temp_shot() -> str:
+                        existing = sorted(
+                            shots_dir.glob("jarvis_browser_shot_*.png"),
+                            key=lambda p: p.stat().st_mtime,
+                        )
+                        for stale in existing[:-50]:
+                            stale.unlink(missing_ok=True)
+                        with tempfile.NamedTemporaryFile(
+                            dir=shots_dir,
+                            prefix="jarvis_browser_shot_",
+                            suffix=".png",
+                            delete=False,
+                        ) as tmp:
+                            tmp.write(raw_bytes)
+                            return tmp.name
+
+                    saved_path = await asyncio.to_thread(_write_temp_shot)
 
                 return {
                     "ok": True,
@@ -2078,7 +2647,7 @@ class BrowserToolkit:
             ),
             (
                 "browser_launch",
-                "Lance Chromium avec debogage CDP actif sur le port 9222.",
+                "Lance Chromium avec debogage CDP actif sur le port 9222, ou ouvre/active une application web installee sur le PC (raccourci .desktop, ex: app='Apple Music').",
                 BrowserLaunchArgs,
                 self.browser_launch,
                 RiskLevel.REVERSIBLE_WRITE,
@@ -2164,7 +2733,7 @@ class BrowserToolkit:
                 self.browser_upload_file,
                 RiskLevel.SENSITIVE,
                 False,
-                True,
+                False,
             ),
             (
                 "browser_history",
@@ -2232,23 +2801,16 @@ class BrowserToolkit:
         ]
 
         for name, desc, args_model, handler, risk, returns_untrusted, is_ui in tools:
-
-            def _make(h: Any, m: type[BaseModel]) -> Any:
-                async def _w(**kwargs: Any) -> dict[str, Any]:
-                    parsed = m.model_validate(kwargs)
-                    return await h(parsed)
-
-                return _w
-
             registry.register(
                 RegistryToolSpec(
                     name=name,
                     description=desc,
-                    handler=_make(handler, args_model),
+                    handler=handler,
                     args_model=args_model,
                     risk=risk,
                     returns_untrusted=returns_untrusted,
                     untrusted_source=f"browser:{name}" if returns_untrusted else None,
                     is_interactive_ui=is_ui,
+                    pass_model=True,
                 )
             )

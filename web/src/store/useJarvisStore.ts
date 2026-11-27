@@ -6,7 +6,6 @@ import type {
   ApprovalRequestPayload,
   ChatMessage,
   GoalRecord,
-  SensorName,
   SensorState,
   ServerWsEvent,
   SphereState,
@@ -20,6 +19,7 @@ import type {
 export type JarvisTheme = "amber" | "jarvis-blue";
 export type ThinkingMode = "auto" | "off" | "low" | "medium" | "high";
 export type VoiceListenMode = "off" | "standby" | "active";
+export type TerminalMode = "auto" | "ask";
 
 export interface AudioMetrics {
   amplitude: number;
@@ -34,10 +34,13 @@ export interface JarvisStoreState {
   theme: JarvisTheme;
   activeModel: string;
   thinkingMode: ThinkingMode;
+  terminalMode: TerminalMode;
   partialTranscript: string;
   finalTranscript: string;
   streamingText: string;
   streamingMessageId: string | null;
+  streamingStepBoundary: boolean;
+  streamingStepCount: number;
   messages: ChatMessage[];
   pendingTools: Record<string, ToolCallRecord>;
   approvals: ApprovalItem[];
@@ -60,6 +63,8 @@ export interface JarvisStoreState {
   setTheme: (theme: JarvisTheme) => void;
   setActiveModel: (model: string) => void;
   setThinkingMode: (mode: ThinkingMode) => void;
+  setTerminalMode: (mode: TerminalMode) => void;
+  toggleTerminalMode: () => TerminalMode;
   setWsConnected: (connected: boolean) => void;
   setSphereState: (state: SphereState) => void;
   setAudioMetrics: (metrics: AudioMetrics) => void;
@@ -80,7 +85,6 @@ export interface JarvisStoreState {
   setWakeWordEnabled: (enabled: boolean) => void;
   setWakeWordThreshold: (threshold: number) => void;
   setAudioDuckingEnabled: (enabled: boolean) => void;
-  toggleSensorLocal: (sensor: SensorName, paused: boolean) => void;
   resolveApprovalLocal: (id: string, approved: boolean) => void;
   ackAlertLocal: (id: string, tooNoisy?: boolean) => void;
   appendUserMessage: (text: string, overwriteLast?: boolean) => void;
@@ -165,10 +169,16 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
   theme: initialTheme(),
   activeModel: "deepseek/deepseek-v4.1-flash-1017",
   thinkingMode: initialThinkingMode(),
+  terminalMode:
+    typeof window !== "undefined" && window.localStorage.getItem("jarvis_terminal_mode") === "ask"
+      ? "ask"
+      : "auto",
   partialTranscript: "",
   finalTranscript: "",
   streamingText: "",
   streamingMessageId: null,
+  streamingStepBoundary: false,
+  streamingStepCount: 0,
   messages: [],
   pendingTools: {},
   approvals: [],
@@ -210,6 +220,23 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
       }
     }
     set({ thinkingMode });
+  },
+
+  setTerminalMode: (terminalMode) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem("jarvis_terminal_mode", terminalMode);
+      } catch {
+        // stockage indisponible
+      }
+    }
+    set({ terminalMode });
+  },
+
+  toggleTerminalMode: () => {
+    const next: TerminalMode = get().terminalMode === "auto" ? "ask" : "auto";
+    get().setTerminalMode(next);
+    return next;
   },
 
   setWsConnected: (wsConnected) =>
@@ -319,14 +346,11 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
       messages: [],
       streamingText: "",
       streamingMessageId: null,
+      streamingStepBoundary: false,
+      streamingStepCount: 0,
       sessionStartedAt: new Date().toISOString(),
     }),
   setSensors: (sensors) => set({ sensors }),
-
-  toggleSensorLocal: (sensor, paused) =>
-    set((prev) => ({
-      sensors: prev.sensors.map((s) => (s.sensor === sensor ? { ...s, paused, active: !paused } : s)),
-    })),
 
   resolveApprovalLocal: (id, approved) =>
     set((prev) => ({
@@ -377,6 +401,8 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
       sphereState: prev.wsConnected ? "idle" : "offline",
       streamingText: "",
       streamingMessageId: null,
+      streamingStepBoundary: false,
+      streamingStepCount: 0,
       partialTranscript: "",
       finalTranscript: "",
       lastInterruptedAt: Date.now(),
@@ -394,7 +420,13 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
   handleServerEvent: (event) => {
     switch (event.type) {
       case "state": {
-        set({ sphereState: event.payload.value });
+        const value = event.payload.value;
+        set((prev) => ({
+          sphereState: value,
+          ...(value === "idle" || (value === "thinking" && !prev.streamingMessageId)
+            ? { streamingStepBoundary: false, streamingStepCount: 0 }
+            : {}),
+        }));
         break;
       }
       case "transcript.partial": {
@@ -410,13 +442,22 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
       }
       case "assistant.delta": {
         const { message_id, text } = event.payload;
-        set((prev) => ({
-          streamingMessageId: message_id,
-          streamingText:
-            prev.streamingMessageId === message_id ? prev.streamingText + text : text,
-          partialTranscript: "",
-          finalTranscript: "",
-        }));
+        set((prev) => {
+          const isNewMessage = prev.streamingMessageId !== message_id;
+          const isNewStep = isNewMessage || prev.streamingStepBoundary;
+          return {
+            streamingMessageId: message_id,
+            streamingText: isNewStep ? text : prev.streamingText + text,
+            streamingStepBoundary: false,
+            streamingStepCount: isNewMessage
+              ? 1
+              : isNewStep
+                ? prev.streamingStepCount + 1
+                : prev.streamingStepCount,
+            partialTranscript: "",
+            finalTranscript: "",
+          };
+        });
         break;
       }
       case "assistant.done": {
@@ -445,6 +486,8 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
           messages: updatedMessages,
           streamingMessageId: null,
           streamingText: "",
+          streamingStepBoundary: false,
+          streamingStepCount: 0,
           pendingTools: {},
           partialTranscript: "",
           finalTranscript: "",
@@ -464,6 +507,7 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
         };
         set((prev) => ({
           pendingTools: { ...prev.pendingTools, [p.id]: record },
+          streamingStepBoundary: true,
         }));
         break;
       }
@@ -471,8 +515,11 @@ export const useJarvisStore = create<JarvisStoreState>((set, get) => ({
         const p = event.payload as ToolResultPayload;
         set((prev) => {
           const existing = prev.pendingTools[p.id];
-          if (!existing) return prev;
+          if (!existing) {
+            return { streamingStepBoundary: true };
+          }
           return {
+            streamingStepBoundary: true,
             pendingTools: {
               ...prev.pendingTools,
               [p.id]: { ...existing, ok: p.ok, summary: p.summary },

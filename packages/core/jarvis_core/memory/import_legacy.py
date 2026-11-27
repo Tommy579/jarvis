@@ -136,7 +136,7 @@ def _bootstrap_wiki(wiki_dir: Path, profile: dict) -> None:
             encoding="utf-8",
         )
 
-    rules_file = wiki_dir / "regles.md"
+    rules_file = wiki_dir / "rules.md"
     if not rules_file.exists():
         rules_file.write_text(
             "# Regles pour Jarvis\n\n"

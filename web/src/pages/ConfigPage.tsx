@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { Icon } from "../components/Icon";
 import { VoiceProfilesCard } from "../components/VoiceProfilesCard";
+import { QueryErrorBanner } from "../components/QueryErrorBanner";
 import { PageHeader, Segmented } from "../components/ui";
 import { setSchemePreference, useColorScheme, type SchemePreference } from "../lib/colorScheme";
 import { useJarvisStore, type JarvisTheme, type ThinkingMode } from "../store/useJarvisStore";
@@ -16,7 +17,6 @@ const ROLE_LABELS: Record<string, string> = {
   vision: "Vision",
   memory: "Mémoire",
   deep: "Raisonnement profond",
-  voice_realtime: "Voix temps réel",
 };
 
 const THINKING_OPTIONS: { value: ThinkingMode; label: string }[] = [
@@ -49,6 +49,16 @@ const HASH_TO_TAB: Record<string, ConfigTab> = {
   "#voix": "alerts",
   "#capteurs": "alerts",
 };
+
+function isSafeHttpUrl(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 export function ConfigPage() {
   const qc = useQueryClient();
@@ -98,9 +108,21 @@ export function ConfigPage() {
     window.history.replaceState({}, "", window.location.pathname + window.location.hash);
   }, [qc]);
 
-  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: apiClient.getModels });
-  const usageQuery = useQuery({ queryKey: ["usage"], queryFn: apiClient.getDailyUsage });
-  const budgetQuery = useQuery({ queryKey: ["budget"], queryFn: apiClient.getDailyBudget });
+  const modelsQuery = useQuery({
+    queryKey: ["models"],
+    queryFn: apiClient.getModels,
+    enabled: activeTab === "models",
+  });
+  const usageQuery = useQuery({
+    queryKey: ["usage"],
+    queryFn: apiClient.getDailyUsage,
+    enabled: activeTab === "models",
+  });
+  const budgetQuery = useQuery({
+    queryKey: ["budget"],
+    queryFn: apiClient.getDailyBudget,
+    enabled: activeTab === "models",
+  });
   const [dailyBudgetDraft, setDailyBudgetDraft] = useState("5.00");
 
   useEffect(() => {
@@ -112,36 +134,48 @@ export function ConfigPage() {
     queryKey: ["evals"],
     queryFn: apiClient.getLatestEvals,
     retry: false,
+    enabled: activeTab === "models",
   });
   const integrationsQuery = useQuery({
     queryKey: ["integrations"],
     queryFn: apiClient.getIntegrations,
+    enabled: activeTab === "integrations",
   });
-  const rulesQuery = useQuery({ queryKey: ["rules"], queryFn: apiClient.getRules });
+  const rulesQuery = useQuery({
+    queryKey: ["rules"],
+    queryFn: apiClient.getRules,
+    enabled: activeTab === "alerts",
+  });
   const policyQuery = useQuery({
     queryKey: ["notification_policy"],
     queryFn: apiClient.getNotificationPolicy,
+    enabled: activeTab === "alerts",
   });
   const ordersQuery = useQuery({
     queryKey: ["notification_orders"],
     queryFn: () => apiClient.getNotificationOrders(true),
+    enabled: activeTab === "alerts",
   });
   const blacklistQuery = useQuery({
     queryKey: ["blacklist"],
     queryFn: apiClient.getSensorsBlacklist,
+    enabled: activeTab === "alerts",
   });
   const autostartQuery = useQuery({
     queryKey: ["autostart"],
     queryFn: apiClient.getAutostart,
+    enabled: activeTab === "appearance",
   });
   const autonomyQuery = useQuery({
     queryKey: ["autonomy_policy"],
     queryFn: apiClient.getAutonomyPolicy,
+    enabled: activeTab === "autonomy",
   });
   const tasksQuery = useQuery({
     queryKey: ["autonomous_tasks"],
     queryFn: () => apiClient.getAutonomousTasks(10),
-    refetchInterval: 5000,
+    enabled: activeTab === "autonomy",
+    refetchInterval: activeTab === "autonomy" ? 5000 : false,
   });
 
   useEffect(() => {
@@ -181,6 +215,10 @@ export function ConfigPage() {
       <div className="settings__sections">
         {activeTab === "appearance" && (
           <>
+            <QueryErrorBanner
+              query={autostartQuery}
+              fallback="Impossible de charger le statut du lancement automatique."
+            />
             {/* Apparence */}
           <section id="apparence" className="settings__section">
             <h2>Apparence</h2>
@@ -302,6 +340,14 @@ export function ConfigPage() {
 
         {activeTab === "autonomy" && (
           <>
+            <QueryErrorBanner
+              query={autonomyQuery}
+              fallback="Impossible de charger la politique d'autonomie."
+            />
+            <QueryErrorBanner
+              query={tasksQuery}
+              fallback="Impossible de charger les tâches autonomes récentes."
+            />
             {/* Autonomie */}
           <section id="autonomie" className="settings__section">
             <h2>Autonomie &amp; Contrôle PC</h2>
@@ -411,7 +457,7 @@ export function ConfigPage() {
                       className="btn btn--danger"
                       onClick={() => {
                         void runMutation(async () => {
-                          const res = await apiClient.emergencyStop();
+                          const res = await apiClient.triggerEmergencyStop();
                           await qc.invalidateQueries({ queryKey: ["autonomy_policy"] });
                           await qc.invalidateQueries({ queryKey: ["autonomous_tasks"] });
                           return `Arrêt d'urgence activé (${res.cancelled_tasks.length} tâche(s) annulée(s)).`;
@@ -438,7 +484,10 @@ export function ConfigPage() {
                           [{t.status}] {t.goal.slice(0, 80)}
                         </div>
                         <div className="setting__desc">
-                          {t.iterations}/{t.max_iterations} étapes · ${t.cost_usd.toFixed(4)}
+                          {t.max_iterations > 0
+                            ? `${t.iterations}/${t.max_iterations}`
+                            : t.iterations}{" "}
+                          étapes · ${t.cost_usd.toFixed(4)}
                           {t.current_step ? ` · ${t.current_step}` : ""}
                         </div>
                       </div>
@@ -468,6 +517,18 @@ export function ConfigPage() {
 
         {activeTab === "models" && (
           <>
+            <QueryErrorBanner
+              query={modelsQuery}
+              fallback="Impossible de charger la configuration des modèles."
+            />
+            <QueryErrorBanner
+              query={usageQuery}
+              fallback="Impossible de charger la consommation du jour."
+            />
+            <QueryErrorBanner
+              query={budgetQuery}
+              fallback="Impossible de charger le plafond budgétaire journalier."
+            />
             {/* Modeles */}
           <section id="modeles" className="settings__section">
             <h2>Modèles par rôle</h2>
@@ -493,6 +554,11 @@ export function ConfigPage() {
               <option value="moonshotai/kimi-k3">OpenRouter · Kimi K3</option>
             </datalist>
             <div className="card card--flush">
+              {!modelsQuery.isLoading && !modelsQuery.isError && (modelsQuery.data ?? []).length === 0 && (
+                <div className="muted" style={{ fontSize: "var(--fs-sm)", padding: "var(--sp-4)" }}>
+                  Aucun rôle de modèle configuré.
+                </div>
+              )}
               <ul className="list">
                 {(modelsQuery.data ?? []).map((cfg) => (
                   <li key={cfg.role} className="model-row">
@@ -502,6 +568,7 @@ export function ConfigPage() {
                     </div>
                     <div className="model-row__controls">
                       <input
+                        key={`${cfg.role}:${cfg.model}`}
                         type="text"
                         list="jarvis-model-suggestions"
                         className="input mono"
@@ -607,7 +674,7 @@ export function ConfigPage() {
               >
                 <label className="stack" style={{ gap: 4, flex: "1 1 220px" }}>
                   <span style={{ fontSize: "var(--fs-xs)" }} className="muted">
-                    Plafond journalier LLM (USD) — 0 = illimité
+                    Plafond journalier par fournisseur LLM (USD) — 0 = illimité
                   </span>
                   <input
                     type="number"
@@ -642,7 +709,9 @@ export function ConfigPage() {
 
               {(usageQuery.data ?? []).length === 0 ? (
                 <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>
-                  Aucune consommation enregistrée pour l'instant.
+                  {usageQuery.isError
+                    ? "Consommation indisponible : le service jarvis-core n'a pas répondu."
+                    : "Aucune consommation enregistrée pour l'instant."}
                 </div>
               ) : (
                 (usageQuery.data ?? []).map((row) => (
@@ -691,7 +760,14 @@ export function ConfigPage() {
                 </div>
               ) : !evalsQuery.isLoading ? (
                 <div className="mono muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Banc d'essai jamais exécuté (ou lancez <span className="kbd">jarvis eval --save</span>).
+                  {evalsQuery.isError ? (
+                    "Résultats du banc d'essai indisponibles."
+                  ) : (
+                    <>
+                      Banc d'essai jamais exécuté (ou lancez{" "}
+                      <span className="kbd">jarvis eval --save</span>).
+                    </>
+                  )}
                 </div>
               ) : null}
             </div>
@@ -701,10 +777,21 @@ export function ConfigPage() {
 
         {activeTab === "integrations" && (
           <>
+            <QueryErrorBanner
+              query={integrationsQuery}
+              fallback="Impossible de charger les intégrations externes."
+            />
             {/* Integrations */}
           <section id="integrations" className="settings__section">
             <h2>Intégrations externes</h2>
             <p>Connecteurs locaux synchronisés avec la mémoire d'JARVIS.</p>
+            {!integrationsQuery.isLoading &&
+              !integrationsQuery.isError &&
+              (integrationsQuery.data ?? []).length === 0 && (
+                <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>
+                  Aucune intégration disponible sur cette version de jarvis-core.
+                </div>
+              )}
             <div className="grid-2">
               {(integrationsQuery.data ?? []).map((item) => {
                 const isEditing = editingIntId === item.id;
@@ -725,10 +812,16 @@ export function ConfigPage() {
                   void runMutation(async () => {
                     const res = await apiClient.getIntegrationOAuthUrl(item.id);
                     if (res.mode === "redirect" && res.url) {
+                      if (!isSafeHttpUrl(res.url)) {
+                        throw new Error("URL OAuth invalide (protocole non autorisé).");
+                      }
                       window.location.href = res.url;
                       return;
                     }
                     if (res.url) {
+                      if (!isSafeHttpUrl(res.url)) {
+                        throw new Error("URL d'autorisation invalide (protocole non autorisé).");
+                      }
                       window.open(res.url, "_blank", "noopener,noreferrer");
                       return `Lien ouvert pour ${item.name}.`;
                     }
@@ -899,7 +992,7 @@ export function ConfigPage() {
                           </>
                         ) : (
                           <>
-                            {item.authorize_url && (
+                            {isSafeHttpUrl(item.authorize_url) && item.authorize_url && (
                               <div>
                                 <a
                                   href={item.authorize_url}
@@ -964,6 +1057,22 @@ export function ConfigPage() {
 
         {activeTab === "alerts" && (
           <>
+            <QueryErrorBanner
+              query={rulesQuery}
+              fallback="Impossible de charger les règles d'attention."
+            />
+            <QueryErrorBanner
+              query={policyQuery}
+              fallback="Impossible de charger la politique de notification."
+            />
+            <QueryErrorBanner
+              query={ordersQuery}
+              fallback="Impossible de charger les ordres de notification."
+            />
+            <QueryErrorBanner
+              query={blacklistQuery}
+              fallback="Impossible de charger la liste noire des capteurs."
+            />
             {/* Regles d'attention */}
           {rulesQuery.data && (
             <section id="attention" className="settings__section">
@@ -974,16 +1083,20 @@ export function ConfigPage() {
                   <label className="field">
                     <span className="field__label">Début des heures calmes</span>
                     <input
+                      key={`qs:${rulesQuery.data.quiet_start}`}
                       type="text"
                       className="input mono"
                       defaultValue={rulesQuery.data.quiet_start}
                       onBlur={(e) => {
+                        const val = e.target.value.trim();
+                        if (!val || val === rulesQuery.data!.quiet_start) return;
                         void runMutation(async () => {
                           await apiClient.updateRules({
                             ...rulesQuery.data!,
-                            quiet_start: e.target.value,
+                            quiet_start: val,
                           });
                           qc.invalidateQueries({ queryKey: ["rules"] });
+                          qc.invalidateQueries({ queryKey: ["notification_policy"] });
                           return "Heures calmes mises à jour.";
                         });
                       }}
@@ -992,16 +1105,20 @@ export function ConfigPage() {
                   <label className="field">
                     <span className="field__label">Fin des heures calmes</span>
                     <input
+                      key={`qe:${rulesQuery.data.quiet_end}`}
                       type="text"
                       className="input mono"
                       defaultValue={rulesQuery.data.quiet_end}
                       onBlur={(e) => {
+                        const val = e.target.value.trim();
+                        if (!val || val === rulesQuery.data!.quiet_end) return;
                         void runMutation(async () => {
                           await apiClient.updateRules({
                             ...rulesQuery.data!,
-                            quiet_end: e.target.value,
+                            quiet_end: val,
                           });
                           qc.invalidateQueries({ queryKey: ["rules"] });
+                          qc.invalidateQueries({ queryKey: ["notification_policy"] });
                           return "Heures calmes mises à jour.";
                         });
                       }}
@@ -1009,7 +1126,7 @@ export function ConfigPage() {
                   </label>
                 </div>
                 <div className="mono muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Plafond : {rulesQuery.data.max_calls_per_day} appels/jour (hors urgence 4) ·
+                  Urgence minimale la nuit : Niveau {policyQuery.data?.quiet_allow_urgency ?? 4} ·
                   Contacts prioritaires :{" "}
                   {rulesQuery.data.vip_contacts.map((v) => v.name).join(", ") || "aucun"}
                 </div>
@@ -1017,46 +1134,66 @@ export function ConfigPage() {
             </section>
           )}
 
-          {/* Téléphonie et ordres de notification */}
+          {/* Notifications, approbations et ordres persistants */}
           {policyQuery.data && (
             <section id="notifications" className="settings__section">
-              <h2>Téléphonie et ordres persistants</h2>
+              <h2>Notifications, approbations et ordres persistants</h2>
               <p>
-                Politique d'intrusion par téléphone, échelle d'escalade et consignes durables de notification.
+                Canaux d'alerte actifs (Interface Web, Voix locale, Telegram), délai d'approbation
+                et consignes durables de notification.
               </p>
 
               <div className="card stack">
                 <div className="cluster" style={{ justifyContent: "space-between" }}>
                   <div>
-                    <strong>Autoriser les appels téléphoniques</strong>
+                    <strong>Notifications proactives</strong>
                     <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
-                      Jarvis peut composer votre numéro pour une approbation ou une alerte critique.
+                      Active ou suspend l'envoi des alertes et rappels proactifs.
                     </div>
                   </div>
-                  <Segmented
-                    label="Politique d'appels"
-                    value={
-                      !policyQuery.data.allow_calls
-                        ? policyQuery.data.allow_emergency_calls
-                          ? "emergency"
-                          : "never"
-                        : "all"
-                    }
+                  <Segmented<"on" | "off">
+                    label="Notifications proactives"
+                    value={policyQuery.data.enabled ? "on" : "off"}
                     options={[
-                      { value: "all", label: "Urgent & Critique" },
-                      { value: "emergency", label: "Urgence extrême (N4)" },
-                      { value: "never", label: "Désactivé" },
+                      { value: "on", label: "Activées" },
+                      { value: "off", label: "En pause" },
                     ]}
                     onChange={(val) => {
                       void runMutation(async () => {
-                        const allow_calls = val === "all";
-                        const allow_emergency_calls = val === "all" || val === "emergency";
                         await apiClient.updateNotificationPolicy({
-                          allow_calls,
-                          allow_emergency_calls,
+                          enabled: val === "on",
                         });
                         qc.invalidateQueries({ queryKey: ["notification_policy"] });
-                        return "Politique d'appel mise à jour.";
+                        return val === "on"
+                          ? "Notifications proactives activées."
+                          : "Notifications proactives en pause.";
+                      });
+                    }}
+                  />
+                </div>
+
+                <div className="cluster" style={{ justifyContent: "space-between" }}>
+                  <div>
+                    <strong>Seuil pendant les heures calmes</strong>
+                    <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
+                      Niveau d'urgence minimal autorisé à vous interrompre la nuit.
+                    </div>
+                  </div>
+                  <Segmented<"3" | "4">
+                    label="Seuil pendant les heures calmes"
+                    value={policyQuery.data.quiet_allow_urgency <= 3 ? "3" : "4"}
+                    options={[
+                      { value: "3", label: "Urgent & Critique (N3+)" },
+                      { value: "4", label: "Critique uniquement (N4)" },
+                    ]}
+                    onChange={(val) => {
+                      const urgency = parseInt(val, 10);
+                      void runMutation(async () => {
+                        await apiClient.updateNotificationPolicy({
+                          quiet_allow_urgency: urgency,
+                        });
+                        qc.invalidateQueries({ queryKey: ["notification_policy"] });
+                        return "Seuil nocturne mis à jour.";
                       });
                     }}
                   />
@@ -1064,30 +1201,9 @@ export function ConfigPage() {
 
                 <div className="grid-2" style={{ marginTop: "var(--sp-2)" }}>
                   <label className="field">
-                    <span className="field__label">Plafond d'appels quotidiens</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      className="input mono"
-                      defaultValue={policyQuery.data.max_calls_per_day}
-                      onBlur={(e) => {
-                        const num = parseInt(e.target.value, 10);
-                        if (!isNaN(num)) {
-                          void runMutation(async () => {
-                            await apiClient.updateNotificationPolicy({
-                              max_calls_per_day: num,
-                            });
-                            qc.invalidateQueries({ queryKey: ["notification_policy"] });
-                            return "Plafond d'appels mis à jour.";
-                          });
-                        }
-                      }}
-                    />
-                  </label>
-                  <label className="field">
                     <span className="field__label">Expiration approbations (secondes)</span>
                     <input
+                      key={`ttl:${policyQuery.data.approval_ttl_seconds}`}
                       type="number"
                       min={60}
                       max={3600}
@@ -1095,7 +1211,7 @@ export function ConfigPage() {
                       defaultValue={policyQuery.data.approval_ttl_seconds}
                       onBlur={(e) => {
                         const num = parseInt(e.target.value, 10);
-                        if (!isNaN(num)) {
+                        if (!isNaN(num) && num !== policyQuery.data!.approval_ttl_seconds) {
                           void runMutation(async () => {
                             await apiClient.updateNotificationPolicy({
                               approval_ttl_seconds: num,
@@ -1110,8 +1226,8 @@ export function ConfigPage() {
                 </div>
 
                 <div className="muted" style={{ fontSize: "var(--fs-xs)" }}>
-                  Échelle de transmission active :{" "}
-                  <code className="mono">{policyQuery.data.channel_ladder.join(" → ")}</code>
+                  Canaux de transmission actifs :{" "}
+                  <code className="mono">Interface Web & Voix locale → Telegram</code>
                 </div>
               </div>
 

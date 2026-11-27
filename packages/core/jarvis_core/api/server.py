@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import base64
 import hmac
+import html
 import json
 import logging
 import os
@@ -16,8 +17,9 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import quote
@@ -29,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from jarvis_shared.models import ImageAttachment, SystemEvent, ToolCall, ToolResult, UrgencyLevel
+from jarvis_shared.models import ImageAttachment, SystemEvent, ToolCall, ToolResult
 from jarvis_shared.notifications import NotificationOrder
 from jarvis_shared.rest_models import (
     AlertRecord,
@@ -72,7 +74,7 @@ from jarvis_shared.rest_models import (
     WikiUpdate,
 )
 from jarvis_shared.ws_protocol import ClientWsEvent, SensorName
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from ..audio_ducking import SystemAudioDucker
 from ..autostart import get_autostart_status, set_autostart_enabled
@@ -110,7 +112,7 @@ from ..onboarding.service import OnboardingService
 from ..runtime import JarvisRuntime, build_runtime
 from ..scheduler.briefings import agenda_from_events, build_evening_review, build_morning_briefing
 from ..scheduler.routines import RoutineScheduler
-from ..security import SecretStore, verify_action_token
+from ..security import SecretStore, SlidingWindowRateLimiter, verify_action_token
 from ..voice_profiles import VoiceProfileStore, decode_audio_to_16k
 
 logger = logging.getLogger(__name__)
@@ -285,7 +287,11 @@ class JarvisCoreState:
         self.env_file = base_root / ".env"
         self._is_isolated_test = data_dir is not None
         self._custom_data_dir = data_dir is not None
-        if not self._is_isolated_test and self.env_file.exists():
+        if (
+            not self._is_isolated_test
+            and not os.environ.get("PYTEST_CURRENT_TEST")
+            and self.env_file.exists()
+        ):
             load_dotenv(self.env_file, override=False)
 
         self.config_dir = config_dir or Path(
@@ -317,6 +323,10 @@ class JarvisCoreState:
         self.storage = MemoryStorage(self.data_dir / "jarvis.db", database=self.db)
         self.onboarding = OnboardingService(self.db, self.wiki_dir)
         self.ws_broadcast_queues: set[asyncio.Queue[tuple[str, dict[str, Any]]]] = set()
+        self._ws_fanout_tasks: list[asyncio.Task[Any]] = []
+        self._last_proactive_alert_ts: float = 0.0
+        self._consumed_action_tokens: OrderedDict[str, float] = OrderedDict()
+        self._action_rate_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60.0)
         self.integrations = IntegrationRegistry(
             [
                 GoogleCalendarIntegration(),
@@ -341,7 +351,9 @@ class JarvisCoreState:
         if raw_roles:
             try:
                 saved_roles = [
-                    RoleModelConfig.model_validate(item) for item in json.loads(raw_roles)
+                    RoleModelConfig.model_validate(item)
+                    for item in json.loads(raw_roles)
+                    if isinstance(item, dict) and item.get("role") != "voice_realtime"
                 ]
                 for item in saved_roles:
                     if (
@@ -410,10 +422,74 @@ class JarvisCoreState:
 
     def _broadcast_ws_event(self, event_type: str, payload: dict[str, Any]) -> None:
         for q in list(self.ws_broadcast_queues):
+            if q.full():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
             try:
                 q.put_nowait((event_type, payload))
             except asyncio.QueueFull:
                 pass
+
+    def ensure_ws_fanout(self, runtime: JarvisRuntime) -> None:
+        """Demarre un distributeur unique (approbations + alertes) vers tous les clients WS."""
+        self._ws_fanout_tasks = [t for t in self._ws_fanout_tasks if not t.done()]
+        if self._ws_fanout_tasks:
+            return
+
+        async def _fanout_approvals() -> None:
+            while True:
+                req = await runtime.approval_queue.get()
+                self._broadcast_ws_event(
+                    "approval.request",
+                    {
+                        "id": req.id,
+                        "description": req.description,
+                        "risk": int(req.risk) if int(req.risk) in (2, 3) else 2,
+                        "expires_at": req.expires_at,
+                    },
+                )
+
+        async def _fanout_alerts() -> None:
+            proactive_cooldown_seconds = 60.0
+            while True:
+                notif, decision = await runtime.alert_queue.get()
+                policy = runtime.attention.current_policy
+                if not policy.enabled:
+                    continue
+                urgency_val = int(notif.urgency) if int(notif.urgency) in (0, 1, 2, 3, 4) else 2
+                if runtime.attention.presence.is_in_quiet_hours(datetime.now().hour) and not (
+                    urgency_val >= 4 and policy.emergency_override
+                ):
+                    continue
+                now_ts = time.monotonic()
+                if (
+                    self._last_proactive_alert_ts > 0.0
+                    and (now_ts - self._last_proactive_alert_ts) < proactive_cooldown_seconds
+                    and urgency_val < 4
+                ):
+                    continue
+                self._last_proactive_alert_ts = now_ts
+                self._broadcast_ws_event(
+                    "alert",
+                    {
+                        "id": notif.id,
+                        "urgency": urgency_val,
+                        "message": notif.message,
+                        "reason": decision.reason,
+                    },
+                )
+
+        self._ws_fanout_tasks = [
+            asyncio.create_task(_fanout_approvals()),
+            asyncio.create_task(_fanout_alerts()),
+        ]
+
+    def stop_ws_fanout(self) -> None:
+        for task in self._ws_fanout_tasks:
+            task.cancel()
+        self._ws_fanout_tasks.clear()
 
     def ensure_runtime(self) -> JarvisRuntime:
         if self.runtime is None:
@@ -431,6 +507,15 @@ class JarvisCoreState:
                     cfg.provider,
                     thinking_mode=cfg.thinking_mode,
                 )
+            vips: set[str] = set()
+            for vip in getattr(self.rules, "vip_contacts", []) or []:
+                if vip.name:
+                    vips.add(vip.name.strip().lower())
+                for ident in vip.identifiers:
+                    if ident.strip():
+                        vips.add(ident.strip().lower())
+            if vips:
+                self.runtime.attention.vip_contacts = vips
         return self.runtime
 
     def update_role_model(
@@ -480,7 +565,9 @@ class JarvisCoreState:
 
     def get_agent_model(self) -> RoleModelConfig | None:
         """Retourne la configuration du role principal (agent)."""
-        return next((m for m in self.models if m.role == "agent"), self.models[0] if self.models else None)
+        return next(
+            (m for m in self.models if m.role == "agent"), self.models[0] if self.models else None
+        )
 
     def set_sensor_paused(self, sensor: SensorName, paused: bool) -> BlacklistConfig:
         detail: str | None = None
@@ -633,6 +720,7 @@ class JarvisCoreState:
         calls_by_id: dict[str, tuple[ToolCall, int]] = {}
         tools_payload: list[dict[str, Any]] = []
         emitted_delta = False
+        had_error = False
 
         async def _handle_delta(chunk: str) -> None:
             nonlocal emitted_delta
@@ -677,9 +765,10 @@ class JarvisCoreState:
             raise
         except Exception as exc:
             logger.exception("Erreur run_chat_turn")
+            had_error = True
             reply = f"Erreur lors de l'appel au modele : {exc}"
 
-        if not emitted_delta and on_delta is not None:
+        if (not emitted_delta or had_error) and on_delta is not None:
             await on_delta(msg_id, reply)
 
         usage_dict = self._build_usage_dict(usages)
@@ -958,7 +1047,11 @@ class JarvisCoreState:
             return "", 16000
 
         def _synth_sync() -> bytes:
-            if not self._is_isolated_test and self.env_file.exists():
+            if (
+                not self._is_isolated_test
+                and not os.environ.get("PYTEST_CURRENT_TEST")
+                and self.env_file.exists()
+            ):
                 load_dotenv(self.env_file, override=True)
             from jarvis_core.tts import synthesize_gemini_tts_wav, wav_to_pcm16_16khz
 
@@ -1078,7 +1171,7 @@ class JarvisCoreState:
         default_provider = str(raw.get("defaults", {}).get("provider", "openrouter"))
         items: list[RoleModelConfig] = []
         for role_name, cfg in roles_raw.items():
-            if not isinstance(cfg, dict):
+            if not isinstance(cfg, dict) or role_name == "voice_realtime":
                 continue
             model_id = str(cfg.get("model", ""))
             provider = str(cfg.get("provider", default_provider))
@@ -1094,7 +1187,7 @@ class JarvisCoreState:
                         cfg.get("thinking_mode") or cfg.get("reasoning")
                     ),  # type: ignore[arg-type]
                     supports_vision=supports_vision,
-                    supports_tools=role_name != "voice_realtime",
+                    supports_tools=True,
                 )
             )
         return items
@@ -1224,6 +1317,7 @@ def _build_routine_scheduler(state: "JarvisCoreState") -> "RoutineScheduler":
             ),
             current_hour=datetime.now().hour,
         )
+        runtime.attention.drain_digest(current_hour=datetime.now().hour)
 
     async def _pre_meeting_check() -> None:
         events = await _sync_and_collect_events(state, only=CALENDAR_CONNECTORS)
@@ -1271,6 +1365,10 @@ def _check_token(request_token: str | None) -> None:
 
 class DailyBudgetUpdate(BaseModel):
     daily_budget_usd: float = Field(ge=0.0, le=1000.0)
+
+
+class UpdateThinkingModeRequest(BaseModel):
+    mode: str = "auto"
 
 
 class WorkspaceResolveRequest(BaseModel):
@@ -1368,11 +1466,17 @@ def _default_auto_model(core_state: JarvisCoreState) -> str:
 
 
 async def execute_telegram_text(core_state: JarvisCoreState, text: str) -> str:
-    """Traite un message texte Telegram en conservant le workspace actif."""
+    """Traite un message texte Telegram en conservant le workspace actif et le mode auto/ask."""
     rt = core_state.runtime
     if rt and getattr(rt, "attention", None):
         rt.attention.presence.record_telegram_activity()
-    payload = _with_telegram_workspace(core_state, text)
+    tg_mode = (core_state.db.get_setting("telegram_terminal_mode") or "auto").strip().lower()
+    effective_text = (
+        f"/ask {text}"
+        if tg_mode == "ask" and not text.lstrip().lower().startswith("/ask")
+        else text
+    )
+    payload = _with_telegram_workspace(core_state, effective_text)
     res = await core_state.run_chat_turn(payload)
     return res.content
 
@@ -1409,7 +1513,7 @@ def _tg_format_status(core_state: JarvisCoreState) -> str:
 def _tg_format_usage(core_state: JarvisCoreState) -> str:
     daily = core_state.db.daily_usage()
     raw_budget = core_state.db.get_setting("daily_budget_usd")
-    budget = float(raw_budget) if raw_budget is not None else 5.0
+    budget = float(raw_budget) if raw_budget is not None else 10.0
 
     by_model: dict[str, dict[str, float | int]] = {}
     for item in daily:
@@ -1448,10 +1552,7 @@ def _tg_format_skills(core_state: JarvisCoreState) -> str:
     rt = core_state.ensure_runtime()
     mcps = rt.mcp_manager.status_summary() if getattr(rt, "mcp_manager", None) else []
     mcp_lines = (
-        [
-            f"- {m['name']} ({'connecté' if m.get('connected') else 'hors ligne'})"
-            for m in mcps
-        ]
+        [f"- {m['name']} ({'connecté' if m.get('connected') else 'hors ligne'})" for m in mcps]
         if mcps
         else ["- aucun serveur MCP configuré"]
     )
@@ -1472,14 +1573,14 @@ def _tg_format_settings(core_state: JarvisCoreState) -> str:
     pol = rt.policy_store.get() if getattr(rt, "policy_store", None) else None
     agent_cfg = core_state.get_agent_model()
     raw_budget = core_state.db.get_setting("daily_budget_usd")
-    budget = float(raw_budget) if raw_budget is not None else 5.0
+    budget = float(raw_budget) if raw_budget is not None else 10.0
     ws = (core_state.db.get_setting("telegram_workspace") or "").strip()
     theme = (core_state.db.get_setting("ui_theme") or "jarvis-blue").strip()
     return (
         f"⚙️ Paramètres actuels\n"
         f"- Modèle agent : {agent_cfg.model if agent_cfg else 'défaut'} "
         f"(raisonnement : {agent_cfg.thinking_mode if agent_cfg else 'auto'})\n"
-        f"- Budget quotidien : ${budget:.2f}\n"
+        f"- Budget quotidien par fournisseur : ${budget:.2f}\n"
         f"- Heures calmes : {pol.quiet_start if pol else '23:00'} - {pol.quiet_end if pol else '08:00'}\n"
         f"- Workspace Telegram : {ws or 'aucun'}\n"
         f"- Thème UI : {theme}\n"
@@ -1530,6 +1631,15 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
             return f"Workspace actif défini sur : {display_ws}"
         res = await core_state.run_chat_turn(f"[Workspace actif : {display_ws}]\n{prompt_after}")
         return res.content
+    if cmd == "ask":
+        if not arg:
+            core_state.db.set_setting("telegram_terminal_mode", "ask")
+            return (
+                "Mode Ask activé sur Telegram : approbation requise à partir du niveau 3. "
+                "Tapez /auto pour revenir en mode Auto."
+            )
+        res = await core_state.run_chat_turn(_with_telegram_workspace(core_state, f"/ask {arg}"))
+        return res.content
     if cmd in ("local", "council", "moa"):
         target_model = "qwen3.5:2b" if cmd == "local" else "gemini-3.1-pro-preview"
         _backup_telegram_auto_model(core_state)
@@ -1546,14 +1656,22 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
         if not arg:
             default_model = _default_auto_model(core_state)
             core_state.update_role_model("agent", default_model)
-            return f"Routage automatique rétabli (modèle : {default_model})."
+            core_state.db.set_setting("telegram_terminal_mode", "auto")
+            return (
+                f"Mode Auto activé (modèle : {default_model}, commandes terminal sans approbation)."
+            )
         rt = core_state.ensure_runtime()
         if not rt.task_manager:
             return "Gestionnaire autonome indisponible."
         try:
             rec = rt.task_manager.start_task(goal=arg, notify_on_finish=True)
+            steps_info = (
+                f"max {rec.max_iterations} étapes"
+                if rec.max_iterations > 0
+                else "sans limite d'étapes"
+            )
             return (
-                f"🚀 Tâche autonome {rec.id} lancée (max {rec.max_iterations} étapes). "
+                f"🚀 Tâche autonome {rec.id} lancée ({steps_info}). "
                 "Je te préviens dès que c'est terminé."
             )
         except Exception as exc:
@@ -1603,9 +1721,33 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
         res = await core_state.run_chat_turn(f"Oublie ce fait : {arg}")
         return res.content
     if cmd == "quiet":
-        return "Mode silencieux ajusté."
+        rt = core_state.ensure_runtime()
+        if rt.policy_store is None:
+            return "Politique de notifications indisponible."
+        pol = rt.policy_store.get()
+        if not arg and pol.snooze_until:
+            rt.policy_store.update(snooze_until=None)
+            return "🔕 Mode silencieux désactivé."
+        hours = 2
+        if arg:
+            try:
+                hours = max(1, min(24, int(arg.strip().rstrip("hH"))))
+            except ValueError:
+                return "Usage : /quiet [heures entre 1 et 24]"
+        until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+        rt.policy_store.update(snooze_until=until)
+        return f"🔕 Mode silencieux activé pour {hours}h."
     if cmd == "pause":
-        return "Notifications temporairement suspendues."
+        rt = core_state.ensure_runtime()
+        if rt.policy_store is None:
+            return "Politique de notifications indisponible."
+        pol = rt.policy_store.get()
+        updated = rt.policy_store.update(enabled=not pol.enabled)
+        return (
+            "🔔 Notifications réactivées."
+            if updated.enabled
+            else "⏸️ Notifications suspendues jusqu'au prochain /pause."
+        )
     if cmd == "goal":
         if not arg:
             return "Usage : /goal <objectif complet à atteindre>"
@@ -1613,10 +1755,23 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
         if not rt.goal_manager:
             return "Orchestrateur d'objectifs indisponible."
         try:
-            g = rt.goal_manager.start_goal(goal_text=arg, notify_on_finish=True)
+            tg_mode = (
+                (core_state.db.get_setting("telegram_terminal_mode") or "auto").strip().lower()
+            )
+            effective_goal = (
+                f"/ask {arg}"
+                if tg_mode == "ask" and not arg.lstrip().lower().startswith("/ask")
+                else arg
+            )
+            g = rt.goal_manager.start_goal(goal_text=effective_goal, notify_on_finish=True)
+            budget_info = (
+                f"budget max : ${g.max_cost_usd:.2f}"
+                if g.max_cost_usd > 0
+                else "plafond 10 $/jour/fournisseur"
+            )
             return (
                 f"🎯 Objectif {g.id} lancé (orchestrateur : {g.orchestrator_model}, "
-                f"budget max : ${g.max_cost_usd:.2f}). Je supervise jusqu'à vérification."
+                f"{budget_info}). Je supervise jusqu'à vérification."
             )
         except Exception as exc:
             return f"Impossible de lancer l'objectif : {exc}"
@@ -1639,7 +1794,7 @@ async def execute_telegram_command(core_state: JarvisCoreState, cmd: str, arg: s
         if not items:
             return "Aucune tâche autonome enregistrée."
         return "\n".join(
-            f"- {t.id} [{t.status}] ({t.iterations}/{t.max_iterations}) : {t.goal[:60]}"
+            f"- {t.id} [{t.status}] ({t.iterations}{f'/{t.max_iterations}' if t.max_iterations > 0 else ''}) : {t.goal[:60]}"
             for t in items
         )
     if cmd == "stop":
@@ -1667,19 +1822,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     core_state = state or JarvisCoreState()
     if core_state.runtime is None:
-        core_state.runtime = build_runtime(
-            data_dir=core_state.data_dir,
-            config_dir=core_state.config_dir,
-            database=core_state.db,
-            allow_offline=True,
-        )
-        for cfg in core_state.models:
-            core_state.runtime.router.set_role_model(
-                cfg.role,
-                cfg.model,
-                cfg.provider,
-                thinking_mode=cfg.thinking_mode,
-            )
+        core_state.ensure_runtime()
     elif core_state.db.get_setting("role_models"):
         for cfg in core_state.models:
             core_state.runtime.router.set_role_model(
@@ -1700,16 +1843,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     rt = core_state.runtime
                     if rt and getattr(rt, "attention", None):
                         now_ts = time.time()
-                        for key, notif in list(rt.attention.active_alerts.items()):
-                            if notif.status != "sent":
-                                continue
-                            try:
-                                alert_dt = datetime.fromisoformat(notif.ts.replace("Z", "+00:00"))
-                                elapsed = now_ts - alert_dt.timestamp()
-                            except Exception:
-                                elapsed = 30.0
-                            if elapsed >= 600 and notif.urgency == UrgencyLevel.URGENT:
-                                rt.attention.check_escalations(elapsed_seconds=elapsed)
+                        rt.attention.check_escalations()
                         if int(now_ts) % 300 < 30:
                             await rt.attention.flush_triage_batch(current_hour=datetime.now().hour)
                 except asyncio.CancelledError:
@@ -1797,16 +1931,17 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
                     async def _tg_alert_ack(alert_id: str, too_noisy: bool) -> str:
                         rt = core_state.runtime
+                        core_state.db.ack_alert(alert_id, too_noisy=too_noisy)
                         if rt and getattr(rt, "attention", None):
-                            notif = rt.attention.active_alerts.get(alert_id)
-                            if notif:
-                                notif.status = "dismissed" if too_noisy else "acknowledged"
-                                return (
-                                    "Alerte marquée comme trop bruyante."
-                                    if too_noisy
-                                    else "Alerte acquittée."
-                                )
-                        return "Alerte acquittée."
+                            if too_noisy:
+                                rt.attention.mark_too_noisy(alert_id)
+                            else:
+                                rt.attention.acknowledge(alert_id)
+                        return (
+                            "Alerte marquée comme trop bruyante."
+                            if too_noisy
+                            else "Alerte acquittée."
+                        )
 
                     async def _tg_cmd(cmd: str, arg: str) -> str:
                         return await execute_telegram_command(core_state, cmd, arg)
@@ -1866,12 +2001,18 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             yield
         finally:
             stop_event.set()
+            core_state.stop_ws_fanout()
             if core_state.scheduler is not None:
                 core_state.scheduler.shutdown()
                 core_state.scheduler = None
             if core_state.runtime and core_state.runtime.mcp_manager:
                 try:
                     await core_state.runtime.mcp_manager.disconnect_all()
+                except Exception:
+                    pass
+            if core_state.runtime and core_state.runtime.browser_toolkit:
+                try:
+                    await core_state.runtime.browser_toolkit.close()
                 except Exception:
                     pass
             tick_task.cancel()
@@ -1905,10 +2046,14 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.middleware("http")
     async def security_headers_middleware(request: Request, call_next: Any) -> Response:
+        is_dedicated_webhook = request.url.path == "/api/webhooks/trading" and bool(
+            os.environ.get("TRADER_WEBHOOK_TOKEN", "").strip()
+        )
         if (
             request.url.path.startswith("/api/")
             and request.url.path != "/api/health"
             and not request.url.path.startswith("/api/oauth/")
+            and not is_dedicated_webhook
         ):
             auth = request.headers.get("Authorization", "")
             token = (
@@ -2199,9 +2344,6 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             return {"mode": agent_route.thinking_mode}
         return {"mode": runtime.router.thinking_mode}
 
-    class UpdateThinkingModeRequest(BaseModel):
-        mode: str = "auto"
-
     @application.put("/api/models/thinking")
     def update_thinking_mode(payload: UpdateThinkingModeRequest) -> dict[str, str]:
         runtime = core_state.ensure_runtime()
@@ -2233,7 +2375,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     @application.get("/api/usage/budget")
     def get_daily_budget() -> dict[str, float]:
         raw = core_state.db.get_setting("daily_budget_usd")
-        return {"daily_budget_usd": float(raw) if raw is not None else 5.0}
+        return {"daily_budget_usd": float(raw) if raw is not None else 10.0}
 
     @application.put("/api/usage/budget")
     def update_daily_budget(payload: DailyBudgetUpdate) -> dict[str, float]:
@@ -2303,6 +2445,8 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         item = core_state.db.ack_alert(alert_id, too_noisy=False)
         if not item:
             raise HTTPException(status_code=404, detail="Alerte introuvable.")
+        if core_state.runtime and core_state.runtime.attention:
+            core_state.runtime.attention.acknowledge(alert_id)
         return item
 
     @application.post("/api/alerts/{alert_id}/too-noisy", response_model=AlertRecord)
@@ -2310,6 +2454,8 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         item = core_state.db.ack_alert(alert_id, too_noisy=True)
         if not item:
             raise HTTPException(status_code=404, detail="Alerte introuvable.")
+        if core_state.runtime and core_state.runtime.attention:
+            core_state.runtime.attention.mark_too_noisy(alert_id)
         return item
 
     @application.get("/api/rules", response_model=AttentionRules)
@@ -2320,6 +2466,8 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
     def update_rules(payload: AttentionRules) -> AttentionRules:
         core_state.rules = payload
         core_state.db.set_setting("attention_rules", core_state.rules.model_dump_json())
+        if core_state.runtime and core_state.runtime.attention:
+            core_state.runtime.attention.apply_rules(payload)
         return core_state.rules
 
     # === Approbations ===
@@ -2331,15 +2479,14 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             "status": "approved" if approved else "denied",
             "channel": channel,
         }
-        for q in list(core_state.ws_broadcast_queues):
-            q.put_nowait(("approval.resolved", payload))
+        core_state._broadcast_ws_event("approval.resolved", payload)
 
     @application.get("/api/approvals", response_model=list[ApprovalItem])
     def get_approvals() -> list[ApprovalItem]:
         return core_state.db.list_approvals()
 
     @application.post("/api/approvals/{approval_id}", response_model=ApprovalItem)
-    def decide_approval(approval_id: str, payload: ApprovalDecisionRequest) -> ApprovalItem:
+    async def decide_approval(approval_id: str, payload: ApprovalDecisionRequest) -> ApprovalItem:
         item = core_state.db.decide_approval(approval_id, payload.approved)
         if not item:
             raise HTTPException(status_code=404, detail="Demande d'approbation introuvable.")
@@ -2353,21 +2500,65 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     # === Actions signées (SMS / Push ntfy) ===
 
-    @application.get("/actions/{token}", response_class=Response)
-    async def handle_action_token(token: str) -> Response:
-        secret = (
-            core_state.secrets.get_secret("ACTION_TOKEN_SECRET")
-            or "default-action-token-secret-for-signing"
+    def _action_token_error_response() -> Response:
+        html_err = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Jarvis - Lien expiré</title>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+            "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center;} .card{background:#1e293b;padding:30px;border-radius:16px;max-width:400px;border:1px solid #334155;} h2{color:#f43f5e;margin-top:0;} p{color:#94a3b8;font-size:16px;}</style></head>"
+            "<body><div class='card'><h2>Lien expiré ou invalide</h2><p>Ce jeton d'action est introuvable, expiré ou déjà utilisé.</p></div></body></html>"
         )
+        return Response(content=html_err, status_code=400, media_type="text/html")
+
+    def _get_action_token_secret() -> str:
+        runtime = core_state.ensure_runtime()
+        return runtime.action_token_secret or core_state.secrets.get_secret("ACTION_TOKEN_SECRET")
+
+    @application.get("/actions/{token}", response_class=Response)
+    async def confirm_action_token_page(token: str, request: Request) -> Response:
+        peer = request.client.host if request.client else "unknown"
+        if not core_state._action_rate_limiter.allow(f"action:{peer}"):
+            raise HTTPException(
+                status_code=429, detail="Trop de tentatives sur les liens d'action."
+            )
+        secret = _get_action_token_secret()
+        if not secret or token in core_state._consumed_action_tokens:
+            return _action_token_error_response()
         verified = verify_action_token(secret, token)
         if not verified:
-            html_err = (
-                "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Jarvis - Lien expiré</title>"
-                "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-                "<style>body{font-family:-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center;} .card{background:#1e293b;padding:30px;border-radius:16px;max-width:400px;border:1px solid #334155;} h2{color:#f43f5e;margin-top:0;} p{color:#94a3b8;font-size:16px;}</style></head>"
-                "<body><div class='card'><h2>Lien expiré ou invalide</h2><p>Ce jeton d'action est introuvable ou a déjà expiré.</p></div></body></html>"
+            return _action_token_error_response()
+
+        _approval_id, action = verified
+        approved = action == "approve"
+        label = "Approuver l'action" if approved else "Refuser l'action"
+        btn_color = "#10b981" if approved else "#f43f5e"
+        safe_token = html.escape(token, quote=True)
+        html_confirm = (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>Jarvis - Confirmation</title>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+            f"<style>body{{font-family:-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center;}} .card{{background:#1e293b;padding:30px;border-radius:16px;max-width:400px;border:1px solid #334155;}} button{{background:{btn_color};color:#fff;border:none;border-radius:10px;padding:12px 24px;font-size:16px;cursor:pointer;margin-top:16px;}}</style></head>"
+            f"<body><div class='card'><h2>Confirmer la décision</h2>"
+            f"<form method='post' action='/actions/{safe_token}'><button type='submit'>{label}</button></form>"
+            "</div></body></html>"
+        )
+        return Response(content=html_confirm, status_code=200, media_type="text/html")
+
+    @application.post("/actions/{token}", response_class=Response)
+    async def handle_action_token(token: str, request: Request) -> Response:
+        peer = request.client.host if request.client else "unknown"
+        if not core_state._action_rate_limiter.allow(f"action:{peer}"):
+            raise HTTPException(
+                status_code=429, detail="Trop de tentatives sur les liens d'action."
             )
-            return Response(content=html_err, status_code=400, media_type="text/html")
+        secret = _get_action_token_secret()
+        if not secret or token in core_state._consumed_action_tokens:
+            return _action_token_error_response()
+        verified = verify_action_token(secret, token)
+        if not verified:
+            return _action_token_error_response()
+
+        core_state._consumed_action_tokens[token] = time.time()
+        while len(core_state._consumed_action_tokens) > 1000:
+            core_state._consumed_action_tokens.popitem(last=False)
 
         approval_id, action = verified
         approved = action == "approve"
@@ -2404,13 +2595,18 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
 
     @application.get("/api/notifications/policy")
     def get_notification_policy() -> dict[str, Any]:
-        store = PolicyStore(core_state.db)
+        runtime = core_state.ensure_runtime()
+        store = runtime.policy_store or PolicyStore(core_state.db)
         return store.get().model_dump()
 
     @application.put("/api/notifications/policy")
     def update_notification_policy(payload: dict[str, Any]) -> dict[str, Any]:
-        store = PolicyStore(core_state.db)
-        updated = store.update(**payload)
+        runtime = core_state.ensure_runtime()
+        store = runtime.policy_store or PolicyStore(core_state.db)
+        try:
+            updated = store.update(**payload)
+        except (ValueError, ValidationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return updated.model_dump()
 
     @application.get("/api/notifications/orders")
@@ -3125,6 +3321,12 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         assert runtime.mcp_manager is not None
         return await runtime.mcp_manager.connect_enabled_servers()
 
+    @application.get("/api/antigravity/status")
+    def get_antigravity_status_endpoint() -> dict[str, Any]:
+        from ..tools.antigravity_status import get_antigravity_status
+
+        return get_antigravity_status()
+
     # === WebSocket ===
 
     @application.websocket("/ws")
@@ -3142,58 +3344,6 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
         async def _send_ws(event_type: str, payload: dict[str, Any]) -> None:
             async with ws_send_lock:
                 await websocket.send_json({"type": event_type, "payload": payload})
-
-        async def _pump_approvals() -> None:
-            while True:
-                req = await runtime.approval_queue.get()
-                try:
-                    await _send_ws(
-                        "approval.request",
-                        {
-                            "id": req.id,
-                            "description": req.description,
-                            "risk": int(req.risk) if int(req.risk) in (2, 3) else 2,
-                            "expires_at": req.expires_at,
-                        },
-                    )
-                except Exception:
-                    return
-
-        last_proactive_alert_ts = 0.0
-        proactive_cooldown_seconds = 60.0
-
-        async def _pump_alerts() -> None:
-            nonlocal last_proactive_alert_ts
-            while True:
-                notif, decision = await runtime.alert_queue.get()
-                policy = runtime.attention.current_policy
-                if not policy.enabled:
-                    continue
-                urgency_val = int(notif.urgency) if int(notif.urgency) in (0, 1, 2, 3, 4) else 2
-                if runtime.attention.presence.is_in_quiet_hours(datetime.now().hour) and not (
-                    urgency_val >= 4 and policy.emergency_override
-                ):
-                    continue
-                now_ts = time.monotonic()
-                if (
-                    last_proactive_alert_ts > 0.0
-                    and (now_ts - last_proactive_alert_ts) < proactive_cooldown_seconds
-                    and urgency_val < 4
-                ):
-                    continue
-                last_proactive_alert_ts = now_ts
-                try:
-                    await _send_ws(
-                        "alert",
-                        {
-                            "id": notif.id,
-                            "urgency": urgency_val,
-                            "message": notif.message,
-                            "reason": decision.reason,
-                        },
-                    )
-                except Exception:
-                    return
 
         async def _run_user_turn(text: str) -> None:
             await _send_ws("state", {"value": "thinking"})
@@ -3226,8 +3376,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                 except Exception:
                     pass
 
-        broadcast_q: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
-        core_state.ws_broadcast_queues.add(broadcast_q)
+        broadcast_q: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=256)
 
         async def _pump_broadcast() -> None:
             while True:
@@ -3238,10 +3387,10 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     return
 
         turn_tasks: set[asyncio.Task[Any]] = set()
-        pump_task = asyncio.create_task(_pump_approvals())
-        alert_pump_task = asyncio.create_task(_pump_alerts())
-        broadcast_pump_task = asyncio.create_task(_pump_broadcast())
         await _send_ws("state", {"value": "idle"})
+        core_state.ws_broadcast_queues.add(broadcast_q)
+        broadcast_pump_task = asyncio.create_task(_pump_broadcast())
+        core_state.ensure_ws_fanout(runtime)
         try:
             while True:
                 raw_msg = await websocket.receive_json()
@@ -3265,6 +3414,7 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
                     _broadcast_approval_resolved(event.payload.id, event.payload.approved, "web")
                 elif event.type == "alert.ack":
                     core_state.db.ack_alert(event.payload.id)
+                    runtime.attention.acknowledge(event.payload.id)
                 elif event.type == "settings.model":
                     update_role_model(
                         UpdateRoleModelRequest(
@@ -3292,8 +3442,8 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             pass
         finally:
             core_state.ws_broadcast_queues.discard(broadcast_q)
-            pump_task.cancel()
-            alert_pump_task.cancel()
+            if not core_state.ws_broadcast_queues:
+                core_state.stop_ws_fanout()
             broadcast_pump_task.cancel()
             for task in list(turn_tasks):
                 task.cancel()
@@ -3309,23 +3459,11 @@ def create_app(state: JarvisCoreState | None = None) -> FastAPI:
             if full_path == "api" or full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="Route API introuvable.")
             candidate = (web_dist / full_path).resolve()
-            if (
-                full_path
-                and candidate.is_file()
-                and str(candidate).startswith(str(web_dist.resolve()))
-            ):
+            if full_path and candidate.is_file() and candidate.is_relative_to(web_dist.resolve()):
                 return FileResponse(str(candidate))
             return FileResponse(str(web_dist / "index.html"))
 
     return application
-
-
-def _toggle_sensor(cfg: BlacklistConfig, sensor: SensorName, paused: bool) -> None:
-    for item in cfg.sensors:
-        if item.sensor == sensor:
-            item.paused = paused
-            item.active = not paused
-            return
 
 
 _default_app: FastAPI | None = None

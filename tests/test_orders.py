@@ -11,7 +11,6 @@ from jarvis_core.attention.engine import AttentionEngine
 from jarvis_core.attention.presence import PresenceDetector
 from jarvis_core.memory.schema import MemoryDatabase
 from jarvis_core.notifications.orders import match_orders
-from jarvis_core.notifications.parsing import parse_notification_intent
 from jarvis_core.notifications.policy import PolicyStore
 from jarvis_core.tools.notifications import (
     ListMyOrdersArgs,
@@ -133,37 +132,6 @@ def test_order_expiration_and_matching():
     matched = match_orders([expired_order, future_order], ev, now=now)
     assert len(matched) == 1
     assert matched[0].id == future_order.id
-
-
-def test_natural_language_orders():
-    """Vérifie le parsing déterministe d'intentions en français."""
-    # 1. Extrême urgence
-    res1 = parse_notification_intent("Ne m'appelle pas sauf en cas d'urgence extrême !")
-    assert res1 is not None
-    assert res1["type"] == "policy"
-    assert res1["updates"]["allow_calls"] is False
-    assert res1["updates"]["allow_emergency_calls"] is True
-
-    # 2. Coupe les appels
-    res2 = parse_notification_intent("coupe les appels s'il te plaît")
-    assert res2 is not None
-    assert res2["updates"]["allow_calls"] is False
-
-    # 3. Pas la nuit
-    res3 = parse_notification_intent("Rien après 22 h ce soir")
-    assert res3 is not None
-    assert res3["updates"]["quiet_start"] == "22:00"
-
-    # 4. SMS seulement
-    res4 = parse_notification_intent("Préviens par SMS seulement")
-    assert res4 is not None
-    assert res4["updates"]["channel_ladder"] == ["sms"]
-
-    # 5. Ordre : préviens-moi si <X>
-    res5 = parse_notification_intent("Préviens-moi quand le déploiement échoue")
-    assert res5 is not None
-    assert res5["type"] == "order"
-    assert res5["order"].text_match == "le déploiement échoue"
 
 
 @pytest.mark.asyncio

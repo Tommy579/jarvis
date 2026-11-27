@@ -19,11 +19,12 @@ class GoogleContactsIntegration(GoogleOAuthIntegration):
 
     def __init__(self, access_token: str | None = None, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = not bool(access_token)
         self.access_token = access_token or os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "")
         self.connected = bool(self.access_token)
 
     def tools(self) -> list[str]:
-        return ["contacts_sync", "contacts_lookup"]
+        return []
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:
         if not self.enabled:

@@ -63,10 +63,72 @@ class AttentionEngine:
         self.digest_queue: list[SystemEvent] = []
         self.pending_triage_batch: list[SystemEvent] = []
         self.active_alerts: dict[str, NotificationRecord] = {}
+        self._escalated_ids: set[str] = set()
         self.noisy_sources: set[str] = set()
         self._calls_today_date: str = ""
         self._calls_today_count: int = 0
         self._last_call_ts: float = 0.0
+
+    @staticmethod
+    def _parse_hour(raw: str, default: int) -> int:
+        try:
+            val = int(str(raw).split(":", 1)[0].strip())
+            if 0 <= val <= 23:
+                return val
+        except (ValueError, AttributeError):
+            pass
+        return default
+
+    def _sync_presence_from_policy(self, policy: NotificationPolicy) -> None:
+        self.presence.quiet_start_hour = self._parse_hour(
+            policy.quiet_start, self.presence.quiet_start_hour
+        )
+        self.presence.quiet_end_hour = self._parse_hour(
+            policy.quiet_end, self.presence.quiet_end_hour
+        )
+
+    def apply_rules(self, rules: Any) -> None:
+        """Applique les regles d'attention (VIP, heures calmes, plafond appels) au moteur."""
+        if rules is None:
+            return
+        vips: set[str] = set()
+        for vip in getattr(rules, "vip_contacts", []) or []:
+            name = str(getattr(vip, "name", "") or "").strip().lower()
+            if name:
+                vips.add(name)
+            for ident in getattr(vip, "identifiers", []) or []:
+                cleaned = str(ident).strip().lower()
+                if cleaned:
+                    vips.add(cleaned)
+        if vips:
+            self.vip_contacts = vips
+        max_calls = getattr(rules, "max_calls_per_day", None)
+        if isinstance(max_calls, int) and max_calls >= 0:
+            self.max_calls_per_day = max_calls
+        q_start = getattr(rules, "quiet_start", None)
+        q_end = getattr(rules, "quiet_end", None)
+        if q_start:
+            self.presence.quiet_start_hour = self._parse_hour(
+                q_start, self.presence.quiet_start_hour
+            )
+        if q_end:
+            self.presence.quiet_end_hour = self._parse_hour(q_end, self.presence.quiet_end_hour)
+        if self.policy_store is not None:
+            updates: dict[str, Any] = {}
+            if q_start:
+                updates["quiet_start"] = str(q_start)
+            if q_end:
+                updates["quiet_end"] = str(q_end)
+            tz = getattr(rules, "timezone", None)
+            if tz:
+                updates["timezone"] = str(tz)
+            if isinstance(max_calls, int) and max_calls >= 0:
+                updates["max_calls_per_day"] = max_calls
+            if updates:
+                try:
+                    self.policy_store.update(**updates)
+                except Exception:
+                    pass
 
     @property
     def current_policy(self) -> NotificationPolicy:
@@ -331,6 +393,7 @@ class AttentionEngine:
         current_hour: int = 14,
         event: SystemEvent | None = None,
     ) -> AttentionDecision:
+        self._sync_presence_from_policy(self.current_policy)
         snap = self.presence.snapshot(current_hour=current_hour)
         decision = self.route_channels(
             urgency=urgency,
@@ -397,7 +460,9 @@ class AttentionEngine:
 
         decisions: list[AttentionDecision] = []
         try:
-            res = await self.router.run_role("triage", [Message(role=Role.USER, content=prompt)])
+            res = await self.router.complete(
+                role="triage", messages=[Message(role=Role.USER, content=prompt)]
+            )
             for line in res.text.splitlines():
                 m = re.search(r"(\d+)\s*:\s*(\d)\s*-\s*(.+)", line)
                 if m:
@@ -450,24 +515,71 @@ class AttentionEngine:
                 if self.storage is not None:
                     self.storage.insert_notification(notif)
 
-    def check_escalations(self, elapsed_seconds: float) -> list[NotificationRecord]:
+    def drain_digest(self, current_hour: int = 8) -> AttentionDecision | None:
+        """Vide la file de digest accumulee pendant les heures calmes en un resume unique."""
+        if not self.digest_queue:
+            return None
+        items = list(self.digest_queue)
+        self.digest_queue.clear()
+        lines: list[str] = []
+        for ev in items[:20]:
+            label = str(
+                ev.payload.get("message") or ev.payload.get("subject") or ev.event_type
+            ).strip()
+            lines.append(f"- [{ev.source}] {label[:140]}")
+        extra = f"\n(+{len(items) - 20} autres)" if len(items) > 20 else ""
+        summary = f"Digest ({len(items)} evenement(s)) :\n" + "\n".join(lines) + extra
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+        return self._dispatch_decision(
+            UrgencyLevel.NORMAL,
+            summary,
+            "Resume des evenements differes",
+            f"digest:{today}",
+            current_hour=current_hour,
+        )
+
+    def check_escalations(self, elapsed_seconds: float | None = None) -> list[NotificationRecord]:
         """Escalade vers l'appel telephonique les alertes de niveau 3 non acquittees apres le delai."""
         pol = self.current_policy
         if not pol.enabled or not pol.allow_calls:
             return []
 
+        now_ts = time.time()
         escalated: list[NotificationRecord] = []
-        for key, notif in self.active_alerts.items():
-            if notif.status != "sent":
+        for key, notif in list(self.active_alerts.items()):
+            if notif.status != "sent" or notif.id in self._escalated_ids:
                 continue
-            if notif.urgency == UrgencyLevel.URGENT and elapsed_seconds >= 600:
-                if self._can_place_call(notif.urgency, pol):
-                    self._record_call_placed()
-                    notif.status = "escalated"
-                    notif.channel = f"{notif.channel},phone_call"
-                    if self.storage is not None:
-                        self.storage.insert_notification(notif)
-                    escalated.append(notif)
+            if notif.urgency != UrgencyLevel.URGENT:
+                continue
+            if elapsed_seconds is not None:
+                age_s = elapsed_seconds
+            else:
+                try:
+                    alert_dt = datetime.fromisoformat(notif.ts.replace("Z", "+00:00"))
+                    age_s = now_ts - alert_dt.timestamp()
+                except Exception:
+                    age_s = 0.0
+            if age_s >= 600 and self._can_place_call(notif.urgency, pol):
+                self._record_call_placed()
+                self._escalated_ids.add(notif.id)
+                channels = [c for c in notif.channel.split(",") if c]
+                if "phone_call" not in channels:
+                    channels.append("phone_call")
+                notif.channel = ",".join(channels)
+                if self.storage is not None and hasattr(self.storage, "insert_notification"):
+                    self.storage.insert_notification(notif)
+                if self.on_dispatch:
+                    self.on_dispatch(
+                        notif,
+                        AttentionDecision(
+                            urgency=notif.urgency,
+                            channels=["phone_call"],
+                            message=notif.message,
+                            reason=f"Escalade non acquittee ({notif.reason})",
+                            dedup_key=key,
+                        ),
+                    )
+                escalated.append(notif)
         return escalated
 
     def evaluate_heartbeat(

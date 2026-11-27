@@ -52,6 +52,7 @@ jarvis-windows/*.db
 jarvis-data/
 
 # Local artifacts
+src-rust/target/
 node_modules/
 .hermes/
 web/test-results/

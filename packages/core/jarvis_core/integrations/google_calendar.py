@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from ..memory.schema import MemoryDatabase
@@ -17,6 +18,7 @@ class GoogleCalendarIntegration(GoogleOAuthIntegration):
 
     def __init__(self, access_token: str | None = None, enabled: bool = False) -> None:
         super().__init__(enabled=enabled)
+        self._from_env_token = not bool(access_token)
         self.access_token = access_token or os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "")
         self.connected = bool(self.access_token)
 
@@ -49,10 +51,16 @@ class GoogleCalendarIntegration(GoogleOAuthIntegration):
     async def list_upcoming_events(self, max_results: int = 10) -> list[dict[str, Any]]:
         if not self.access_token:
             return []
+        now_iso = datetime.now(timezone.utc).isoformat()
         resp = await self._oauth_request(
             "GET",
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            params={"maxResults": max_results, "singleEvents": "true", "orderBy": "startTime"},
+            params={
+                "maxResults": max_results,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "timeMin": now_iso,
+            },
         )
         return resp.json().get("items", [])
 

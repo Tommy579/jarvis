@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { Icon } from "../components/Icon";
+import { QueryErrorBanner } from "../components/QueryErrorBanner";
 import { ConfirmButton, EmptyState, PageHeader, Segmented, Skeleton } from "../components/ui";
 import { errorMessage, toast } from "../store/useToastStore";
 import type { SensitivityLevel } from "../types/generated";
@@ -241,8 +242,12 @@ export function MemoryOnboardingPage() {
                 </select>
               </div>
             </div>
+            <QueryErrorBanner
+              query={factsQuery}
+              fallback="Impossible de charger les faits mémorisés."
+            />
             {factsQuery.isLoading && <Skeleton lines={4} />}
-            {!factsQuery.isLoading && (factsQuery.data ?? []).length === 0 && (
+            {!factsQuery.isLoading && !factsQuery.isError && (factsQuery.data ?? []).length === 0 && (
               <EmptyState title="Aucun fait enregistré pour ces critères.">
                 Ajoutez un fait ci-dessus ou élargissez la recherche.
               </EmptyState>
@@ -340,12 +345,16 @@ export function MemoryOnboardingPage() {
       )}
 
       {tab === "wiki" && (
+        <QueryErrorBanner
+          query={wikiQuery}
+          fallback="Impossible de charger le wiki personnel."
+        />
+      )}
+
+      {tab === "wiki" && (
         <div className="wiki">
           <div className="wiki__pages" role="tablist" aria-label="Pages du wiki">
             {wikiQuery.isLoading && <Skeleton lines={3} />}
-            {wikiQuery.isError && (
-              <EmptyState title="Impossible de charger le wiki." />
-            )}
             {(wikiQuery.data ?? []).map((p) => {
               const current = (activeWikiPage?.slug ?? selectedSlug) === p.slug;
               return (
@@ -507,10 +516,11 @@ export function MemoryOnboardingPage() {
             </div>
           </form>
 
+          <QueryErrorBanner
+            query={peopleQuery}
+            fallback="Impossible de charger les personnes enregistrées."
+          />
           {peopleQuery.isLoading && <Skeleton lines={3} />}
-          {peopleQuery.isError && (
-            <EmptyState title="Impossible de charger les personnes." />
-          )}
           <div className="grid-2">
             {(peopleQuery.data ?? []).map((person) => (
               <div key={person.id} className="card stack">
@@ -559,8 +569,12 @@ export function MemoryOnboardingPage() {
               </p>
             </div>
           </div>
+          <QueryErrorBanner
+            query={reviewQuery}
+            fallback="Impossible de charger la revue hebdomadaire."
+          />
           {(reviewQuery.data ?? []).length === 0 ? (
-            <EmptyState title="Aucun fait à réviser cette semaine." />
+            reviewQuery.isError ? null : <EmptyState title="Aucun fait à réviser cette semaine." />
           ) : (
             <ul className="list">
               {(reviewQuery.data ?? []).map((fact) => (
@@ -577,9 +591,14 @@ export function MemoryOnboardingPage() {
                       type="button"
                       className="btn btn--ok btn--sm"
                       onClick={async () => {
-                        await apiClient.updateFact(fact.id, { confidence: 0.98 });
-                        toast.ok("Fait confirmé.");
-                        qc.invalidateQueries({ queryKey: ["facts-review"] });
+                        try {
+                          await apiClient.updateFact(fact.id, { confidence: 0.98 });
+                          toast.ok("Fait confirmé.");
+                          qc.invalidateQueries({ queryKey: ["facts-review"] });
+                          qc.invalidateQueries({ queryKey: ["facts"] });
+                        } catch (err) {
+                          toast.error(errorMessage(err));
+                        }
                       }}
                     >
                       Confirmer
@@ -604,10 +623,13 @@ export function MemoryOnboardingPage() {
         </div>
       )}
 
-      {tab === "onboarding" && onboardingQuery.isLoading && <Skeleton lines={4} />}
-      {tab === "onboarding" && onboardingQuery.isError && (
-        <EmptyState title="Impossible de charger le questionnaire." />
+      {tab === "onboarding" && (
+        <QueryErrorBanner
+          query={onboardingQuery}
+          fallback="Impossible de charger le questionnaire de profil."
+        />
       )}
+      {tab === "onboarding" && onboardingQuery.isLoading && <Skeleton lines={4} />}
       {tab === "onboarding" && onboardingQuery.data && (
         <div className="stack">
           <div className="card stack">

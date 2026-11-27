@@ -42,11 +42,12 @@ describe("jeton d'acces de l'interface", () => {
     expect(getAuthToken()).toBe("recent");
   });
 
-  it("migre un jeton localStorage existant vers sessionStorage", () => {
+  it("migre un jeton localStorage existant vers sessionStorage sans le laisser en localStorage", () => {
     window.localStorage.setItem(KEY, "historique");
     expect(getAuthToken()).toBe("historique");
     setAuthToken("historique");
     expect(window.sessionStorage.getItem(KEY)).toBe("historique");
+    expect(window.localStorage.getItem(KEY)).toBeNull();
   });
 
   it("ignore un jeton vide et efface les deux stockages", () => {

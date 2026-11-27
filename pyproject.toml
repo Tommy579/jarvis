@@ -33,7 +33,7 @@ jarvis-desktop = { workspace = true }
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-exclude = ["legacy", "web/node_modules", "web/dist", ".venv", "jarvis-windows"]
+exclude = ["web/node_modules", "web/dist", ".venv"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
@@ -44,3 +44,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["packages/shared", "packages/core", "packages/desktop", "."]
 testpaths = ["tests"]
+markers = [
+    "integration: test d'integration touchant le vrai systeme (processus, fichiers reels)",
+]

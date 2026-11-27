@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import signal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,7 +25,11 @@ class RunCliSubagentArgs(BaseModel):
     prompt: str = Field(
         min_length=1,
         max_length=12000,
-        description="Instruction complète et autonome transmise au sous-agent CLI.",
+        description=(
+            "Pour 'agy' et 'hermes' : objectif global ou général orienté résultat (le besoin, le contexte, les contraintes et "
+            "le résultat attendu avec workdir), sans dicter de suite de commandes shell (sed, cat), ni de numéros de lignes, "
+            "ni de pas-à-pas micro-managé — agy et hermes explorent, lisent, modifient et vérifient eux-mêmes en autonomie."
+        ),
     )
     workdir: str | None = Field(
         default=None,
@@ -123,6 +129,44 @@ def build_cli_subagent_command(
     return cmd, cwd
 
 
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name != "nt" and proc.pid:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+_MAX_STREAM_BYTES = 512_000
+
+
+async def _read_capped_stream(
+    stream: asyncio.StreamReader | None, max_bytes: int = _MAX_STREAM_BYTES
+) -> bytes:
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        if total < max_bytes:
+            remaining = max_bytes - total
+            chunks.append(chunk[:remaining])
+            total += min(len(chunk), remaining)
+    return b"".join(chunks)
+
+
 async def execute_cli_subagent(args: RunCliSubagentArgs) -> dict[str, Any]:
     """Exécute `agy` ou `hermes` en sous-processus non interactif et retourne sa sortie."""
     exe = shutil.which(args.agent)
@@ -147,14 +191,26 @@ async def execute_cli_subagent(args: RunCliSubagentArgs) -> dict[str, Any]:
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=(os.name != "nt"),
     )
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=float(args.timeout_s),
-        )
+        if getattr(proc, "stdout", None) is not None and getattr(proc, "stderr", None) is not None:
+            stdout_b, stderr_b, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_capped_stream(proc.stdout),
+                    _read_capped_stream(proc.stderr),
+                    proc.wait(),
+                ),
+                timeout=float(args.timeout_s),
+            )
+        else:
+            raw_out, raw_err = await asyncio.wait_for(
+                proc.communicate(), timeout=float(args.timeout_s)
+            )
+            stdout_b = (raw_out or b"")[:_MAX_STREAM_BYTES]
+            stderr_b = (raw_err or b"")[:_MAX_STREAM_BYTES]
     except (TimeoutError, asyncio.TimeoutError):
-        proc.kill()
+        _kill_process_group(proc)
         await proc.wait()
         return {
             "ok": False,
@@ -163,7 +219,7 @@ async def execute_cli_subagent(args: RunCliSubagentArgs) -> dict[str, Any]:
             "error": f"Dépassement du délai ({args.timeout_s:.0f}s) pour {args.agent}.",
         }
     except asyncio.CancelledError:
-        proc.kill()
+        _kill_process_group(proc)
         await proc.wait()
         raise
 
@@ -191,11 +247,17 @@ class CLIAgentToolkit:
                 description=(
                     "Lance un sous-agent CLI externe ('agy' ou 'hermes' avec "
                     "deepseek/deepseek-v4.1-flash-1017 sous OpenRouter par défaut, ou "
-                    "qwen3.5:2b en secours local léger) sur une tâche autonome et renvoie sa sortie."
+                    "qwen3.5:2b en secours local léger) et renvoie sa sortie. "
+                    "'agy' et 'hermes' sont des agents ingénieurs autonomes complets : confie-leur directement un objectif global "
+                    "avec workdir et laisse-les explorer, lire, modifier et vérifier seuls (ne pré-explore pas le code "
+                    "à leur place et ne leur dicte pas de commandes shell ni de micro-étapes)."
                 ),
                 handler=self.run_cli_subagent,
                 args_model=RunCliSubagentArgs,
-                risk=RiskLevel.REVERSIBLE_WRITE,
+                risk=RiskLevel.SENSITIVE,
+                returns_untrusted=True,
+                untrusted_source="cli_subagent",
+                pass_model=True,
             )
         )
 

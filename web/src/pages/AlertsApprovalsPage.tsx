@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { Icon } from "../components/Icon";
+import { QueryErrorBanner } from "../components/QueryErrorBanner";
 import { EmptyState, PageHeader, Segmented, Skeleton } from "../components/ui";
 import { useJarvisStore } from "../store/useJarvisStore";
 import { toast } from "../store/useToastStore";
@@ -22,6 +23,7 @@ const URGENCY_LABELS: Record<number, string> = {
 const ALERT_STATUS_LABELS: Record<string, string> = {
   sent: "Envoyée",
   acked: "Acquittée",
+  too_noisy: "Trop dérangeante",
   noisy: "Masquée",
   deferred: "Différée",
 };
@@ -131,8 +133,13 @@ export function AlertsApprovalsPage({
             </span>
           </div>
 
+          <QueryErrorBanner
+            query={approvalsQuery}
+            fallback="Impossible de charger les approbations en attente."
+            testId="approvals-error-banner"
+          />
           {approvalsQuery.isLoading && approvals.length === 0 && <Skeleton lines={3} />}
-          {approvals.length === 0 && !approvalsQuery.isLoading && (
+          {approvals.length === 0 && !approvalsQuery.isLoading && !approvalsQuery.isError && (
             <EmptyState title="Aucune action en attente.">
               Les outils de niveau 2 et 3 demandent votre accord avant de s'exécuter.
             </EmptyState>
@@ -238,8 +245,13 @@ export function AlertsApprovalsPage({
             </div>
           )}
 
+          <QueryErrorBanner
+            query={alertsQuery}
+            fallback="Impossible de charger le journal des alertes."
+            testId="alerts-error-banner"
+          />
           {alertsQuery.isLoading && alerts.length === 0 && <Skeleton lines={3} />}
-          {filteredAlerts.length === 0 && !alertsQuery.isLoading && (
+          {filteredAlerts.length === 0 && !alertsQuery.isLoading && !alertsQuery.isError && (
             <EmptyState title="Aucune alerte envoyée.">
               Les notifications urgentes filtrées par les règles d'attention apparaissent ici.
             </EmptyState>

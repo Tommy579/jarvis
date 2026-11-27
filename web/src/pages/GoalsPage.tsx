@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { GoalTrackerCard } from "../components/GoalTrackerCard";
 import { Icon } from "../components/Icon";
+import { QueryErrorBanner } from "../components/QueryErrorBanner";
 import { ConfirmButton, EmptyState, PageHeader, Skeleton } from "../components/ui";
 import { formatModelLabel } from "../lib/modelLabels";
 import { useJarvisStore } from "../store/useJarvisStore";
@@ -99,6 +100,17 @@ export function GoalsPage() {
         }
       />
 
+      <QueryErrorBanner
+        query={goalsQuery}
+        fallback="Impossible de charger les objectifs autonomes."
+        testId="goals-error-banner"
+      />
+      <QueryErrorBanner
+        query={modelsQuery}
+        fallback="Impossible de charger la liste des modèles disponibles."
+        testId="goal-models-error-banner"
+      />
+
       <form className="card goal-composer" onSubmit={handleLaunch}>
         <label htmlFor="goal-input" className="goal-composer__label">
           Nouvel objectif autonome
@@ -169,7 +181,7 @@ export function GoalsPage() {
         </div>
       )}
 
-      {!goalsQuery.isLoading && goals.length === 0 && (
+      {!goalsQuery.isLoading && !goalsQuery.isError && goals.length === 0 && (
         <EmptyState title="Aucun objectif en cours">
           Lance un objectif ci-dessus ou active le Mode Objectif dans l'accueil ou la conversation.
         </EmptyState>
