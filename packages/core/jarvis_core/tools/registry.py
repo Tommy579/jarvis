@@ -18,7 +18,7 @@ from ..security import wrap_untrusted_content
 from .approvals import ApprovalManager
 from .autonomy import AutonomyPolicy
 
-_UNTRUSTED_PATTERN = re.compile(r"<untrusted\b[^>]*>.*?</untrusted>", re.DOTALL | re.IGNORECASE)
+_UNTRUSTED_PATTERN = re.compile(r"<\s*untrusted\b[^>]*>?", re.IGNORECASE)
 
 _SENSITIVE_ARG_FRAGMENTS: tuple[str, ...] = (
     "password",
@@ -459,11 +459,16 @@ class ToolRegistry:
                     tool_usage = None
 
         # Si l'outil lit une source externe, encapsuler la sortie dans <untrusted>
+        # (sauf refus/erreur local ok=False qui ne contient aucune donnee externe).
         output_val = raw_out
-        if spec.returns_untrusted:
+        is_untrusted_out = False
+        if spec.returns_untrusted and not (
+            isinstance(raw_out, dict) and raw_out.get("ok") is False
+        ):
             source_label = spec.untrusted_source or spec.name
             text_repr = raw_out if isinstance(raw_out, str) else str(raw_out)
             output_val = wrap_untrusted_content(source_label, text_repr)
+            is_untrusted_out = True
 
         self._record_audit(
             tool_call=tool_call,
@@ -477,7 +482,7 @@ class ToolRegistry:
             name=tool_call.name,
             output=output_val,
             is_error=False,
-            is_untrusted=spec.returns_untrusted,
+            is_untrusted=is_untrusted_out,
             source=spec.untrusted_source or spec.name,
             usage=tool_usage,
         )

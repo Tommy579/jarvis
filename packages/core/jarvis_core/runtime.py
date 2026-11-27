@@ -140,9 +140,11 @@ class _TelegramSender:
                         for row in inline_keyboard
                     ]
                 )
+            safe_text = clean_message if len(clean_message) <= 4096 else clean_message[:4095] + "…"
             sent = await bot.send_message(
                 chat_id=self.gateway.allowed_chat_id,
-                text=clean_message,
+                text=safe_text,
+                parse_mode=None,
                 disable_notification=int(urgency) <= 1,
                 reply_markup=markup,
             )
@@ -156,6 +158,7 @@ class _TelegramSender:
                             chat_id=self.gateway.allowed_chat_id,
                             voice=BufferedInputFile(voice_bytes, filename="alerte.mp3"),
                             caption="Alerte vocale Jarvis",
+                            parse_mode=None,
                         )
                 except Exception:
                     pass

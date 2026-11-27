@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from ..memory.schema import MemoryDatabase
+from ..security import wrap_untrusted_content
 from .base import BaseIntegration
 
 
@@ -62,7 +63,12 @@ class WeatherTransportIntegration(BaseIntegration):
                     title = (item.findtext("title") or "").strip()
                     link = (item.findtext("link") or "").strip()
                     if title:
-                        headlines.append({"title": title, "link": link})
+                        headlines.append(
+                            {
+                                "title": wrap_untrusted_content("rss", title),
+                                "link": wrap_untrusted_content("rss", link) if link else "",
+                            }
+                        )
         return headlines[:limit]
 
     async def sync(self, db: MemoryDatabase) -> dict[str, Any]:

@@ -357,6 +357,7 @@ class GoalOrchestrator:
             "detail": ev.detail,
             "recent_tools": ev.recent_tools,
             "result_summary": ev.result_summary[:2500],
+            "had_untrusted_context": ev.had_untrusted_context,
         }
 
     def _build_orchestrator_registry(self) -> ToolRegistry:

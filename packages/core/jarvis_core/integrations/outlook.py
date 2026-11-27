@@ -46,8 +46,8 @@ class OutlookMailIntegration(MicrosoftOAuthIntegration):
         for msg in filtered:
             payload = {
                 "id": msg.get("id"),
-                "from": msg.get("from", ""),
-                "subject": msg.get("subject", ""),
+                "from": wrap_untrusted_content("outlook", str(msg.get("from", ""))),
+                "subject": wrap_untrusted_content("outlook", str(msg.get("subject", ""))),
                 "snippet": wrap_untrusted_content("outlook", str(msg.get("snippet", ""))),
             }
             self._pending_events.append(
