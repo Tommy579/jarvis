@@ -11,10 +11,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Tout ce que le lanceur et jarvis-core creent (journaux, base, wiki, sauvegardes)
+# contient des donnees personnelles ou le jeton d'acces : proprietaire seul.
+umask 077
+
 ENV_FILE="$ROOT_DIR/.env"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/jarvis"
 LOG_FILE="$STATE_DIR/launch.log"
 mkdir -p "$STATE_DIR"
+# Installations existantes : dossier et journaux crees avant ce durcissement en 755/644.
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+chmod 600 "$STATE_DIR"/*.log "$STATE_DIR"/*.log.1 2>/dev/null || true
+
+# Dossier de donnees (meme valeur par defaut que jarvis_core.cli._data_dir).
+DATA_DIR="${JARVIS_DATA_DIR:-}"
+if [ -z "$DATA_DIR" ] && [ -f "$ENV_FILE" ]; then
+    DATA_DIR="$(sed -n 's/^JARVIS_DATA_DIR=//p' "$ENV_FILE" | head -1 | tr -d '\r' | sed -E "s/^[\"']//; s/[\"']\$//")"
+fi
+DATA_DIR="${DATA_DIR:-$ROOT_DIR/jarvis-data}"
+DATA_DIR="${DATA_DIR/#\~/$HOME}"
+# chmod non recursif : un dossier 700 suffit a bloquer l'acces a tout son contenu.
+if [ -d "$DATA_DIR" ] && [ -O "$DATA_DIR" ] && [ "$DATA_DIR" != "$HOME" ]; then
+    chmod 700 "$DATA_DIR" 2>/dev/null || true
+fi
 
 # Rotation simple : au-dela de 5 Mo, le journal courant devient .1 (un seul archive).
 rotate_log() {
@@ -77,13 +96,19 @@ fi
 export JARVIS_API_TOKEN="$TOKEN"
 
 # --- Service central ------------------------------------------------------------
+# Verrou d'instance unique : deux clics rapproches ne doivent pas lancer deux uvicorn
+# concurrents sur la meme base. Le verrou est relache avant d'ouvrir la fenetre.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$STATE_DIR/launch.lock"
+    flock -w 30 9 || fail "Un autre lancement de JARVIS est deja en cours."
+fi
 if ! curl -fsS "${JARVIS_WEB_URL}/api/health" >/dev/null 2>&1; then
     if [ ! -f "$ROOT_DIR/web/dist/index.html" ]; then
         echo "ATTENTION: web/dist absent, l'interface sera vide. Compile avec 'make install'."
     fi
     rotate_log "$STATE_DIR/jarvis-core.log"
     nohup "$PYTHON_BIN" -m uvicorn jarvis_core.api.server:app --host 127.0.0.1 --port 8765 \
-        >"$STATE_DIR/jarvis-core.log" 2>&1 &
+        >"$STATE_DIR/jarvis-core.log" 2>&1 9>&- &
     for _ in {1..60}; do
         if curl -fsS "${JARVIS_WEB_URL}/api/health" >/dev/null 2>&1; then
             break
@@ -98,10 +123,17 @@ if ! curl -fsS "${JARVIS_WEB_URL}/api/health" >/dev/null 2>&1; then
 fi
 
 APP_URL="${JARVIS_WEB_URL}/?token=${TOKEN}"
+# Le descripteur du verrou ne doit pas etre herite par Chromium (qui vit longtemps).
+exec 9>&-
 
 if [[ "${1:-}" == "--backend-only" ]]; then
     echo "jarvis-core actif sur ${JARVIS_WEB_URL}"
-    echo "Interface : ${APP_URL}"
+    if [ -t 1 ]; then
+        echo "Interface : ${APP_URL}"
+    else
+        # Sortie redirigee vers le journal : ne jamais y ecrire le jeton.
+        echo "Interface : ${JARVIS_WEB_URL}/?token=<JARVIS_API_TOKEN de .env>"
+    fi
     exit 0
 fi
 
