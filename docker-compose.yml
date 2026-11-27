@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  jarvis:
+    build: .
+    container_name: jarvis_app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["python", "main.py"]
