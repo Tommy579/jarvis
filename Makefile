@@ -1,6 +1,6 @@
 # Makefile pour JARVIS 2.0 (Open Mind Interface)
 
-.PHONY: install install-full run dev-core dev-web test test-cov test-e2e test-browser lint typecheck format codegen-types release clean
+.PHONY: install install-full run dev-core dev-web test test-cov test-e2e test-browser lint typecheck security format codegen-types release clean
 
 ifeq ($(OS),Windows_NT)
 VENV_BIN := .venv\Scripts
@@ -74,6 +74,13 @@ lint:
 typecheck:
 	@echo "Verification mypy (perimetre progressif)..."
 	PYTHONPATH=packages/shared:packages/core:packages/desktop:. $(PYTHON) -m mypy
+
+security:
+	@echo "Analyse statique Python (bandit, moyenne et plus)..."
+	$(PYTHON) -m bandit -q -ll -r packages -x tests
+	@echo "Audit des dependances Python et frontend..."
+	$(PYTHON) -m pip_audit
+	cd web && npm audit --omit=dev --audit-level=high --package-lock-only
 
 format:
 	@echo "Formate le code Python (et applique les corrections sures de ruff)..."

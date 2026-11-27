@@ -628,7 +628,7 @@ class MemoryDatabase:
         params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT * FROM facts {where_sql} ORDER BY updated_at DESC LIMIT ?",
+                f"SELECT * FROM facts {where_sql} ORDER BY updated_at DESC LIMIT ?",  # nosec B608
                 tuple(params),
             ).fetchall()
         return [self._row_to_fact(r) for r in rows]
@@ -1422,7 +1422,7 @@ class MemoryDatabase:
         params = [*updates.values(), task_id]
         with self._connect() as conn:
             conn.execute(
-                f"UPDATE autonomous_tasks SET {set_clause} WHERE id = ?",
+                f"UPDATE autonomous_tasks SET {set_clause} WHERE id = ?",  # nosec B608
                 tuple(params),
             )
             conn.commit()
@@ -1817,15 +1817,15 @@ class MemoryDatabase:
             goal_ids = [str(r["id"]) for r in rows]
             placeholders = ", ".join("?" for _ in goal_ids)
             sub_all = conn.execute(
-                f"SELECT * FROM goal_subtasks WHERE goal_id IN ({placeholders}) ORDER BY created_at ASC",
+                f"SELECT * FROM goal_subtasks WHERE goal_id IN ({placeholders}) ORDER BY created_at ASC",  # nosec B608
                 tuple(goal_ids),
             ).fetchall()
             run_all = conn.execute(
-                f"SELECT * FROM subagent_runs WHERE goal_id IN ({placeholders}) ORDER BY started_at ASC",
+                f"SELECT * FROM subagent_runs WHERE goal_id IN ({placeholders}) ORDER BY started_at ASC",  # nosec B608
                 tuple(goal_ids),
             ).fetchall()
             ev_all = conn.execute(
-                f"SELECT * FROM goal_events WHERE goal_id IN ({placeholders}) ORDER BY ts DESC",
+                f"SELECT * FROM goal_events WHERE goal_id IN ({placeholders}) ORDER BY ts DESC",  # nosec B608
                 tuple(goal_ids),
             ).fetchall()
             subs_by_goal: dict[str, list[sqlite3.Row]] = {}

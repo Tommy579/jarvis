@@ -28,6 +28,8 @@ DEFAULT_THRESHOLD = 0.48
 MIN_ENROLL_SPEECH_SEC = 1.0
 WESPEAKER_REPO = "Wespeaker/wespeaker-voxceleb-resnet34-LM"
 WESPEAKER_FILENAME = "voxceleb_resnet34_LM.onnx"
+# Revision epinglee (commit du depot au 2024-05-06) : empeche un modele substitue cote amont.
+WESPEAKER_REVISION = "f0c48c298fd835726c27956a5d617bad7115627e"
 
 
 def _utc_now_iso() -> str:
@@ -205,10 +207,12 @@ class SpeakerEmbedder:
         embed_fn: Callable[[np.ndarray], np.ndarray] | None = None,
         repo_id: str = WESPEAKER_REPO,
         filename: str = WESPEAKER_FILENAME,
+        revision: str = WESPEAKER_REVISION,
     ) -> None:
         self._embed_fn = embed_fn
         self._repo_id = repo_id
         self._filename = filename
+        self._revision = revision
         self._session: Any = None
         self._lock = threading.Lock()
 
@@ -221,7 +225,7 @@ class SpeakerEmbedder:
             import onnxruntime as ort
             from huggingface_hub import hf_hub_download
 
-            model_path = hf_hub_download(self._repo_id, self._filename)
+            model_path = hf_hub_download(self._repo_id, self._filename, revision=self._revision)
             self._session = ort.InferenceSession(
                 model_path,
                 providers=["CPUExecutionProvider"],

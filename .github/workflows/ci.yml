@@ -110,3 +110,30 @@ jobs:
       - name: Journaux en cas d'echec
         if: failure()
         run: docker logs jarvis-ci || true
+
+  # Analyse statique et audit des dependances : barriere automatique contre les regressions
+  # de securite (les tests fonctionnels ne les voient pas).
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      - name: Installer les analyseurs et le workspace
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit pip-audit
+          pip install -e packages/shared -e packages/core -e packages/desktop
+      - name: SAST Python (bandit, severite moyenne et plus)
+        run: bandit -q -ll -r packages -x tests
+      - name: Audit des dependances Python
+        run: pip-audit
+      - name: Audit des dependances frontend
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high --package-lock-only
