@@ -14,15 +14,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
-_UNTRUSTED_TAG_RE = re.compile(r"</?\s*untrusted\b[^>]*>", re.IGNORECASE)
+_INVISIBLE_CHARS_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+_UNTRUSTED_TAG_RE = re.compile(r"<\s*/?\s*untrusted\b[^>]*>?", re.IGNORECASE)
 
 
 def wrap_untrusted_content(source: str, content: str) -> str:
     """Encadre tout contenu externe (mail, web, OCR ecran, audio) dans une balise <untrusted>."""
     safe_source = re.sub(r"[^a-zA-Z0-9_.\-:]", "_", source or "external")
+    cleaned = _INVISIBLE_CHARS_RE.sub("", str(content))
     sanitized = _UNTRUSTED_TAG_RE.sub(
         lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"),
-        str(content),
+        cleaned,
     )
     return f'<untrusted source="{safe_source}">\n{sanitized}\n</untrusted>'
 

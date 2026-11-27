@@ -18,7 +18,7 @@ from ..security import wrap_untrusted_content
 from .approvals import ApprovalManager
 from .autonomy import AutonomyPolicy
 
-_UNTRUSTED_PATTERN = re.compile(r"<untrusted\b[^>]*>.*?</untrusted>", re.DOTALL | re.IGNORECASE)
+_UNTRUSTED_PATTERN = re.compile(r"<\s*untrusted\b[^>]*>?", re.IGNORECASE)
 
 _SENSITIVE_ARG_FRAGMENTS: tuple[str, ...] = (
     "password",
